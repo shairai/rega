@@ -1,0 +1,50 @@
+[package]
+name = "snapquill"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+ab_glyph = "0.2.32"
+anyhow = "1.0.104"
+arboard = "3.7.0"
+base64 = "0.23.1"
+chrono = "0.4.45"
+dirs = "7.0.0"
+eframe = "0.37.0"
+enigo = "0.6.1"
+env_logger = "0.11.11"
+gif = "0.14.2"
+global-hotkey = "0.9.0"
+image = "0.25.10"
+imageproc = "0.27.0"
+log = "0.4.35"
+minimp4 = "0.1.2"
+openh264 = "0.9.9"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tiny-skia = "0.12.0"
+tray-icon = "0.26.1"
+unicode-bidi = "0.3.18"
+xcap = "0.9.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-vision = "0.3.2"
+raw-window-handle = "0.6"
+
+# Image processing and H.264 encoding are far too slow unoptimized.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot", "eframe"] }

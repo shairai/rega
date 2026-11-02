@@ -1,0 +1,1869 @@
+//! Application shell: library, capture flows, tray, global hotkeys, settings.
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
+
+use eframe::egui::{
+    self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2,
+    ViewportCommand,
+};
+use global_hotkey::hotkey::HotKey;
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use image::RgbaImage;
+
+use crate::capture;
+use crate::config::{APP_NAME, ImageFormat, Settings, VideoFormat};
+use crate::editor::{Editor, EditorAction};
+use crate::theme::{self, ItemStyle, icon};
+use crate::library::{self, Item, ItemKind};
+use crate::ocr;
+use crate::overlay::{Outcome, Overlay, Purpose};
+use crate::platform;
+use crate::recorder::{RecordConfig, Recorder};
+use crate::scroll::{self, ScrollMsg};
+use crate::shortcuts::{self, Action};
+
+#[derive(Clone, Copy, Debug)]
+pub enum AppEvent {
+    Capture(Purpose),
+    FullScreen,
+    ShowMain,
+    NewImage,
+    OpenImage,
+    Quit,
+}
+
+enum Mode {
+    Home,
+    Editor(Box<Editor>),
+}
+
+enum Activity {
+    Idle,
+    /// Window hidden, waiting for it to disappear (and for the user's delay).
+    Pending { purpose: Purpose, full: bool, at: Instant },
+    Selecting(Box<Overlay>),
+    Recording(Recorder),
+    Finishing(Recorder),
+    Scrolling(Receiver<ScrollMsg>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Win {
+    Normal,
+    Hidden,
+    Overlay,
+    Bar,
+}
+
+const BAR_SIZE: Vec2 = Vec2::new(340.0, 52.0);
+
+pub struct SnapquillApp {
+    settings: Settings,
+    mode: Mode,
+    activity: Activity,
+    win: Win,
+    hidden_by_user: bool,
+    normal_outer: Option<Rect>,
+    normal_inner: Option<Rect>,
+
+    library: Vec<Item>,
+    library_scanned: Instant,
+    filter: String,
+    lib_filter: LibFilter,
+    thumbs: HashMap<PathBuf, (SystemTime, TextureHandle)>,
+    thumbs_requested: HashSet<(PathBuf, SystemTime)>,
+    thumb_jobs: Sender<(PathBuf, SystemTime)>,
+    thumb_results: Receiver<(PathBuf, SystemTime, egui::ColorImage)>,
+
+    events: Receiver<AppEvent>,
+    hotkeys: Option<GlobalHotKeyManager>,
+    hotkey_map: Arc<Mutex<HashMap<u32, AppEvent>>>,
+    registered: Vec<HotKey>,
+    recording_shortcut: Option<Action>,
+    menu_items: Vec<(Action, tray_icon::menu::MenuItem)>,
+    tray: Option<tray_icon::TrayIcon>,
+    _menu_bar: Option<tray_icon::menu::Menu>,
+
+    toast: Option<(String, Instant)>,
+    ocr_rx: Option<Receiver<anyhow::Result<String>>>,
+    ocr_text: Option<String>,
+    show_settings: bool,
+    /// Screen Recording permission is missing; captures would only show the wallpaper.
+    needs_permission: bool,
+    hover_tracking: bool,
+    new_canvas: NewCanvas,
+    show_new_dialog: bool,
+    settings_tab: SettingsTab,
+}
+
+impl SnapquillApp {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut app = Self::build(&cc.egui_ctx, Settings::load(), true);
+        // Dev builds would register a throwaway target/ binary.
+        if !cfg!(debug_assertions) {
+            platform::set_launch_at_login(app.settings.launch_at_login);
+        }
+        if !platform::has_screen_permission() {
+            app.needs_permission = true;
+            platform::request_screen_permission();
+        }
+        let failed = app.apply_hotkeys();
+        if !failed.is_empty() && app.toast.is_none() {
+            app.toast(format!("Shortcut unavailable: {}", failed.join(", ")));
+        }
+        app
+    }
+
+    /// Snapquill without menus, tray, global hotkeys or permission prompts,
+    /// showing `library` — used to render the README screenshots.
+    #[cfg(test)]
+    pub fn demo(ctx: &egui::Context, library: PathBuf) -> Self {
+        let settings = Settings { save_dir: library, ..Settings::default() };
+        Self::build(ctx, settings, false)
+    }
+
+    fn build(ctx: &egui::Context, settings: Settings, system: bool) -> Self {
+        let ctx = ctx.clone();
+        theme::install(&ctx);
+        let _ = std::fs::create_dir_all(&settings.save_dir);
+
+        let (event_tx, events) = mpsc::channel();
+        let (hotkeys, hotkey_map, hotkey_error, tray, menu_bar, menu_items) = if system {
+            let (hotkeys, map, err) = setup_hotkeys(&ctx, event_tx.clone());
+            let (tray, menu_bar, items) = setup_menus(&ctx, event_tx);
+            (hotkeys, map, err, tray, Some(menu_bar), items)
+        } else {
+            (None, HotkeyMap::default(), None, None, None, Vec::new())
+        };
+
+        let (thumb_jobs, thumb_results) = spawn_thumbnailer(ctx.clone());
+        let library = library::scan(&settings.save_dir);
+
+        Self {
+            settings,
+            mode: Mode::Home,
+            activity: Activity::Idle,
+            win: Win::Normal,
+            hidden_by_user: false,
+            normal_outer: None,
+            normal_inner: None,
+            library,
+            library_scanned: Instant::now(),
+            filter: String::new(),
+            lib_filter: LibFilter::All,
+            thumbs: HashMap::new(),
+            thumbs_requested: HashSet::new(),
+            thumb_jobs,
+            thumb_results,
+            events,
+            hotkeys,
+            hotkey_map,
+            registered: Vec::new(),
+            recording_shortcut: None,
+            menu_items,
+            tray,
+            _menu_bar: menu_bar,
+            toast: hotkey_error.map(|e| (e, Instant::now())),
+            ocr_rx: None,
+            ocr_text: None,
+            show_settings: false,
+            needs_permission: false,
+            hover_tracking: false,
+            new_canvas: NewCanvas::default(),
+            show_new_dialog: false,
+            settings_tab: SettingsTab::General,
+        }
+    }
+
+    /// (Re)register every global shortcut from the settings. Returns the
+    /// labels of shortcuts the OS refused.
+    fn apply_hotkeys(&mut self) -> Vec<String> {
+        self.suspend_hotkeys();
+        let Some(manager) = &self.hotkeys else { return Vec::new() };
+        let mut map = HashMap::new();
+        let mut failed = Vec::new();
+        for action in Action::ALL {
+            let Some(hk) = self.settings.shortcuts.hotkey(action) else { continue };
+            match manager.register(hk) {
+                Ok(()) => {
+                    map.insert(hk.id(), action.event());
+                    self.registered.push(hk);
+                }
+                Err(_) => failed.push(format!("{} ({})", action.label(), shortcuts::display(hk))),
+            }
+        }
+        if let Ok(mut m) = self.hotkey_map.lock() {
+            *m = map;
+        }
+        for (action, item) in &self.menu_items {
+            item.set_text(menu_label(*action, &self.settings.shortcuts));
+        }
+        failed
+    }
+
+    /// Release all global shortcuts (while the user records a new one).
+    fn suspend_hotkeys(&mut self) {
+        if let Some(manager) = &self.hotkeys {
+            let _ = manager.unregister_all(&self.registered);
+        }
+        self.registered.clear();
+        if let Ok(mut m) = self.hotkey_map.lock() {
+            m.clear();
+        }
+    }
+
+    /// Display form of an action's shortcut, e.g. `⌃⌥C`.
+    fn keys(&self, action: Action) -> String {
+        self.settings.shortcuts.display(action)
+    }
+
+    fn toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), Instant::now()));
+    }
+
+    fn refresh_library(&mut self) {
+        self.library = library::scan(&self.settings.save_dir);
+        self.library_scanned = Instant::now();
+    }
+
+    fn set_tray_title(&self, title: Option<&str>) {
+        if let Some(tray) = &self.tray {
+            tray.set_title(title);
+        }
+    }
+
+    // ---------- window states ----------
+
+    fn hide_window(&mut self, ctx: &egui::Context) {
+        if self.win == Win::Normal {
+            self.normal_outer = ctx.input(|i| i.viewport().outer_rect);
+            self.normal_inner = ctx.input(|i| i.viewport().inner_rect);
+        }
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        self.win = Win::Hidden;
+    }
+
+    fn show_normal(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        platform::set_overlay_level(frame, false);
+        if self.win != Win::Normal {
+            ctx.send_viewport_cmd(ViewportCommand::ContentProtected(false));
+            ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
+            ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
+            let size = self.normal_inner.map(|r| r.size()).unwrap_or(Vec2::new(1360.0, 840.0));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+            if let Some(outer) = self.normal_outer {
+                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min));
+            }
+        }
+        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        self.win = Win::Normal;
+        self.hidden_by_user = false;
+    }
+
+    /// After a flow that produced nothing to show, go back to where the user was.
+    fn return_to_rest(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if self.hidden_by_user {
+            platform::set_overlay_level(frame, false);
+            self.hide_window(ctx);
+            self.hidden_by_user = true;
+        } else {
+            self.show_normal(ctx, frame);
+        }
+    }
+
+    fn show_overlay(&mut self, ctx: &egui::Context, frame: &eframe::Frame, origin: (i32, i32), size: (u32, u32)) {
+        ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
+        ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
+        // Size before position: macOS resizes around the bottom-left corner.
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(size.0 as f32, size.1 as f32)));
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(Pos2::new(origin.0 as f32, origin.1 as f32)));
+        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        platform::set_overlay_level(frame, true);
+        platform::set_window_frame(frame, origin.0 as f32, origin.1 as f32, size.0 as f32, size.1 as f32);
+        self.win = Win::Overlay;
+    }
+
+    fn show_recording_bar(&mut self, ctx: &egui::Context, frame: &eframe::Frame, snap_origin: (i32, i32), monitor: (u32, u32), region: Rect) {
+        let (mw, mh) = (monitor.0 as f32, monitor.1 as f32);
+        let gap = 12.0;
+        let y = if region.max.y + gap + BAR_SIZE.y <= mh {
+            region.max.y + gap
+        } else if region.min.y - gap - BAR_SIZE.y >= 0.0 {
+            region.min.y - gap - BAR_SIZE.y
+        } else {
+            mh - BAR_SIZE.y - 40.0
+        };
+        let x = (region.center().x - BAR_SIZE.x / 2.0).clamp(0.0, (mw - BAR_SIZE.x).max(0.0));
+        let pos = Pos2::new(snap_origin.0 as f32 + x, snap_origin.1 as f32 + y);
+        ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(BAR_SIZE));
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+        // Keep the bar itself out of the recording.
+        ctx.send_viewport_cmd(ViewportCommand::ContentProtected(true));
+        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        platform::set_overlay_level(frame, true);
+        self.win = Win::Bar;
+    }
+
+    // ---------- capture flows ----------
+
+    fn handle_event(&mut self, ev: AppEvent, ctx: &egui::Context, frame: &eframe::Frame) {
+        match ev {
+            AppEvent::Capture(p) => self.start_capture(ctx, p, false),
+            AppEvent::FullScreen => self.start_capture(ctx, Purpose::Image, true),
+            AppEvent::ShowMain => self.show_normal(ctx, frame),
+            AppEvent::NewImage => {
+                self.show_normal(ctx, frame);
+                self.show_new_dialog = true;
+            }
+            AppEvent::OpenImage => {
+                self.show_normal(ctx, frame);
+                self.import_from_dialog();
+            }
+            AppEvent::Quit => {
+                self.autosave_editor();
+                if let Activity::Recording(rec) = &self.activity {
+                    rec.stop();
+                }
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+                std::process::exit(0);
+            }
+        }
+    }
+
+    fn start_capture(&mut self, ctx: &egui::Context, purpose: Purpose, full: bool) {
+        match &self.activity {
+            Activity::Idle => {}
+            Activity::Recording(_) if purpose == Purpose::Video => {
+                self.stop_recording(ctx);
+                return;
+            }
+            _ => return,
+        }
+        if !platform::has_screen_permission() {
+            // Capturing now would only produce an empty desktop.
+            self.needs_permission = true;
+            platform::request_screen_permission();
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+            self.win = Win::Normal;
+            self.hidden_by_user = false;
+            self.toast("Snapquill needs Screen Recording permission to capture");
+            return;
+        }
+        if let Mode::Editor(ed) = &mut self.mode {
+            ed.commit_pending();
+        }
+        let was_hidden = self.win == Win::Hidden;
+        self.hide_window(ctx);
+        self.hidden_by_user = was_hidden || self.hidden_by_user;
+        let delay = Duration::from_secs(self.settings.delay_secs as u64).max(Duration::from_millis(350));
+        self.activity = Activity::Pending {
+            purpose,
+            full,
+            at: Instant::now() + delay,
+        };
+        ctx.request_repaint();
+    }
+
+    fn advance_activity(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        match &mut self.activity {
+            Activity::Pending { purpose, full, at } => {
+                let (purpose, full, at) = (*purpose, *full, *at);
+                let now = Instant::now();
+                if now < at {
+                    let left = at - now;
+                    if self.settings.delay_secs > 0 {
+                        let secs = left.as_secs_f32().ceil() as u32;
+                        self.set_tray_title(Some(&secs.to_string()));
+                    }
+                    ctx.request_repaint_after(left.min(Duration::from_millis(100)));
+                    return;
+                }
+                self.set_tray_title(None);
+                match capture::snapshot_at_cursor() {
+                    Err(e) => {
+                        self.activity = Activity::Idle;
+                        self.show_normal(ctx, frame);
+                        self.toast(format!("Capture failed: {e:#}"));
+                    }
+                    Ok(snap) if full => {
+                        self.activity = Activity::Idle;
+                        self.finish_image(ctx, frame, snap.image);
+                    }
+                    Ok(snap) => {
+                        let (origin, size) = (snap.origin, snap.size);
+                        self.activity = Activity::Selecting(Box::new(Overlay::new(ctx, snap, purpose)));
+                        self.show_overlay(ctx, frame, origin, size);
+                    }
+                }
+            }
+            Activity::Recording(rec) => {
+                let secs = rec.elapsed().as_secs();
+                let title = format!("● {}:{:02}", secs / 60, secs % 60);
+                self.set_tray_title(Some(&title));
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+            Activity::Finishing(rec) => match rec.poll_finished() {
+                None => ctx.request_repaint_after(Duration::from_millis(100)),
+                Some(result) => {
+                    self.activity = Activity::Idle;
+                    self.set_tray_title(None);
+                    match result {
+                        Ok(path) => {
+                            self.refresh_library();
+                            self.toast(format!("Video saved: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                        }
+                        Err(e) => self.toast(format!("{e:#}")),
+                    }
+                }
+            },
+            Activity::Scrolling(rx) => match rx.try_recv() {
+                Ok(ScrollMsg::Progress(msg)) => {
+                    log::debug!("{msg}");
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                }
+                Ok(ScrollMsg::Done(result)) => {
+                    self.activity = Activity::Idle;
+                    match result {
+                        Ok(img) => self.finish_image(ctx, frame, img),
+                        Err(e) => {
+                            self.show_normal(ctx, frame);
+                            self.toast(format!("Scrolling capture failed: {e:#}"));
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
+                Err(TryRecvError::Disconnected) => {
+                    self.activity = Activity::Idle;
+                    self.show_normal(ctx, frame);
+                }
+            },
+            Activity::Idle | Activity::Selecting(_) => {}
+        }
+    }
+
+    fn on_selection(&mut self, ctx: &egui::Context, frame: &eframe::Frame, overlay: Box<Overlay>, rect: Rect) {
+        let snap = &overlay.snap;
+        match overlay.purpose {
+            Purpose::Image => {
+                let img = snap.crop(rect.min.x, rect.min.y, rect.width(), rect.height());
+                self.finish_image(ctx, frame, img);
+            }
+            Purpose::Text => {
+                let img = snap.crop(rect.min.x, rect.min.y, rect.width(), rect.height());
+                self.show_normal(ctx, frame);
+                self.start_ocr(ctx, img);
+            }
+            Purpose::Video => {
+                let region = (
+                    rect.min.x.max(0.0) as u32,
+                    rect.min.y.max(0.0) as u32,
+                    (rect.width() as u32).max(16),
+                    (rect.height() as u32).max(16),
+                );
+                let region = (
+                    region.0,
+                    region.1,
+                    region.2.min(snap.size.0 - region.0),
+                    region.3.min(snap.size.1 - region.1),
+                );
+                let fmt = self.settings.video_format;
+                let cfg = RecordConfig {
+                    monitor_origin: snap.origin,
+                    region,
+                    fps: self.settings.video_fps,
+                    format: fmt,
+                    max_width: self.settings.video_max_width,
+                    highlight_cursor: self.settings.highlight_cursor,
+                    out_path: library::new_capture_path(&self.settings.save_dir, fmt.ext()),
+                };
+                match Recorder::start(cfg) {
+                    Ok(rec) => {
+                        self.activity = Activity::Recording(rec);
+                        self.show_recording_bar(ctx, frame, snap.origin, snap.size, rect);
+                    }
+                    Err(e) => {
+                        self.show_normal(ctx, frame);
+                        self.toast(format!("Recording failed: {e:#}"));
+                    }
+                }
+            }
+            Purpose::Scroll => {
+                platform::set_overlay_level(frame, false);
+                self.hide_window(ctx);
+                let origin = snap.origin;
+                let region = (
+                    rect.min.x.max(0.0) as u32,
+                    rect.min.y.max(0.0) as u32,
+                    rect.width().max(16.0) as u32,
+                    rect.height().max(16.0) as u32,
+                );
+                let (tx, rx) = mpsc::channel();
+                let repaint = ctx.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(350));
+                    let result = scroll::run(origin, region, &tx);
+                    let _ = tx.send(ScrollMsg::Done(result));
+                    repaint.request_repaint();
+                });
+                self.activity = Activity::Scrolling(rx);
+            }
+        }
+    }
+
+    fn stop_recording(&mut self, ctx: &egui::Context) {
+        if let Activity::Recording(rec) = std::mem::replace(&mut self.activity, Activity::Idle) {
+            rec.stop();
+            self.activity = Activity::Finishing(rec);
+            self.toast("Saving video…");
+            ctx.request_repaint();
+        }
+    }
+
+    /// A new image capture: save it to the library, copy it, open the editor.
+    fn finish_image(&mut self, ctx: &egui::Context, frame: &eframe::Frame, img: RgbaImage) {
+        let ext = self.settings.image_format.ext();
+        let path = library::new_capture_path(&self.settings.save_dir, ext);
+        if self.settings.copy_after_capture
+            && let Err(e) = platform::copy_image(&img) {
+                log::warn!("clipboard: {e}");
+            }
+        let mut ed = Editor::new(path, img, None, false);
+        if let Err(e) = ed.save() {
+            self.show_normal(ctx, frame);
+            self.toast(format!("Could not save capture: {e:#}"));
+            return;
+        }
+        self.refresh_library();
+        if self.settings.open_editor_after_capture {
+            self.autosave_editor();
+            self.mode = Mode::Editor(Box::new(ed));
+            self.show_normal(ctx, frame);
+        } else {
+            self.return_to_rest(ctx, frame);
+        }
+        let copied = if self.settings.copy_after_capture { " and copied" } else { "" };
+        self.toast(format!("Captured{copied}"));
+    }
+
+    fn start_ocr(&mut self, ctx: &egui::Context, img: RgbaImage) {
+        let (tx, rx) = mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(ocr::recognize(&img));
+            repaint.request_repaint();
+        });
+        self.ocr_rx = Some(rx);
+        self.toast("Recognizing text…");
+    }
+
+    fn autosave_editor(&mut self) {
+        if let Mode::Editor(ed) = &mut self.mode
+            && ed.is_dirty()
+                && let Err(e) = ed.save() {
+                    log::warn!("autosave failed: {e}");
+                }
+    }
+
+    fn open_item(&mut self, item: &Item) {
+        match item.kind {
+            ItemKind::Video => platform::open_path(&item.path),
+            ItemKind::Image => match Editor::open(item.path.clone()) {
+                Ok(ed) => {
+                    self.autosave_editor();
+                    self.mode = Mode::Editor(Box::new(ed));
+                }
+                Err(e) => self.toast(format!("{e:#}")),
+            },
+        }
+    }
+
+    fn import_image(&mut self, img: RgbaImage) {
+        let path = library::new_capture_path(&self.settings.save_dir, self.settings.image_format.ext());
+        let mut ed = Editor::new(path, img, None, false);
+        match ed.save() {
+            Ok(()) => {
+                self.autosave_editor();
+                self.mode = Mode::Editor(Box::new(ed));
+                self.refresh_library();
+            }
+            Err(e) => self.toast(format!("Import failed: {e:#}")),
+        }
+    }
+
+    /// Start a blank canvas in the editor (saved to the library right away).
+    fn create_blank(&mut self) {
+        let NewCanvas { width, height, background } = self.new_canvas;
+        let img = RgbaImage::from_pixel(width.max(1), height.max(1), image::Rgba(background.rgba()));
+        // A transparent canvas must stay PNG even if the default format is JPEG.
+        let ext = if background == Background::Transparent { "png" } else { self.settings.image_format.ext() };
+        let path = library::new_capture_path(&self.settings.save_dir, ext);
+        let mut ed = Editor::new(path, img, None, false);
+        match ed.save() {
+            Ok(()) => {
+                self.autosave_editor();
+                self.mode = Mode::Editor(Box::new(ed));
+                self.refresh_library();
+                self.toast("New canvas — press ⌘V to paste an image onto it");
+            }
+            Err(e) => self.toast(format!("Couldn't create the canvas: {e:#}")),
+        }
+    }
+
+    /// ⌘N everywhere (the File menu covers macOS), ⌘V on the welcome screen.
+    fn home_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
+            self.show_new_dialog = true;
+        }
+        if matches!(self.mode, Mode::Home) && ctx.memory(|m| m.focused().is_none()) {
+            let pasted = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::PasteImage(img) => Some(platform::color_image_to_rgba(img)),
+                    _ => None,
+                })
+            });
+            if let Some(img) = pasted {
+                self.import_image(img);
+            } else if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))) {
+                self.import_from_clipboard();
+            }
+        }
+    }
+
+    /// Size and background picker; returns true when "Create" was pressed.
+    fn new_canvas_form(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut create = false;
+        ui.set_width(260.0);
+        theme::section(ui, "Size");
+        let nc = &mut self.new_canvas;
+        for (w, h, label) in [
+            (1280, 800, "Laptop · 1280 × 800"),
+            (1920, 1080, "Full HD · 1920 × 1080"),
+            (1080, 1080, "Square · 1080 × 1080"),
+            (800, 600, "Small · 800 × 600"),
+        ] {
+            if ui.selectable_label(nc.width == w && nc.height == h, label).clicked() {
+                nc.width = w;
+                nc.height = h;
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(&mut nc.width).range(16..=8000).suffix(" px"));
+            ui.label("×");
+            ui.add(egui::DragValue::new(&mut nc.height).range(16..=8000).suffix(" px"));
+        });
+        theme::section(ui, "Background");
+        theme::segmented(
+            ui,
+            &mut nc.background,
+            &[(Background::White, "White"), (Background::Transparent, "Transparent"), (Background::Dark, "Dark")],
+        );
+        ui.add_space(10.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if theme::primary_button(ui, Some(icon::NEW), "Create").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                create = true;
+            }
+        });
+        create
+    }
+
+    /// The New form as a dropdown under a button.
+    fn new_canvas_popup(&mut self, anchor: &egui::Response) {
+        let mut create = false;
+        egui::Popup::menu(anchor).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            if self.new_canvas_form(ui) {
+                create = true;
+                ui.close();
+            }
+        });
+        if create {
+            self.create_blank();
+        }
+    }
+
+    /// The New form as a centered dialog (⌘N).
+    fn new_canvas_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_new_dialog {
+            return;
+        }
+        let mut create = false;
+        let modal = egui::Modal::new(egui::Id::unique("new-canvas")).show(ctx, |ui| {
+            ui.label(egui::RichText::new("New image").font(theme::bold(17.0)).color(theme::TEXT));
+            ui.add_space(4.0);
+            create = self.new_canvas_form(ui);
+        });
+        if create {
+            self.show_new_dialog = false;
+            self.create_blank();
+        } else if modal.should_close() {
+            self.show_new_dialog = false;
+        }
+    }
+
+    // ---------- UI ----------
+
+    /// The main window: top bar, canvas + tools, and the library tray along the bottom.
+    fn workspace_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let mut actions = Vec::new();
+
+        egui::Panel::top("topbar")
+            .frame(theme::panel_frame(theme::SURFACE, egui::Margin { left: 16, right: 14, top: 8, bottom: 8 }))
+            .show(ui, |ui| {
+                theme::toolbar_row(ui, |ui| {
+                    theme::toolbar_brand(ui, APP_NAME);
+                    ui.add_space(18.0);
+
+                    theme::toolbar_group(ui, |ui| {
+                        for (glyph, label, action, purpose, full) in [
+                            (icon::REGION, "Capture", Action::Image, Purpose::Image, false),
+                            (icon::FULLSCREEN, "Screen", Action::FullScreen, Purpose::Image, true),
+                            (icon::VIDEO, "Video", Action::Video, Purpose::Video, false),
+                            (icon::SCROLL, "Scrolling", Action::Scroll, Purpose::Scroll, false),
+                            (icon::OCR, "Text", Action::Text, Purpose::Text, false),
+                        ] {
+                            let style = if action == Action::Image { ItemStyle::Primary } else { ItemStyle::Normal };
+                            let tip = format!("{}   {}", action.label(), self.keys(action));
+                            if theme::toolbar_item(ui, glyph, label, style, true).on_hover_text(tip).clicked() {
+                                self.start_capture(&ctx, purpose, full);
+                            }
+                        }
+                        let new = theme::toolbar_item(ui, icon::NEW, "New", ItemStyle::Normal, true)
+                            .on_hover_text("Start from a blank canvas, then paste images onto it");
+                        self.new_canvas_popup(&new);
+                        theme::toolbar_divider(ui);
+                        let delay_label = match self.settings.delay_secs {
+                            0 => "No delay".to_owned(),
+                            s => format!("{s}s delay"),
+                        };
+                        let delay = theme::toolbar_item(ui, icon::TIMER, &delay_label, ItemStyle::Normal, true)
+                            .on_hover_text("Wait before capturing");
+                        egui::Popup::menu(&delay).show(|ui| {
+                            ui.set_min_width(150.0);
+                            for (secs, label) in [(0, "No delay"), (3, "3 seconds"), (5, "5 seconds"), (10, "10 seconds")] {
+                                if ui.selectable_label(self.settings.delay_secs == secs, label).clicked() {
+                                    self.settings.delay_secs = secs;
+                                    self.settings.save();
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+
+                    // Right-align the editor actions + settings using last frame's width.
+                    let width_id = egui::Id::unique("topbar-right-width");
+                    let right_w = ui.ctx().data(|d| d.get_temp::<f32>(width_id)).unwrap_or(0.0);
+                    ui.add_space((ui.available_width() - right_w).max(12.0));
+                    let right = ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), theme::GROUP_HEIGHT),
+                        egui::Layout::left_to_right(egui::Align::Min),
+                        |ui| {
+                            if let Mode::Editor(ed) = &mut self.mode {
+                                actions.push(ed.top_actions(ui));
+                                ui.add_space(6.0);
+                            }
+                            theme::toolbar_group(ui, |ui| {
+                                if theme::toolbar_item(ui, icon::SETTINGS, "Settings", ItemStyle::Normal, true).clicked() {
+                                    self.show_settings = !self.show_settings;
+                                }
+                            });
+                            // Width of what was actually laid out (not the space offered).
+                            ui.min_rect().width()
+                        },
+                    );
+                    let w = right.inner;
+                    if (w - right_w).abs() > 0.5 {
+                        ui.ctx().data_mut(|d| d.insert_temp(width_id, w));
+                        ui.ctx().request_repaint();
+                    }
+                });
+            });
+
+        if self.needs_permission {
+            egui::Panel::top("permission_banner")
+                .frame(theme::panel_frame(Color32::from_rgb(52, 30, 38), egui::Margin::symmetric(16, 10)))
+                .show(ui, |ui| self.permission_banner(ui));
+        }
+
+        egui::Panel::bottom("library_tray")
+            .resizable(false)
+            .exact_size(168.0)
+            .frame(theme::panel_frame(theme::SURFACE, egui::Margin { left: 16, right: 16, top: 10, bottom: 12 }))
+            .show(ui, |ui| self.tray_ui(ui));
+
+        match &mut self.mode {
+            Mode::Editor(ed) => {
+                egui::Panel::right("tools")
+                    .resizable(false)
+                    .exact_size(256.0)
+                    .frame(theme::panel_frame(theme::SURFACE, egui::Margin::same(18)))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| ed.tools_panel(ui));
+                    });
+                egui::Panel::bottom("status")
+                    .frame(theme::panel_frame(theme::BG, egui::Margin::symmetric(12, 4)))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ed.status_bar(ui);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let (w, h) = ed.size();
+                                ui.label(egui::RichText::new(format!("{w} × {h}")).color(theme::TEXT_FAINT));
+                                ui.label(egui::RichText::new(ed.file_name()).color(theme::TEXT_MUTED));
+                            });
+                        });
+                    });
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(theme::BG))
+                    .show(ui, |ui| ed.canvas(ui));
+                actions.push(ed.end_frame(&ctx));
+            }
+            Mode::Home => {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(theme::BG))
+                    .show(ui, |ui| self.welcome_ui(ui));
+            }
+        }
+
+        for action in actions {
+            match action {
+                EditorAction::None => {}
+                EditorAction::Toast(msg) => {
+                    self.refresh_library();
+                    self.toast(msg);
+                }
+                EditorAction::Ocr(img) => self.start_ocr(&ctx, img),
+            }
+        }
+    }
+
+    fn permission_banner(&mut self, ui: &mut egui::Ui) {
+        // Buttons first (right-aligned) so the text wraps in the space left over.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if theme::secondary_button(ui, None, "Restart Snapquill").on_hover_text("Needed after granting access").clicked() {
+                self.autosave_editor();
+                platform::relaunch();
+            }
+            if theme::primary_button(ui, Some(icon::SETTINGS), "Open Settings").clicked() {
+                platform::open_screen_recording_settings();
+            }
+            ui.add_space(16.0);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(icon::INFO).font(theme::icon_font(22.0)).color(theme::CORAL));
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Screen Recording permission needed")
+                            .font(theme::medium(14.0))
+                            .color(theme::TEXT),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(
+                                "Without it, macOS only shows Snapquill the empty desktop. \
+                                 Switch on Snapquill in Screen Recording, then restart Snapquill.",
+                            )
+                            .color(theme::TEXT_MUTED),
+                        )
+                        .wrap(),
+                    );
+                });
+            });
+        });
+    }
+
+    /// Empty state shown when no capture is open.
+    fn welcome_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let avail = ui.available_rect_before_wrap();
+        let painter = ui.painter_at(avail);
+        // Soft brand glow behind the card.
+        let glow = Rect::from_center_size(avail.center() - Vec2::new(0.0, 20.0), Vec2::new(620.0, 300.0));
+        theme::gradient_rect(&painter, glow, 150, Color32::from_white_alpha(14));
+
+        let card_w = 600.0;
+        let card = Rect::from_center_size(avail.center(), Vec2::new(card_w, 330.0));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
+            ui.vertical_centered(|ui| {
+                theme::logo(ui, 56.0);
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("Capture anything").font(theme::bold(28.0)).color(theme::TEXT));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Press {} anywhere, or choose a mode below. Your captures land in the library tray.",
+                        self.keys(Action::Image)
+                    ))
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.add_space(22.0);
+                let tiles = [
+                    (icon::REGION, "Region", self.keys(Action::Image), Purpose::Image, false),
+                    (icon::FULLSCREEN, "Full screen", self.keys(Action::FullScreen), Purpose::Image, true),
+                    (icon::VIDEO, "Video", self.keys(Action::Video), Purpose::Video, false),
+                    (icon::SCROLL, "Scrolling", self.keys(Action::Scroll), Purpose::Scroll, false),
+                    (icon::OCR, "Grab text", self.keys(Action::Text), Purpose::Text, false),
+                ];
+                let tile = Vec2::new(104.0, 104.0);
+                let gap = 12.0;
+                let row_w = tile.x * tiles.len() as f32 + gap * (tiles.len() - 1) as f32;
+                let (row, _) = ui.allocate_exact_size(Vec2::new(row_w, tile.y), Sense::hover());
+                for (n, (glyph, label, keys, purpose, full)) in tiles.into_iter().enumerate() {
+                    let r = Rect::from_min_size(row.min + Vec2::new(n as f32 * (tile.x + gap), 0.0), tile);
+                    if mode_tile(ui, r, glyph, label, &keys).clicked() {
+                        self.start_capture(&ctx, purpose, full);
+                    }
+                }
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    ui.add_space((card_w - 470.0) / 2.0);
+                    let new = theme::ghost_button(ui, Some(icon::NEW), "New blank image");
+                    self.new_canvas_popup(&new);
+                    if theme::ghost_button(ui, Some(icon::IMPORT), "Open image…").clicked() {
+                        self.import_from_dialog();
+                    }
+                    if theme::ghost_button(ui, Some(icon::PASTE), "Paste").clicked() {
+                        self.import_from_clipboard();
+                    }
+                });
+            });
+        });
+    }
+
+    /// Library filmstrip along the bottom of the window.
+    fn tray_ui(&mut self, ui: &mut egui::Ui) {
+        let mut open: Option<Item> = None;
+        let mut delete: Option<Item> = None;
+        let current = match &self.mode {
+            Mode::Editor(ed) => Some(ed.path.clone()),
+            Mode::Home => None,
+        };
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Library").font(theme::medium(14.0)).color(theme::TEXT));
+            let images = self.library.iter().filter(|i| i.kind == ItemKind::Image).count();
+            let videos = self.library.len() - images;
+            ui.add_space(6.0);
+            let all = format!("All {}", self.library.len());
+            let imgs = format!("Images {images}");
+            let vids = format!("Videos {videos}");
+            theme::segmented(ui, &mut self.lib_filter, &[(LibFilter::All, &all), (LibFilter::Images, &imgs), (LibFilter::Videos, &vids)]);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::icon_button_sized(ui, icon::FOLDER, "Show library folder", 30.0, true).clicked() {
+                    platform::open_path(&self.settings.save_dir);
+                }
+                if theme::icon_button_sized(ui, icon::PASTE, "New from clipboard", 30.0, true).clicked() {
+                    self.import_from_clipboard();
+                }
+                if theme::icon_button_sized(ui, icon::IMPORT, "Open image…", 30.0, true).clicked() {
+                    self.import_from_dialog();
+                }
+                ui.add_space(6.0);
+                search_box(ui, &mut self.filter);
+            });
+        });
+        ui.add_space(8.0);
+
+        let needle = self.filter.to_lowercase();
+        let items: Vec<Item> = self
+            .library
+            .iter()
+            .filter(|i| match self.lib_filter {
+                LibFilter::All => true,
+                LibFilter::Images => i.kind == ItemKind::Image,
+                LibFilter::Videos => i.kind == ItemKind::Video,
+            })
+            .filter(|i| needle.is_empty() || i.name.to_lowercase().contains(&needle))
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            ui.add_space(30.0);
+            ui.vertical_centered(|ui| {
+                let msg = if self.library.is_empty() { "Your captures will appear here" } else { "Nothing matches" };
+                ui.label(egui::RichText::new(msg).color(theme::TEXT_FAINT));
+            });
+            return;
+        }
+        egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                for item in &items {
+                    let selected = current.as_ref() == Some(&item.path);
+                    let (resp, delete_clicked) = self.tray_thumb(ui, item, selected);
+                    if delete_clicked {
+                        delete = Some(item.clone());
+                    } else if resp.clicked() && !selected {
+                        open = Some(item.clone());
+                    }
+                    resp.context_menu(|ui| {
+                        ui.set_min_width(180.0);
+                        if ui.button("Open").clicked() {
+                            open = Some(item.clone());
+                            ui.close();
+                        }
+                        if ui.button("Open with default app").clicked() {
+                            platform::open_path(&item.path);
+                            ui.close();
+                        }
+                        if ui.button(reveal_label()).clicked() {
+                            platform::reveal_path(&item.path);
+                            ui.close();
+                        }
+                        if item.kind == ItemKind::Image && ui.button("Copy").clicked() {
+                            if let Ok(img) = image::open(&item.path) {
+                                let _ = platform::copy_image(&img.to_rgba8());
+                            }
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button(egui::RichText::new("Delete").color(theme::DANGER)).clicked() {
+                            delete = Some(item.clone());
+                            ui.close();
+                        }
+                    });
+                }
+            });
+        });
+
+        if let Some(item) = open {
+            self.open_item(&item);
+        }
+        if let Some(item) = delete {
+            let confirmed = rfd::MessageDialog::new()
+                .set_title("Delete capture?")
+                .set_description(format!("“{}” will be permanently deleted.", item.name))
+                .set_buttons(rfd::MessageButtons::OkCancel)
+                .show();
+            if confirmed == rfd::MessageDialogResult::Ok {
+                if current.as_ref() == Some(&item.path) {
+                    self.mode = Mode::Home;
+                }
+                match library::delete(&item.path) {
+                    Ok(()) => self.refresh_library(),
+                    Err(e) => self.toast(format!("Delete failed: {e}")),
+                }
+            }
+        }
+    }
+
+    /// One library thumbnail; returns its response and whether its hover
+    /// delete button was clicked.
+    fn tray_thumb(&mut self, ui: &mut egui::Ui, item: &Item, selected: bool) -> (egui::Response, bool) {
+        let size = Vec2::new(156.0, 100.0);
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        if !ui.is_rect_visible(rect) {
+            return (resp, false);
+        }
+        // Pointer anywhere over the card, including over its delete button.
+        let pointer_on_card = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| rect.contains(p) && ui.clip_rect().contains(p));
+        let over = resp.hovered() || resp.contains_pointer() || pointer_on_card;
+        let hover = if over { 1.0 } else { 0.0 };
+        let thumb = Rect::from_min_size(rect.min, Vec2::new(size.x, 100.0));
+        let p = ui.painter();
+        p.rect_filled(thumb, 10.0, Color32::from_rgb(11, 13, 17));
+
+        let fresh = self.thumbs.get(&item.path).filter(|(m, _)| *m == item.modified).map(|(_, t)| t.clone());
+        match (&item.kind, fresh) {
+            (ItemKind::Image, Some(tex)) => {
+                // Cover-fit into the rounded frame.
+                let ts = tex.size_vec2();
+                let scale = (thumb.width() / ts.x).max(thumb.height() / ts.y);
+                let vis = Vec2::new(thumb.width() / (ts.x * scale), thumb.height() / (ts.y * scale));
+                let uv = Rect::from_center_size(Pos2::new(0.5, 0.5), vis);
+                p.add(egui::epaint::RectShape::filled(thumb, 10, Color32::WHITE).with_texture(tex.id(), uv));
+            }
+            (ItemKind::Image, None) => {
+                let key = (item.path.clone(), item.modified);
+                if self.thumbs_requested.insert(key.clone()) {
+                    let _ = self.thumb_jobs.send(key);
+                }
+                p.text(thumb.center(), Align2::CENTER_CENTER, icon::IMAGE, theme::icon_font(26.0), theme::TEXT_FAINT);
+            }
+            (ItemKind::Video, _) => {
+                theme::gradient_rect(p, thumb, 10, Color32::from_white_alpha(60));
+                p.circle_filled(thumb.center(), 20.0, Color32::from_black_alpha(120));
+                p.text(thumb.center(), Align2::CENTER_CENTER, icon::PLAY, theme::icon_font(26.0), Color32::WHITE);
+                let ext = item.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+                let badge = Rect::from_min_size(thumb.left_top() + Vec2::new(8.0, 8.0), Vec2::new(36.0, 18.0));
+                p.rect_filled(badge, 5.0, Color32::from_black_alpha(150));
+                p.text(badge.center(), Align2::CENTER_CENTER, ext, theme::medium(10.0), Color32::WHITE);
+            }
+        }
+        if selected {
+            p.rect_stroke(thumb, 10.0, Stroke::new(2.5, theme::ACCENT), StrokeKind::Outside);
+        } else {
+            let c = lerp(theme::BORDER, theme::BORDER_STRONG, hover);
+            p.rect_stroke(thumb, 10.0, Stroke::new(1.0, c), StrokeKind::Inside);
+        }
+        let mut delete_clicked = false;
+        if hover > 0.0 {
+            let btn = Rect::from_center_size(thumb.right_top() + Vec2::new(-18.0, 18.0), Vec2::splat(28.0));
+            let del = ui.interact(btn, resp.id.with("delete"), Sense::click());
+            let p = ui.painter();
+            let bg = if del.hovered() { Color32::from_rgb(255, 110, 126) } else { theme::DANGER };
+            p.circle_filled(btn.center() + Vec2::new(0.0, 2.0), 15.0, Color32::from_black_alpha(90));
+            p.circle_filled(btn.center(), 14.0, bg);
+            p.circle_stroke(btn.center(), 14.0, Stroke::new(1.5, Color32::from_white_alpha(230)));
+            p.text(btn.center(), Align2::CENTER_CENTER, icon::DELETE, theme::icon_font(17.0), Color32::WHITE);
+            delete_clicked = del.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+        }
+        (resp, delete_clicked)
+    }
+
+    fn import_from_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "webp"]).pick_file() {
+            match image::open(&p) {
+                Ok(img) => self.import_image(img.to_rgba8()),
+                Err(e) => self.toast(format!("Cannot open: {e}")),
+            }
+        }
+    }
+
+    fn import_from_clipboard(&mut self) {
+        match platform::clipboard_image() {
+            Some(img) => self.import_image(img),
+            None => self.toast("No image on the clipboard"),
+        }
+    }
+
+    fn recording_bar_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let stop_tip = format!("Stop and save   {}", self.keys(Action::Video));
+        let Activity::Recording(rec) = &mut self.activity else { return };
+        let mut stop = false;
+        let mut discard = false;
+        let frame = egui::Frame::new().fill(Color32::from_rgb(17, 19, 24)).inner_margin(egui::Margin::symmetric(14, 9));
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                let secs = rec.elapsed().as_secs();
+                let pulse = ((ctx.input(|i| i.time) * 3.0).sin() * 0.5 + 0.5) as f32;
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                if rec.is_paused() {
+                    ui.painter().circle_filled(r.center(), 6.0, Color32::from_rgb(255, 196, 0));
+                } else {
+                    ui.painter().circle_filled(r.center(), 6.0 + 3.0 * pulse, theme::DANGER.gamma_multiply(0.25));
+                    ui.painter().circle_filled(r.center(), 6.0, theme::DANGER);
+                }
+                ui.label(egui::RichText::new(format!("{}:{:02}", secs / 60, secs % 60)).font(FontId::monospace(16.0)).color(theme::TEXT));
+                ui.label(egui::RichText::new(if rec.is_paused() { "Paused" } else { "Recording" }).color(theme::TEXT_MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(ui, icon::CLOSE, "Discard").clicked() {
+                        discard = true;
+                    }
+                    if theme::icon_button(ui, icon::STOP, &stop_tip).clicked() {
+                        stop = true;
+                    }
+                    let (g, tip) = if rec.is_paused() { (icon::PLAY, "Resume") } else { (icon::PAUSE, "Pause") };
+                    if theme::icon_button(ui, g, tip).clicked() {
+                        rec.toggle_pause();
+                    }
+                });
+            });
+        });
+        ctx.request_repaint_after(Duration::from_millis(50));
+        if discard {
+            rec.discard();
+            stop = true;
+        }
+        if stop {
+            self.stop_recording(&ctx);
+        }
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        let before = serde_json::to_string(&self.settings).unwrap_or_default();
+        egui::Window::new(egui::RichText::new("Settings").font(theme::bold(17.0)))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(440.0, 0.0))
+            .show(ctx, |ui| {
+                theme::segmented(
+                    ui,
+                    &mut self.settings_tab,
+                    &[(SettingsTab::General, "General"), (SettingsTab::Video, "Video"), (SettingsTab::Shortcuts, "Shortcuts")],
+                );
+                if self.settings_tab != SettingsTab::Shortcuts && self.recording_shortcut.take().is_some() {
+                    self.apply_hotkeys();
+                }
+                ui.add_space(8.0);
+                match self.settings_tab {
+                    SettingsTab::General => {
+                        theme::section(ui, "Library");
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(truncate(&self.settings.save_dir.display().to_string(), 44)).monospace().color(theme::TEXT_MUTED));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if theme::secondary_button(ui, None, "Change…").clicked()
+                                    && let Some(dir) = rfd::FileDialog::new().set_directory(&self.settings.save_dir).pick_folder()
+                                {
+                                    self.settings.save_dir = dir;
+                                    self.refresh_library();
+                                }
+                            });
+                        });
+                        ui.add_space(8.0);
+                        theme::section(ui, "Startup");
+                        if theme::switch(ui, &mut self.settings.launch_at_login, "Launch at login").changed() {
+                            platform::set_launch_at_login(self.settings.launch_at_login);
+                        }
+                        ui.add_space(8.0);
+                        theme::section(ui, "After capture");
+                        theme::switch(ui, &mut self.settings.copy_after_capture, "Copy to clipboard");
+                        theme::switch(ui, &mut self.settings.open_editor_after_capture, "Open in the editor");
+                        ui.horizontal(|ui| {
+                            ui.label("Image format");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                theme::segmented(ui, &mut self.settings.image_format, &[(ImageFormat::Png, "PNG"), (ImageFormat::Jpeg, "JPEG")]);
+                            });
+                        });
+                    }
+                    SettingsTab::Video => {
+                        theme::section(ui, "Video");
+                        ui.horizontal(|ui| {
+                            ui.label("Format");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                theme::segmented(ui, &mut self.settings.video_format, &[(VideoFormat::Mp4, "MP4"), (VideoFormat::Gif, "GIF")]);
+                            });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Frame rate");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add(egui::Slider::new(&mut self.settings.video_fps, 5..=30).suffix(" fps"));
+                            });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Max width");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add(egui::Slider::new(&mut self.settings.video_max_width, 640..=3840).suffix(" px"));
+                            });
+                        });
+                        theme::switch(ui, &mut self.settings.highlight_cursor, "Highlight the cursor");
+                    }
+                    SettingsTab::Shortcuts => {
+                        theme::section(ui, "Global shortcuts");
+                        ui.label(
+                            egui::RichText::new("Click a shortcut, then press the new keys. Esc cancels, ⌫ clears.")
+                                .color(theme::TEXT_FAINT)
+                                .small(),
+                        );
+                        ui.add_space(4.0);
+                        for action in Action::ALL {
+                            ui.horizontal(|ui| {
+                                ui.label(action.label());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let is_default = self.settings.shortcuts.is_default(action);
+                                    let reset = theme::icon_button_sized(ui, icon::UNDO, "Reset to default", 28.0, !is_default);
+                                    if reset.clicked() && !is_default {
+                                        self.set_shortcut(action, action.default_combo().to_owned());
+                                    }
+                                    let recording = self.recording_shortcut == Some(action);
+                                    let text = if recording {
+                                        "Press keys…".to_owned()
+                                    } else {
+                                        let k = self.keys(action);
+                                        if k.is_empty() { "None".to_owned() } else { k }
+                                    };
+                                    if shortcut_chip(ui, &text, recording).clicked() {
+                                        if recording {
+                                            self.recording_shortcut = None;
+                                            self.apply_hotkeys();
+                                        } else {
+                                            self.recording_shortcut = Some(action);
+                                            self.suspend_hotkeys();
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                        ui.add_space(6.0);
+                        let all_default = self.settings.shortcuts == shortcuts::Shortcuts::default();
+                        ui.add_enabled_ui(!all_default, |ui| {
+                            if theme::ghost_button(ui, Some(icon::UNDO), "Reset all to defaults").clicked() {
+                                self.settings.shortcuts = shortcuts::Shortcuts::default();
+                                self.recording_shortcut = None;
+                                let failed = self.apply_hotkeys();
+                                self.report_hotkeys(failed, "Shortcuts reset to defaults");
+                            }
+                        });
+                    }
+                }
+            });
+        self.show_settings = open;
+        if !open && self.recording_shortcut.take().is_some() {
+            self.apply_hotkeys();
+        }
+        self.capture_shortcut_keys(ctx);
+        if serde_json::to_string(&self.settings).unwrap_or_default() != before {
+            self.settings.save();
+        }
+    }
+
+    /// While a shortcut row is listening, turn the next key press into its shortcut.
+    fn capture_shortcut_keys(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.recording_shortcut else { return };
+        let presses: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    // `key` is the logical key; egui already falls back to the
+                    // physical key when ⌥ turns the letter into a symbol.
+                    egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+                .collect()
+        });
+        for (key, mods) in presses {
+            if mods.is_none() && key == egui::Key::Escape {
+                self.recording_shortcut = None;
+                self.apply_hotkeys();
+                return;
+            }
+            if mods.is_none() && matches!(key, egui::Key::Backspace | egui::Key::Delete) {
+                self.set_shortcut(action, String::new());
+                return;
+            }
+            let Some(combo) = shortcuts::from_key_press(key, mods) else {
+                if !mods.is_none() || key.name().len() == 1 {
+                    self.toast("Use Control, Option or Command with a letter, digit or F-key");
+                }
+                continue;
+            };
+            let hotkey: HotKey = match combo.parse() {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            if let Some(other) = self.settings.shortcuts.conflict(action, hotkey) {
+                self.toast(format!("{} is already used by “{}”", shortcuts::display(hotkey), other.label()));
+                return;
+            }
+            self.set_shortcut(action, combo);
+            return;
+        }
+    }
+
+    fn set_shortcut(&mut self, action: Action, combo: String) {
+        self.settings.shortcuts.set(action, combo);
+        self.settings.save();
+        self.recording_shortcut = None;
+        let failed = self.apply_hotkeys();
+        let keys = self.keys(action);
+        let msg = if keys.is_empty() {
+            format!("{} has no shortcut now", action.label())
+        } else {
+            format!("{} is now {keys}", action.label())
+        };
+        self.report_hotkeys(failed, &msg);
+    }
+
+    fn report_hotkeys(&mut self, failed: Vec<String>, ok: &str) {
+        if failed.is_empty() {
+            self.toast(ok.to_owned());
+        } else {
+            self.toast(format!("Couldn't register (used by another app?): {}", failed.join(", ")));
+        }
+    }
+
+    fn ocr_window(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.ocr_rx
+            && let Ok(result) = rx.try_recv()
+        {
+            self.ocr_rx = None;
+            match result {
+                Ok(text) if text.trim().is_empty() => self.toast("No text found"),
+                Ok(text) => {
+                    let _ = platform::copy_text(&text);
+                    self.toast("Text copied to clipboard");
+                    self.ocr_text = Some(text);
+                }
+                Err(e) => self.toast(format!("{e:#}")),
+            }
+        }
+        let Some(text) = &mut self.ocr_text else { return };
+        let mut open = true;
+        let mut copy = false;
+        egui::Window::new(egui::RichText::new("Recognized text").font(theme::bold(17.0)))
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(540.0)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(11, 13, 17))
+                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(text)
+                                    .desired_width(f32::INFINITY)
+                                    .frame(egui::Frame::NONE)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                        });
+                    });
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    copy = theme::primary_button(ui, Some(icon::COPY), "Copy text").clicked();
+                });
+            });
+        if copy {
+            let _ = platform::copy_text(text);
+            self.toast("Text copied to clipboard");
+        }
+        if !open {
+            self.ocr_text = None;
+        }
+    }
+
+    fn toast_ui(&mut self, ctx: &egui::Context) {
+        let Some((msg, at)) = &self.toast else { return };
+        let age = at.elapsed().as_secs_f32();
+        if age > 3.5 {
+            self.toast = None;
+            return;
+        }
+        let alpha = (age / 0.15).min(1.0).min((3.5 - age) / 0.3);
+        let failed = msg.contains("fail") || msg.contains("Failed") || msg.contains("Cannot");
+        egui::Area::new(egui::Id::unique("toast"))
+            .anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -186.0 + (1.0 - alpha) * 10.0))
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.set_opacity(alpha);
+                egui::Frame::new()
+                    .fill(theme::SURFACE_3)
+                    .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+                    .corner_radius(12)
+                    .shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(120) })
+                    .inner_margin(egui::Margin { left: 12, right: 16, top: 9, bottom: 9 })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (g, c) = if failed { (icon::INFO, theme::DANGER) } else { (icon::CHECK, theme::SUCCESS) };
+                            ui.label(egui::RichText::new(g).font(theme::icon_font(18.0)).color(c));
+                            ui.label(egui::RichText::new(msg.as_str()).font(theme::medium(13.5)).color(theme::TEXT));
+                        });
+                    });
+            });
+        ctx.request_repaint_after(Duration::from_millis(30));
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    General,
+    Video,
+    Shortcuts,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Background {
+    White,
+    Transparent,
+    Dark,
+}
+
+impl Background {
+    fn rgba(self) -> [u8; 4] {
+        match self {
+            Background::White => [255, 255, 255, 255],
+            Background::Transparent => [0, 0, 0, 0],
+            Background::Dark => [24, 26, 32, 255],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NewCanvas {
+    width: u32,
+    height: u32,
+    background: Background,
+}
+
+impl Default for NewCanvas {
+    fn default() -> Self {
+        Self { width: 1280, height: 800, background: Background::White }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LibFilter {
+    All,
+    Images,
+    Videos,
+}
+
+/// Large capture-mode button for the welcome screen.
+fn mode_tile(ui: &mut egui::Ui, rect: Rect, glyph: &str, label: &str, keys: &str) -> egui::Response {
+    let resp = ui.interact(rect, ui.scope_id().with(("mode", label)), Sense::click());
+    let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+    let p = ui.painter();
+    let lifted = rect.translate(Vec2::new(0.0, -2.0 * t));
+    p.rect_filled(lifted, 14.0, lerp(theme::SURFACE, theme::SURFACE_2, t));
+    p.rect_stroke(lifted, 14.0, Stroke::new(1.0, lerp(theme::BORDER, theme::ACCENT, t)), StrokeKind::Inside);
+    let badge = Rect::from_center_size(lifted.center() - Vec2::new(0.0, 16.0), Vec2::splat(40.0));
+    theme::gradient_rect(p, badge, 12, Color32::WHITE);
+    p.text(badge.center(), Align2::CENTER_CENTER, glyph, theme::icon_font(22.0), Color32::WHITE);
+    p.text(lifted.center() + Vec2::new(0.0, 20.0), Align2::CENTER_CENTER, label, theme::medium(13.0), theme::TEXT);
+    p.text(lifted.center() + Vec2::new(0.0, 37.0), Align2::CENTER_CENTER, keys, FontId::proportional(11.0), theme::TEXT_FAINT);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Pill-shaped search field; icon and text share one vertical center.
+fn search_box(ui: &mut egui::Ui, text: &mut String) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(220.0, 32.0), Sense::hover());
+    let edit_rect = Rect::from_min_max(rect.min + Vec2::new(32.0, 0.0), rect.max - Vec2::new(28.0, 0.0));
+    let id = ui.scope_id().with("library-search");
+    let focused = ui.memory(|m| m.has_focus(id));
+    // Paint the pill before adding the text field so it sits underneath.
+    let p = ui.painter().clone();
+    p.rect_filled(rect, 9.0, Color32::from_rgb(11, 13, 17));
+    p.rect_stroke(
+        rect,
+        9.0,
+        Stroke::new(if focused { 1.5 } else { 1.0 }, if focused { theme::ACCENT } else { theme::BORDER }),
+        StrokeKind::Inside,
+    );
+    ui.put(
+        edit_rect,
+        egui::TextEdit::singleline(text)
+            .id(id)
+            .hint_text("Search")
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .align(Align2::LEFT_CENTER)
+            .min_size(edit_rect.size()),
+    );
+    p.text(
+        rect.left_center() + Vec2::new(17.0, 0.0),
+        Align2::CENTER_CENTER,
+        icon::SEARCH,
+        theme::icon_font(18.0),
+        if focused { theme::TEXT_MUTED } else { theme::TEXT_FAINT },
+    );
+    if !text.is_empty() {
+        let clear = Rect::from_center_size(rect.right_center() - Vec2::new(15.0, 0.0), Vec2::splat(20.0));
+        let c = ui.interact(clear, ui.scope_id().with("search-clear"), Sense::click());
+        let color = if c.hovered() { theme::TEXT } else { theme::TEXT_FAINT };
+        p.text(clear.center(), Align2::CENTER_CENTER, icon::CLOSE, theme::icon_font(16.0), color);
+        if c.on_hover_text("Clear").clicked() {
+            text.clear();
+        }
+    }
+}
+
+/// Keyboard-key looking chip that starts shortcut recording.
+fn shortcut_chip(ui: &mut egui::Ui, text: &str, recording: bool) -> egui::Response {
+    let font = theme::medium(12.5);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, theme::TEXT);
+    let size = Vec2::new((galley.size().x + 24.0).max(76.0), 28.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+    let p = ui.painter();
+    if recording {
+        let t = ui.input(|i| i.time) as f32;
+        let pulse = (t * 4.0).sin() * 0.5 + 0.5;
+        p.rect_filled(rect, 7.0, theme::ACCENT.gamma_multiply(0.18 + 0.12 * pulse));
+        p.rect_stroke(rect, 7.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+        ui.ctx().request_repaint();
+    } else {
+        p.rect_filled(rect, 7.0, lerp(theme::SURFACE_3, Color32::from_rgb(46, 52, 66), hover));
+        p.rect_stroke(rect, 7.0, Stroke::new(1.0, theme::BORDER_STRONG), StrokeKind::Inside);
+        // Key-cap bottom edge.
+        p.line_segment(
+            [rect.left_bottom() + Vec2::new(6.0, -1.0), rect.right_bottom() + Vec2::new(-6.0, -1.0)],
+            Stroke::new(1.0, Color32::from_black_alpha(90)),
+        );
+    }
+    let color = if recording { Color32::WHITE } else { theme::TEXT };
+    p.galley(rect.center() - galley.size() / 2.0, galley, color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+impl eframe::App for SnapquillApp {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        while let Ok(ev) = self.events.try_recv() {
+            self.handle_event(ev, ctx, frame);
+        }
+        while let Ok((path, modified, img)) = self.thumb_results.try_recv() {
+            let tex = ctx.load_texture(path.to_string_lossy(), img, egui::TextureOptions::LINEAR);
+            self.thumbs.insert(path, (modified, tex));
+        }
+        self.advance_activity(ctx, frame);
+
+        if ctx.input(|i| i.viewport().close_requested()) {
+            // Closing the window keeps Snapquill running in the menu bar.
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.autosave_editor();
+            self.hide_window(ctx);
+            self.hidden_by_user = true;
+        }
+        if self.win == Win::Normal && self.library_scanned.elapsed() > Duration::from_secs(5) {
+            self.refresh_library();
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if !self.hover_tracking {
+            platform::enable_hover_when_inactive(frame);
+            self.hover_tracking = true;
+        }
+        if let Activity::Selecting(overlay) = &mut self.activity {
+            // The overlay must cover the whole monitor, Dock and menu bar included.
+            let (ox, oy) = (overlay.snap.origin.0 as f32, overlay.snap.origin.1 as f32);
+            let (sw, sh) = (overlay.snap.size.0 as f32, overlay.snap.size.1 as f32);
+            let want = Rect::from_min_size(Pos2::new(ox, oy), Vec2::new(sw, sh));
+            if let Some(have) = ctx.input(|i| i.viewport().outer_rect)
+                && (have.min - want.min).length() + (have.size() - want.size()).length() > 1.0
+            {
+                platform::set_window_frame(frame, ox, oy, sw, sh);
+            }
+            let outcome = egui::CentralPanel::no_frame().show(ui, |ui| overlay.ui(ui)).inner;
+            match outcome {
+                Outcome::Pending => {}
+                Outcome::Cancel => {
+                    self.activity = Activity::Idle;
+                    self.return_to_rest(&ctx, frame);
+                }
+                Outcome::Selected(rect) => {
+                    if let Activity::Selecting(overlay) = std::mem::replace(&mut self.activity, Activity::Idle) {
+                        self.on_selection(&ctx, frame, overlay, rect);
+                    }
+                }
+            }
+            return;
+        }
+        if matches!(self.activity, Activity::Recording(_)) {
+            self.recording_bar_ui(ui);
+            return;
+        }
+        if self.win != Win::Normal {
+            return;
+        }
+        self.workspace_ui(ui);
+        self.home_shortcuts(&ctx);
+        self.new_canvas_dialog(&ctx);
+        self.settings_window(&ctx);
+        self.ocr_window(&ctx);
+        self.toast_ui(&ctx);
+    }
+}
+
+fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else {
+        "Show in folder"
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        format!("{}…", s.chars().take(max - 1).collect::<String>())
+    }
+}
+
+type HotkeyMap = Arc<Mutex<HashMap<u32, AppEvent>>>;
+
+fn setup_hotkeys(ctx: &egui::Context, tx: Sender<AppEvent>) -> (Option<GlobalHotKeyManager>, HotkeyMap, Option<String>) {
+    let map: HotkeyMap = Arc::default();
+    let manager = match GlobalHotKeyManager::new() {
+        Ok(m) => m,
+        Err(e) => return (None, map, Some(format!("Global shortcuts unavailable: {e}"))),
+    };
+    let ctx = ctx.clone();
+    let lookup = map.clone();
+    GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
+        if e.state() == HotKeyState::Pressed
+            && let Some(ev) = lookup.lock().ok().and_then(|m| m.get(&e.id()).copied())
+        {
+            let _ = tx.send(ev);
+            ctx.request_repaint();
+        }
+    }));
+    (Some(manager), map, None)
+}
+
+fn menu_label(action: Action, shortcuts: &shortcuts::Shortcuts) -> String {
+    let title = match action {
+        Action::Image => "Capture Image",
+        Action::FullScreen => "Capture Full Screen",
+        Action::Video => "Record Video",
+        Action::Scroll => "Scrolling Capture",
+        Action::Text => "Grab Text",
+    };
+    let keys = shortcuts.display(action);
+    if keys.is_empty() { title.to_owned() } else { format!("{title}    {keys}") }
+}
+
+
+/// The menu-bar status item (with the colored app icon) and the app's own
+/// menu bar, both offering every capture mode.
+fn setup_menus(
+    ctx: &egui::Context,
+    tx: Sender<AppEvent>,
+) -> (Option<tray_icon::TrayIcon>, tray_icon::menu::Menu, Vec<(Action, tray_icon::menu::MenuItem)>) {
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+
+    let mut map: HashMap<String, AppEvent> = Action::ALL.iter().map(|a| (format!("{a:?}"), a.event())).collect();
+    map.insert("show".into(), AppEvent::ShowMain);
+    map.insert("quit".into(), AppEvent::Quit);
+    // Labels are filled in by `apply_hotkeys`.
+    let mut all_items = Vec::new();
+    let mut capture_items = |prefix: &str| -> Vec<MenuItem> {
+        Action::ALL
+            .iter()
+            .map(|a| {
+                let item = MenuItem::with_id(format!("{prefix}{a:?}"), a.label(), true, None);
+                all_items.push((*a, item.clone()));
+                item
+            })
+            .collect()
+    };
+
+    // Status item menu
+    let tray_menu = Menu::new();
+    for item in capture_items("") {
+        let _ = tray_menu.append(&item);
+    }
+    let _ = tray_menu.append(&PredefinedMenuItem::separator());
+    let _ = tray_menu.append(&MenuItem::with_id("show", "Open Snapquill", true, None));
+    let _ = tray_menu.append(&MenuItem::with_id("quit", "Quit Snapquill", true, None));
+
+    // App menu bar: Snapquill | Capture | Window
+    let menu_bar = Menu::new();
+    let app_menu = Submenu::new(APP_NAME, true);
+    let _ = app_menu.append_items(&[
+        &PredefinedMenuItem::about(None, None),
+        &PredefinedMenuItem::separator(),
+        &PredefinedMenuItem::services(None),
+        &PredefinedMenuItem::separator(),
+        &PredefinedMenuItem::hide(None),
+        &PredefinedMenuItem::hide_others(None),
+        &PredefinedMenuItem::show_all(None),
+        &PredefinedMenuItem::separator(),
+        &MenuItem::with_id("quit", "Quit Snapquill", true, None),
+    ]);
+    // No Edit menu on purpose: its ⌘C/⌘V key equivalents would swallow the
+    // keystrokes before the editor and text fields see them.
+    let capture_menu = Submenu::new("Capture", true);
+    for item in capture_items("bar-") {
+        let _ = capture_menu.append(&item);
+    }
+    let file_menu = Submenu::new("File", true);
+    {
+        use tray_icon::menu::accelerator::{Accelerator, Code, Modifiers};
+        let cmd = |code| Some(Accelerator::new(Modifiers::META, code));
+        let _ = file_menu.append_items(&[
+            &MenuItem::with_id("new-image", "New Image…", true, cmd(Code::KeyN)),
+            &MenuItem::with_id("open-image", "Open Image…", true, cmd(Code::KeyO)),
+        ]);
+    }
+    map.insert("new-image".into(), AppEvent::NewImage);
+    map.insert("open-image".into(), AppEvent::OpenImage);
+    let window_menu = Submenu::new("Window", true);
+    let _ = window_menu.append_items(&[
+        &MenuItem::with_id("show", "Library", true, None),
+        &PredefinedMenuItem::minimize(None),
+    ]);
+    let _ = menu_bar.append_items(&[&app_menu, &file_menu, &capture_menu, &window_menu]);
+    #[cfg(target_os = "macos")]
+    menu_bar.init_for_nsapp();
+
+    let ctx2 = ctx.clone();
+    MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+        let id = e.id().as_ref();
+        if let Some(ev) = map.get(id.strip_prefix("bar-").unwrap_or(id)) {
+            let _ = tx.send(*ev);
+            ctx2.request_repaint();
+        }
+    }));
+
+    platform::prefer_status_item_on_right(APP_NAME);
+    let (rgba, w, h) = crate::icon::app_icon(44);
+    let tray = tray_icon::Icon::from_rgba(rgba, w, h).ok().and_then(|icon| {
+        tray_icon::TrayIconBuilder::new()
+            .with_menu(Box::new(tray_menu))
+            .with_icon(icon)
+            .with_tooltip(APP_NAME)
+            .with_autosave_name(APP_NAME)
+            .build()
+            .map_err(|e| log::warn!("tray icon: {e}"))
+            .ok()
+    });
+    (tray, menu_bar, all_items)
+}
+
+type ThumbResult = (PathBuf, SystemTime, egui::ColorImage);
+
+fn spawn_thumbnailer(ctx: egui::Context) -> (Sender<(PathBuf, SystemTime)>, Receiver<ThumbResult>) {
+    let (job_tx, job_rx) = mpsc::channel::<(PathBuf, SystemTime)>();
+    let (res_tx, res_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for (path, modified) in job_rx {
+            let Ok(img) = image::open(&path) else { continue };
+            let thumb = img.thumbnail(400, 270).to_rgba8();
+            let color = egui::ColorImage::from_rgba_unmultiplied([thumb.width() as usize, thumb.height() as usize], thumb.as_raw());
+            if res_tx.send((path, modified, color)).is_err() {
+                break;
+            }
+            ctx.request_repaint();
+        }
+    });
+    (job_tx, res_rx)
+}
+
+#[cfg(test)]
+mod readme_shots;
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+
+    /// Which hover check works for a card inside the bottom tray's scroll area?
+    #[test]
+    fn hover_detection_in_tray() {
+        let ctx = egui::Context::default();
+        let mut results = (false, false);
+        for frame in 0..8 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                time: Some(frame as f64 * 0.4),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(egui::pos2(60.0, 520.0)));
+            let _ = ctx.run_ui(input, |ui| {
+                egui::Panel::bottom("tray").exact_size(200.0).show(ui, |ui| {
+                    egui::ScrollArea::horizontal().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (rect, resp) = ui.allocate_exact_size(egui::vec2(156.0, 128.0), egui::Sense::click());
+                            if frame >= 2 {
+                                results = (ui.rect_contains_pointer(rect), resp.contains_pointer());
+                            }
+                            resp.on_hover_text("name\ntime");
+                        });
+                    });
+                });
+                egui::CentralPanel::default().show(ui, |_| {});
+            });
+        }
+        assert!(results.1, "response hover check should see the pointer");
+    }
+}

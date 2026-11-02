@@ -1,0 +1,64 @@
+name: Release installers
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: ./scripts/package-macos.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: dist/*.dmg }
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxrandr-dev libxdo-dev libdbus-1-dev \
+            libpipewire-0.3-dev libclang-dev libgbm-dev libegl-dev libwayland-dev \
+            libxkbcommon-dev libgtk-3-dev libayatana-appindicator3-dev pkg-config
+      - run: ./scripts/package-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - shell: bash
+        run: |
+          cargo build --release
+          mkdir -p dist
+          target/release/snapquill.exe --write-icon dist/snapquill.ico 256
+          choco install nsis -y --no-progress
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          "/c/Program Files (x86)/NSIS/makensis.exe" -DVERSION="$VERSION" scripts/installer.nsi
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: dist/*-setup.exe }
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with: { files: artifacts/* }

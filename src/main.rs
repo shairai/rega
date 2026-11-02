@@ -1,0 +1,48 @@
+mod app;
+mod capture;
+mod config;
+mod editor;
+mod icon;
+mod library;
+mod ocr;
+mod overlay;
+mod platform;
+mod recorder;
+mod scroll;
+mod shortcuts;
+mod theme;
+
+use std::sync::Arc;
+
+use eframe::egui;
+
+fn main() -> eframe::Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("snapquill=info")).init();
+
+    // Used by scripts/bundle-macos.sh to produce the .icns.
+    let args: Vec<String> = std::env::args().collect();
+    if let [_, flag, path, size] = args.as_slice()
+        && flag == "--write-icon"
+    {
+        let size = size.parse().unwrap_or(1024);
+        let (rgba, w, h) = icon::app_icon(size);
+        image::RgbaImage::from_raw(w, h, rgba).expect("icon").save(path).expect("write icon");
+        return Ok(());
+    }
+
+    let (rgba, width, height) = icon::app_icon(256);
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title(config::APP_NAME)
+            .with_inner_size([1360.0, 840.0])
+            // The labeled top bar needs ~1180 pt; keep room for it.
+            .with_min_inner_size([1300.0, 640.0])
+            .with_icon(Arc::new(egui::IconData { rgba, width, height })),
+        ..Default::default()
+    };
+    eframe::run_native(
+        config::APP_NAME,
+        options,
+        Box::new(|cc| Ok(Box::new(app::SnapquillApp::new(cc)))),
+    )
+}
