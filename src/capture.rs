@@ -156,8 +156,9 @@ pub fn snapshot_at(cursor: (i32, i32)) -> Result<Snapshot> {
     let image = monitor
         .capture_image()
         .context("screen capture failed — is Screen Recording permission granted?")?;
-    if size.0 == 0 {
-        return Err(anyhow!("monitor reports zero width"));
+    // A zero dimension would make every later crop/clamp panic.
+    if size.0 == 0 || size.1 == 0 || image.width() == 0 || image.height() == 0 {
+        return Err(anyhow!("monitor reports a zero size"));
     }
     let scale = image.width() as f32 / size.0 as f32;
     let windows = list_windows(phys_origin, (monitor.width()?, monitor.height()?), d).unwrap_or_default();

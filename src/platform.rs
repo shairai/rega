@@ -94,6 +94,21 @@ pub fn set_dock_icon(visible: bool) {
 #[cfg(not(target_os = "macos"))]
 pub fn set_dock_icon(_visible: bool) {}
 
+/// Make Rega the active app. A window `Focus` alone doesn't pull a menu-bar
+/// app in front of the app the user was working in.
+#[cfg(target_os = "macos")]
+pub fn activate_app() {
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    // `activate` needs macOS 14; Rega supports 12.3+.
+    #[allow(deprecated)]
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn activate_app() {}
+
 /// The capture overlay and recording bar have to appear over whatever the user
 /// is looking at, including another app's full-screen Space. macOS only allows
 /// that for a non-activating panel, so for the duration of a capture the window
@@ -178,12 +193,24 @@ pub fn set_overlay_level(_ctx: &eframe::egui::Context, frame: &eframe::Frame, ov
 
 /// Show the overlay on the Space the user is on and give it the keyboard,
 /// without activating Rega (activation would pull the user to another Space).
+/// It starts fully transparent: until egui paints the frozen screenshot into it,
+/// the window still holds its previous frame (the library UI), which would flash.
 #[cfg(target_os = "macos")]
 pub fn present_overlay(frame: &eframe::Frame) {
     if let Some(window) = ns_window(frame) {
         overlay_panel::enter(&window);
+        window.setAlphaValue(0.0);
         window.orderFrontRegardless();
         window.makeKeyWindow();
+    }
+}
+
+/// Window opacity, used to hide the window while it changes role (overlay ⇄
+/// normal) so its stale previous frame never flashes on screen.
+#[cfg(target_os = "macos")]
+pub fn set_window_alpha(frame: &eframe::Frame, alpha: f64) {
+    if let Some(window) = ns_window(frame) {
+        window.setAlphaValue(alpha);
     }
 }
 
@@ -196,6 +223,20 @@ pub fn set_overlay_level(ctx: &eframe::egui::Context, _frame: &eframe::Frame, ov
 
 #[cfg(not(target_os = "macos"))]
 pub fn present_overlay(_frame: &eframe::Frame) {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_window_alpha(_frame: &eframe::Frame, _alpha: f64) {}
+
+/// Put the window behind every other app's windows (shown, but not in the way).
+#[cfg(target_os = "macos")]
+pub fn send_window_to_back(frame: &eframe::Frame) {
+    if let Some(window) = ns_window(frame) {
+        window.orderBack(None);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn send_window_to_back(_frame: &eframe::Frame) {}
 
 /// Place the window exactly over a rect given in global top-left logical
 /// points. Goes straight to AppKit so macOS can't nudge it off the Dock or

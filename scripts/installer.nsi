@@ -1,5 +1,6 @@
 ; Windows installer. Build with:  makensis /DVERSION=0.1.0 scripts/installer.nsi
-; Expects ${EXE} (default target\release\rega.exe) and dist\rega.ico to exist.
+; Expects ${EXE} (default target\release\rega.exe), dist\rega.ico and the
+; dist\installer-*.bmp artwork (rega --write-branding dist) to exist.
 Unicode true
 !include "MUI2.nsh"
 
@@ -18,6 +19,14 @@ SetCompressor /SOLID lzma
 
 !define MUI_ICON "..\dist\rega.ico"
 !define MUI_UNICON "..\dist\rega.ico"
+!define MUI_WELCOMEFINISHPAGE_BITMAP "..\dist\installer-welcome.bmp"
+!define MUI_UNWELCOMEFINISHPAGE_BITMAP "..\dist\installer-welcome.bmp"
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_RIGHT
+!define MUI_HEADERIMAGE_BITMAP "..\dist\installer-header.bmp"
+!define MUI_HEADERIMAGE_UNBITMAP "..\dist\installer-header.bmp"
+!define MUI_WELCOMEPAGE_TITLE "Welcome to Rega"
+!define MUI_WELCOMEPAGE_TEXT "Capture anything on your screen, mark it up, and share it — in seconds.$\r$\n$\r$\nClick Next to continue."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\Rega.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch Rega"
 

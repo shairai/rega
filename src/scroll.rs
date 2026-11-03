@@ -38,13 +38,15 @@ pub fn run(monitor_origin: (i32, i32), region: (u32, u32, u32, u32), progress: &
     let first = monitor.capture_region(px, py, pw, ph_)?;
     let ph = first.height();
     let mut prev = first.clone();
-    // Stitched output so far, and how many bottom rows of `prev` are a fixed footer.
-    let mut out = first;
+    // Strips to stitch, joined once at the end (re-copying the growing image every
+    // step is quadratic), and how many bottom rows of `prev` are a fixed footer.
+    let mut strips = vec![first];
+    let mut height = ph;
     let mut footer = 0u32;
     let mut clicks = 3i32;
 
     for step in 0..MAX_STEPS {
-        let _ = progress.send(ScrollMsg::Progress(format!("Scrolling… step {}, {} px", step + 1, out.height())));
+        let _ = progress.send(ScrollMsg::Progress(format!("Scrolling… step {}, {} px", step + 1, height)));
         enigo.scroll(clicks, Axis::Vertical)?;
         thread::sleep(Duration::from_millis(450));
         let cur = monitor.capture_region(px, py, pw, ph_)?;
@@ -59,12 +61,14 @@ pub fn run(monitor_origin: (i32, i32), region: (u32, u32, u32, u32), progress: &
         if step == 0 {
             // Drop the fixed footer from the first frame; it is re-added at the end.
             footer = m.bottom;
-            out = image::imageops::crop_imm(&out, 0, 0, out.width(), ph - footer).to_image();
+            let body = image::imageops::crop_imm(&strips[0], 0, 0, strips[0].width(), ph - footer).to_image();
+            strips[0] = body;
+            height -= footer;
         }
         // New content is the `shift` rows just above the footer.
         let new_top = ph - m.bottom - m.shift;
-        let fresh = image::imageops::crop_imm(&cur, 0, new_top, cur.width(), m.shift).to_image();
-        out = append(&out, &fresh);
+        strips.push(image::imageops::crop_imm(&cur, 0, new_top, cur.width(), m.shift).to_image());
+        height += m.shift;
 
         // Aim for roughly half a region of movement per step.
         let per_click = m.shift as f32 / clicks as f32;
@@ -72,23 +76,26 @@ pub fn run(monitor_origin: (i32, i32), region: (u32, u32, u32, u32), progress: &
             clicks = ((ph as f32 * 0.5 / per_click) as i32).clamp(1, 30);
         }
         prev = cur;
-        if out.height() > MAX_HEIGHT {
+        if height > MAX_HEIGHT {
             break;
         }
     }
 
     if footer > 0 {
-        let tail = image::imageops::crop_imm(&prev, 0, ph - footer, prev.width(), footer).to_image();
-        out = append(&out, &tail);
+        strips.push(image::imageops::crop_imm(&prev, 0, ph - footer, prev.width(), footer).to_image());
     }
-    Ok(out)
+    Ok(stack(&strips))
 }
 
-fn append(top: &RgbaImage, bottom: &RgbaImage) -> RgbaImage {
-    let mut img = RgbaImage::new(top.width(), top.height() + bottom.height());
-    image::imageops::replace(&mut img, top, 0, 0);
-    image::imageops::replace(&mut img, bottom, 0, top.height() as i64);
-    img
+/// Join same-width strips top to bottom.
+fn stack(strips: &[RgbaImage]) -> RgbaImage {
+    let width = strips.first().map_or(0, |s| s.width());
+    let mut raw = Vec::with_capacity(strips.iter().map(|s| s.as_raw().len()).sum());
+    for s in strips {
+        raw.extend_from_slice(s.as_raw());
+    }
+    let height = strips.iter().map(|s| s.height()).sum();
+    RgbaImage::from_raw(width, height, raw).expect("strips share a width")
 }
 
 struct Shift {

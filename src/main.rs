@@ -2,6 +2,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod branding;
 mod capture;
 mod config;
 mod editor;
@@ -24,13 +25,25 @@ fn main() -> eframe::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("rega=info")).init();
 
     // Used by scripts/bundle-macos.sh to produce the .icns.
+    // Used by the packaging scripts: `--write-icon <png|ico> <size>` (an .ico
+    // gets every size) and `--write-branding <dir>` (DMG / installer artwork).
     let args: Vec<String> = std::env::args().collect();
     if let [_, flag, path, size] = args.as_slice()
         && flag == "--write-icon"
     {
-        let size = size.parse().unwrap_or(1024);
-        let (rgba, w, h) = icon::app_icon(size);
-        image::RgbaImage::from_raw(w, h, rgba).expect("icon").save(path).expect("write icon");
+        if path.ends_with(".ico") {
+            branding::write_ico(std::path::Path::new(path)).expect("write icon");
+        } else {
+            let size = size.parse().unwrap_or(1024);
+            let (rgba, w, h) = icon::app_icon(size);
+            image::RgbaImage::from_raw(w, h, rgba).expect("icon").save(path).expect("write icon");
+        }
+        return Ok(());
+    }
+    if let [_, flag, dir] = args.as_slice()
+        && flag == "--write-branding"
+    {
+        branding::write_all(std::path::Path::new(dir)).expect("write branding");
         return Ok(());
     }
 

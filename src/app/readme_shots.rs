@@ -6,6 +6,7 @@
 //! Images are written to `docs/images/`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2};
@@ -317,6 +318,107 @@ fn dashboard_project() -> Project {
     Project { annotations, effects: Default::default(), next_step: 4 }
 }
 
+// ---------- README examples ----------
+// Built the way a user would: crops pasted onto a blank canvas, then marked up
+// with Rega's own tools and flattened by its export renderer.
+
+const EX_MARGIN: f32 = 48.0;
+const EX_BG: [u8; 4] = [236, 238, 244, 255];
+const EX_INK: [u8; 4] = [23, 26, 35, 255];
+const EX_MUTED: [u8; 4] = [110, 117, 135, 255];
+
+/// A logical-point rect cut out of a Retina dashboard image.
+fn crop_pts(img: &RgbaImage, r: Rect) -> RgbaImage {
+    let (a, b) = px(r);
+    image::imageops::crop_imm(img, a.x as u32, a.y as u32, (b.x - a.x) as u32, (b.y - a.y) as u32).to_image()
+}
+
+/// A pasted image layer at `pos`, with a thin frame around it.
+fn pasted(img: RgbaImage, pos: P) -> [Annotation; 2] {
+    let (w, h) = (img.width() as f32, img.height() as f32);
+    [
+        ann(Kind::Image { pos, w, h, img: Arc::new(img) }, [0; 4], 0.0),
+        ann(Kind::Rect { a: P::new(pos.x - 2.0, pos.y - 2.0), b: P::new(pos.x + w + 2.0, pos.y + h + 2.0) }, [214, 218, 228, 255], 3.0),
+    ]
+}
+
+fn label(pos: P, text: &str, size: f32, color: [u8; 4]) -> Annotation {
+    ann(Kind::Text { pos, text: text.into(), size, background: false }, color, 0.0)
+}
+
+fn flatten(w: f32, h: f32, anns: &[Annotation]) -> RgbaImage {
+    let canvas = RgbaImage::from_pixel(w.round() as u32, h.round() as u32, image::Rgba(EX_BG));
+    crate::editor::render::render(&canvas, anns, &Default::default())
+}
+
+/// The customer table before and after blurring names and emails (`B`).
+fn blur_example(dashboard: &RgbaImage) -> RgbaImage {
+    let d = dash_layout();
+    // One blur per cell, as a user would drag them, so row dividers stay intact.
+    let blur = |x0: f32, x1: f32, r: &Rect| {
+        let (a, b) = px(Rect::from_min_max(Pos2::new(d.table.min.x + x0, r.center().y - 13.0), Pos2::new(d.table.min.x + x1, r.center().y + 13.0)));
+        ann(Kind::Blur { a, b }, [0; 4], 0.0)
+    };
+    let marks: Vec<Annotation> = d.rows.iter().flat_map(|r| [blur(12.0, 150.0, r), blur(222.0, 440.0, r)]).collect();
+    let blurred = crate::editor::render::render(dashboard, &marks, &Default::default());
+    // Customer, email and plan columns.
+    let region = Rect::from_min_max(d.table.min - Vec2::splat(12.0), Pos2::new(d.table.min.x + 620.0, d.table.max.y + 12.0));
+    let (before, after) = (crop_pts(dashboard, region), crop_pts(&blurred, region));
+    let (pw, ph) = (before.width() as f32, before.height() as f32);
+    let (gap, title) = (64.0, 76.0);
+    let top = EX_MARGIN + title;
+    let right = EX_MARGIN + pw + gap;
+    let mut anns = vec![
+        label(P::new(EX_MARGIN, EX_MARGIN), "Before", 36.0, EX_MUTED),
+        label(P::new(right, EX_MARGIN), "After: press B and drag over names and emails", 36.0, EX_INK),
+    ];
+    anns.extend(pasted(before, P::new(EX_MARGIN, top)));
+    anns.extend(pasted(after, P::new(right, top)));
+    flatten(right + pw + EX_MARGIN, top + ph + EX_MARGIN, &anns)
+}
+
+/// Numbered steps (`N`) on the dashboard, with a legend typed with `T`.
+fn steps_example(dashboard: &RgbaImage) -> RgbaImage {
+    let d = dash_layout();
+    let blue = [30, 136, 229, 255];
+    let radius = 26.0;
+    let search = Rect::from_min_size(Pos2::new(DASH.x - 360.0, 66.0), Vec2::new(260.0, 38.0));
+    let spots = [
+        (Pos2::new(d.nav[1].max.x - 18.0, d.nav[1].center().y), "Open Customers"),
+        (Pos2::new(search.max.x - 20.0, search.center().y), "Search for a report"),
+        (Pos2::new(d.cards[0].max.x - 22.0, d.cards[0].min.y + 22.0), "Check this month's revenue"),
+        (Pos2::new(d.cards[3].max.x - 22.0, d.cards[3].min.y + 22.0), "Keep an eye on churn"),
+    ];
+    let step = |n: usize, pos: P| ann(Kind::Step { pos, n: n as u32 + 1, radius }, blue, 6.0);
+    let marks: Vec<Annotation> = spots.iter().enumerate().map(|(n, (p, _))| step(n, P::new(p.x * PPP, p.y * PPP))).collect();
+    let marked = crate::editor::render::render(dashboard, &marks, &Default::default());
+    let shot = crop_pts(&marked, Rect::from_min_max(Pos2::new(0.0, 38.0), Pos2::new(DASH.x, 264.0)));
+    let (pw, ph) = (shot.width() as f32, shot.height() as f32);
+
+    let mut anns = pasted(shot, P::new(EX_MARGIN, EX_MARGIN)).to_vec();
+    // Legend: two columns of "(n) what to do".
+    let legend_top = EX_MARGIN + ph + 56.0;
+    let (col_w, row_h) = (pw / 2.0, 84.0);
+    for (n, (_, what)) in spots.iter().enumerate() {
+        let x = EX_MARGIN + (n % 2) as f32 * col_w + radius;
+        let y = legend_top + (n / 2) as f32 * row_h + radius;
+        anns.push(step(n, P::new(x, y)));
+        anns.push(label(P::new(x + radius + 22.0, y - 22.0), what, 38.0, EX_INK));
+    }
+    flatten(pw + 2.0 * EX_MARGIN, legend_top + 2.0 * row_h + EX_MARGIN - 20.0, &anns)
+}
+
+fn write_examples(dashboard: &RgbaImage) {
+    save(&blur_example(dashboard), "example-blur.png");
+    save(&steps_example(dashboard), "example-steps.png");
+}
+
+#[test]
+#[ignore = "writes README example images; run with --ignored"]
+fn readme_examples() {
+    write_examples(&render_ui(DASH, draw_dashboard));
+}
+
 // ---------- app shots ----------
 
 /// Build the app inside the harness so it shares the harness's egui context.
@@ -482,6 +584,7 @@ fn desktop(dashboard: &RgbaImage, code: &RgbaImage) -> (RgbaImage, Vec<WinRect>)
 fn readme_screenshots() {
     let (library, dashboard) = demo_library();
     let code = render_ui(CODE, draw_code_editor);
+    write_examples(&dashboard);
 
     let editor_for = |library: &Path, dashboard: &RgbaImage| {
         let path = library.join("Rega 2026-11-02 at 09.50.00.png");

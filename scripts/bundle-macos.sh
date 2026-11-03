@@ -47,4 +47,9 @@ PLIST
 # the bundle identifier keeps the permission valid across rebuilds.
 codesign --force --sign - --identifier app.rega.Rega \
   --requirements '=designated => identifier "app.rega.Rega"' "$APP" >/dev/null
+
+# The bundle is recreated from scratch each time; tell Launch Services and
+# Finder about it so they show the new icon instead of a cached blank one.
+touch "$APP"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" || true
 echo "Built $APP"

@@ -40,6 +40,8 @@ pub struct Settings {
     pub image_format: ImageFormat,
     pub copy_after_capture: bool,
     pub open_editor_after_capture: bool,
+    /// Bring Rega to the front on the new capture when it's done.
+    pub focus_after_capture: bool,
     pub delay_secs: u32,
     pub video_format: VideoFormat,
     pub video_fps: u32,
@@ -63,6 +65,7 @@ impl Default for Settings {
             image_format: ImageFormat::Png,
             copy_after_capture: true,
             open_editor_after_capture: true,
+            focus_after_capture: true,
             delay_secs: 0,
             video_format: VideoFormat::Mp4,
             video_fps: 15,
@@ -82,10 +85,18 @@ fn settings_path() -> Option<PathBuf> {
 
 impl Settings {
     pub fn load() -> Self {
-        settings_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let Some(path) = settings_path() else { return Self::default() };
+        let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
+        match serde_json::from_str(&text) {
+            Ok(settings) => settings,
+            Err(e) => {
+                // Keep the unreadable file: the next save would otherwise wipe the
+                // user's shortcuts and folders for good.
+                log::warn!("settings unreadable ({e}); starting from defaults, old file kept as settings.json.bak");
+                let _ = std::fs::rename(&path, path.with_extension("json.bak"));
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self) {
@@ -95,7 +106,9 @@ impl Settings {
         }
         match serde_json::to_string_pretty(self) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
+                // Write then rename, so a crash mid-write can't leave a truncated file.
+                let tmp = path.with_extension("json.tmp");
+                if let Err(e) = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)) {
                     log::warn!("failed to save settings: {e}");
                 }
             }

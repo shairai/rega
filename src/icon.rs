@@ -3,7 +3,7 @@
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 /// Four viewfinder corners and a dot — the Rega mark.
-fn draw_mark(pixmap: &mut Pixmap, size: f32, inset: f32, color: (u8, u8, u8, u8)) {
+pub(crate) fn draw_mark(pixmap: &mut Pixmap, size: f32, inset: f32, color: (u8, u8, u8, u8)) {
     let mut paint = Paint::default();
     paint.set_color_rgba8(color.0, color.1, color.2, color.3);
     paint.anti_alias = true;

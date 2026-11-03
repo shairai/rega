@@ -1,7 +1,10 @@
 //! Screen video recording. A capture thread grabs the region at the target
 //! frame rate and hands frames to an encoder thread (H.264/MP4 or GIF).
 
+use std::cell::RefCell;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -51,7 +54,10 @@ impl Recorder {
         // `Monitor` holds a raw handle that is not `Send` on Windows.
         crate::capture::monitor_with_origin(origin).context("recording monitor not found")?;
 
-        let (tx, rx) = mpsc::channel::<TimedFrame>();
+        // Bounded: when the encoder falls behind (GIF quantisation, slow H.264), drop
+        // frames instead of queueing ~8 MB each until memory runs out. MP4 fills the
+        // gaps by timestamp and GIF stretches the previous frame's delay.
+        let (tx, rx) = mpsc::sync_channel::<TimedFrame>(4);
         let (stop_c, paused_c) = (stop.clone(), paused.clone());
         let fps = cfg.fps.clamp(1, 60);
         let (rx_, ry, rw, rh) = cfg.region;
@@ -68,6 +74,7 @@ impl Recorder {
             let mut rec_time = Duration::ZERO;
             let mut last = Instant::now();
             let mut target: Option<(u32, u32)> = None;
+            let mut failures = 0;
             while !stop_c.load(Ordering::Relaxed) {
                 let tick = Instant::now();
                 if paused_c.load(Ordering::Relaxed) {
@@ -78,7 +85,20 @@ impl Recorder {
                 rec_time += tick - last;
                 last = tick;
 
-                let mut img = monitor.capture_region(px, py, pw, ph)?;
+                // Ride out transient failures (display sleep, mode switch) for ~2 s.
+                let mut img = match monitor.capture_region(px, py, pw, ph) {
+                    Ok(img) => {
+                        failures = 0;
+                        img
+                    }
+                    Err(e) if failures < 2 * fps => {
+                        failures += 1;
+                        log::warn!("frame capture failed: {e}");
+                        thread::sleep(interval);
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
                 let scale = img.width() as f32 / rw as f32;
                 if highlight {
                     let (cx, cy) = crate::capture::to_logical(crate::capture::cursor_position());
@@ -90,8 +110,9 @@ impl Recorder {
                 if img.width() != tw || img.height() != th {
                     img = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
                 }
-                if tx.send(TimedFrame { image: img, at: rec_time }).is_err() {
-                    break;
+                match tx.try_send(TimedFrame { image: img, at: rec_time }) {
+                    Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                    Err(mpsc::TrySendError::Disconnected(_)) => break,
                 }
                 if let Some(rest) = interval.checked_sub(tick.elapsed()) {
                     thread::sleep(rest);
@@ -113,9 +134,15 @@ impl Recorder {
                 let _ = std::fs::remove_file(&out_path);
                 anyhow::bail!("Recording discarded");
             }
-            captured?;
-            encoded?;
-            Ok(out_path)
+            match (captured, encoded) {
+                // The file is complete up to the failure; keep it rather than hide it.
+                (Err(e), Ok(())) => {
+                    log::warn!("recording ended early: {e:#}");
+                    Ok(out_path)
+                }
+                (Err(e), Err(_)) => Err(e),
+                (Ok(()), encoded) => encoded.map(|()| out_path),
+            }
         });
 
         Ok(Self {
@@ -156,6 +183,19 @@ impl Recorder {
     pub fn discard(&self) {
         self.cancel.store(true, Ordering::Relaxed);
         self.stop();
+    }
+
+    /// Stop and block until the file is finalized (used on quit), giving up after `timeout`.
+    pub fn finish_blocking(&mut self, timeout: Duration) -> Option<Result<PathBuf>> {
+        self.stop();
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Some(r) = self.poll_finished() {
+                return Some(r);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        None
     }
 
     /// Returns the result once encoding has finished.
@@ -200,20 +240,25 @@ pub(crate) fn encode_mp4(rx: Receiver<TimedFrame>, fps: u32, path: &PathBuf, can
     use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, UsageType};
     use openh264::formats::{RgbaSliceU8, YUVBuffer};
 
-    let mut encoder: Option<Encoder> = None;
-    let mut h264 = Vec::new();
+    // Created on the first frame. Frames are muxed to disk as they are encoded, so
+    // memory stays flat however long the recording runs.
+    let mut state: Option<(Encoder, Box<minimp4::Mp4Muxer<MuxWriter>>, YUVBuffer)> = None;
+    let io_err = Rc::new(RefCell::new(None));
+    let mut nal = Vec::new();
     let mut written: u64 = 0;
-    let mut dims = (0, 0);
 
     for frame in rx.iter() {
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
         let (w, h) = (frame.image.width() as usize, frame.image.height() as usize);
-        let enc = match &mut encoder {
-            Some(e) => e,
+        let (enc, muxer, yuv) = match &mut state {
+            Some((e, m, y)) => (e, m, y),
             None => {
-                dims = (w, h);
+                let file = std::fs::File::create(path)?;
+                // Boxed before `init_video`: minimp4 keeps a pointer to the muxer.
+                let mut muxer = Box::new(minimp4::Mp4Muxer::new(MuxWriter { file, err: io_err.clone() }));
+                muxer.init_video(w as i32, h as i32, false, "Rega recording");
                 let bps = ((w * h) as f64 * fps as f64 * 0.15).clamp(1_000_000.0, 20_000_000.0) as u32;
                 let config = EncoderConfig::new()
                     .max_frame_rate(FrameRate::from_hz(fps as f32))
@@ -221,7 +266,9 @@ pub(crate) fn encode_mp4(rx: Receiver<TimedFrame>, fps: u32, path: &PathBuf, can
                     .usage_type(UsageType::ScreenContentRealTime)
                     // A keyframe every 2 s keeps seeking in the in-app player fast.
                     .intra_frame_period(IntraFramePeriod::from_num_frames(fps * 2));
-                encoder.insert(Encoder::with_api_config(openh264::OpenH264API::from_source(), config)?)
+                let enc = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)?;
+                let (e, m, y) = state.insert((enc, muxer, YUVBuffer::new(w, h)));
+                (e, m, y)
             }
         };
         // Keep wall-clock timing exact: duplicate frames when capture fell behind.
@@ -229,22 +276,65 @@ pub(crate) fn encode_mp4(rx: Receiver<TimedFrame>, fps: u32, path: &PathBuf, can
         if due <= written {
             continue;
         }
-        let yuv = YUVBuffer::from_rgb_source(RgbaSliceU8::new(frame.image.as_raw(), (w, h)));
+        yuv.read_rgb(RgbaSliceU8::new(frame.image.as_raw(), (w, h)));
         while written < due {
-            enc.encode(&yuv)?.write_vec(&mut h264);
+            nal.clear();
+            enc.encode(&*yuv)?.write_vec(&mut nal);
+            // minimp4's NAL splitter underflows on chunks shorter than a start code.
+            if nal.len() >= 4 {
+                muxer.write_video_with_fps(&nal, fps);
+            }
             written += 1;
         }
     }
 
-    if written == 0 {
-        anyhow::bail!("no frames were captured");
-    }
-    let file = std::fs::File::create(path)?;
-    let mut muxer = minimp4::Mp4Muxer::new(file);
-    muxer.init_video(dims.0 as i32, dims.1 as i32, false, "Rega recording");
-    muxer.write_video_with_fps(&h264, fps);
+    let Some((_, muxer, _)) = state else { anyhow::bail!("no frames were captured") };
     muxer.close();
+    if let Some(e) = io_err.borrow_mut().take() {
+        return Err(e).context("writing the video file");
+    }
     Ok(())
+}
+
+/// File sink for minimp4 that never reports failure: its C write callback `unwrap`s
+/// seeks, and a panic across `extern "C"` aborts the whole app (e.g. on a full disk).
+/// The first error is kept for `encode_mp4` to return instead.
+struct MuxWriter {
+    file: std::fs::File,
+    err: Rc<RefCell<Option<std::io::Error>>>,
+}
+
+impl MuxWriter {
+    fn record(&self, e: std::io::Error) {
+        self.err.borrow_mut().get_or_insert(e);
+    }
+}
+
+impl Write for MuxWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.err.borrow().is_none()
+            && let Err(e) = self.file.write_all(buf)
+        {
+            self.record(e);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for MuxWriter {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match self.file.seek(pos) {
+            Ok(p) => Ok(p),
+            Err(e) => {
+                self.record(e);
+                Ok(0)
+            }
+        }
+    }
 }
 
 pub(crate) fn encode_gif(rx: Receiver<TimedFrame>, path: &PathBuf, cancel: &AtomicBool) -> Result<()> {

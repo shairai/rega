@@ -161,8 +161,16 @@ On first launch Rega shows a **Set up** popup listing each permission with its l
 **Hide sensitive info**
 Open any capture → press `B` and drag over emails, names, tokens or faces → they're pixelated in the image and in every export. The blur stays a mark you can select, move or resize until you export, so you can fix a missed spot later.
 
+<p align="center">
+  <img src="docs/images/example-blur.png" alt="A customer table before and after: names and email addresses pixelated with the Blur tool" width="100%">
+</p>
+
 **Walk someone through a UI**
 Capture the screen → press `N` and click each control in order to drop numbered steps **1, 2, 3** (the count goes up automatically) → add a `T` label beside each → export as **PDF** for a one-page guide. Combine with `B` to blur anything private first.
+
+<p align="center">
+  <img src="docs/images/example-steps.png" alt="A dashboard with numbered steps 1 to 4 on the Customers menu, the search box and two stat cards, with a legend explaining each step" width="100%">
+</p>
 
 **Record a quick demo GIF**
 Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thing → `⌃⌥R` again to stop. The GIF lands in the library tray.

@@ -34,6 +34,8 @@ pub enum AppEvent {
     ShowMain,
     NewImage,
     OpenImage,
+    CloseItem,
+    DeleteItem,
     Quit,
 }
 
@@ -99,8 +101,15 @@ pub struct RegaApp {
     /// Screen Recording permission is missing; captures would only show the wallpaper.
     /// macOS: overlay waiting to be shown natively on the next pass.
     overlay_to_present: Option<((i32, i32), (u32, u32))>,
+    /// Passes left before the window, made transparent while it changed role, is
+    /// shown again; see `hide_until_painted`.
+    reveal_in: Option<u8>,
+    /// When revealed, order the window behind other apps (shown in the background).
+    reveal_behind: bool,
     show_permissions: bool,
     perm_status: Vec<(platform::Permission, bool)>,
+    /// The UI zoom (⌘+/⌘−) to restore once a capture ends; see `sync_capture_zoom`.
+    capture_zoom: Option<f32>,
     /// Smallest the main window may be; shrinks on small screens.
     min_size: Vec2,
     perm_polled: Option<Instant>,
@@ -197,8 +206,11 @@ impl RegaApp {
             ocr_text: None,
             show_settings: false,
             overlay_to_present: None,
+            reveal_in: None,
+            reveal_behind: false,
             show_permissions: false,
             perm_status: Vec::new(),
+            capture_zoom: None,
             min_size: Vec2::new(1300.0, 640.0),
             perm_polled: None,
             perm_opened: false,
@@ -255,9 +267,37 @@ impl RegaApp {
         self.toast = Some((msg.into(), Instant::now()));
     }
 
+    /// Capture geometry (overlay window, selection, recording region) is in screen
+    /// points, which equal egui points only at zoom 1. Hold the zoom there, and keep
+    /// ⌘+/⌘− from changing it, while a capture is under way; restore it afterwards.
+    fn sync_capture_zoom(&mut self, ctx: &egui::Context) {
+        let capturing = matches!(
+            self.activity,
+            Activity::Pending { .. } | Activity::Selecting(_) | Activity::Recording(_) | Activity::Scrolling(_)
+        );
+        match (capturing, self.capture_zoom) {
+            (true, None) => {
+                self.capture_zoom = Some(ctx.zoom_factor());
+                ctx.set_zoom_factor(1.0);
+                ctx.options_mut(|o| o.zoom_with_keyboard = false);
+            }
+            (false, Some(zoom)) => {
+                self.capture_zoom = None;
+                ctx.set_zoom_factor(zoom);
+                ctx.options_mut(|o| o.zoom_with_keyboard = true);
+            }
+            _ => {}
+        }
+    }
+
     fn refresh_library(&mut self) {
         self.library = library::scan(&self.settings.save_dir);
         self.library_scanned = Instant::now();
+        // Drop thumbnails of deleted files and of superseded versions (each autosave
+        // changes the modified time), so the caches don't grow for the app's lifetime.
+        let live: HashMap<&PathBuf, SystemTime> = self.library.iter().map(|i| (&i.path, i.modified)).collect();
+        self.thumbs.retain(|p, _| live.contains_key(p));
+        self.thumbs_requested.retain(|(p, m)| live.get(p) == Some(m));
     }
 
     fn set_tray_title(&self, title: Option<&str>) {
@@ -279,9 +319,20 @@ impl RegaApp {
     }
 
     fn show_normal(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        self.show_window(ctx, frame, true);
+    }
+
+    /// Show the main window (and the Dock icon). Without `focus` it stays behind
+    /// the app the user is working in and Rega isn't activated.
+    fn show_window(&mut self, ctx: &egui::Context, frame: &eframe::Frame, focus: bool) {
+        self.reveal_behind = !focus;
         platform::set_dock_icon(true);
         platform::set_overlay_level(ctx, frame, false);
         if self.win != Win::Normal {
+            // Coming from the overlay or recording bar, the window is resized and
+            // re-decorated; hide it until it has painted the normal UI at its new size.
+            platform::set_window_alpha(frame, 0.0);
+            self.hide_until_painted(ctx, 2);
             ctx.send_viewport_cmd(ViewportCommand::ContentProtected(false));
             ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
             ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
@@ -292,10 +343,28 @@ impl RegaApp {
                 ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min));
             }
         }
+        if !focus {
+            // Showing orders the window to the front; hide it until it can be sent back.
+            platform::set_window_alpha(frame, 0.0);
+            self.hide_until_painted(ctx, 2);
+        }
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        if focus {
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+        }
         self.win = Win::Normal;
         self.hidden_by_user = false;
+    }
+
+    /// A capture finished: bring Rega to the front on it, or (with "Focus Rega
+    /// when done" off) show it in the background, with its Dock icon, behind the
+    /// app the user is working in.
+    fn after_capture(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let focus = self.settings.focus_after_capture;
+        self.show_window(ctx, frame, focus);
+        if focus {
+            platform::activate_app();
+        }
     }
 
     /// After a flow that produced nothing to show, go back to where the user was.
@@ -333,10 +402,40 @@ impl RegaApp {
 
     /// macOS: show the overlay as a non-activating panel on the current Space
     /// (over full-screen apps too) instead of activating Rega.
-    fn present_overlay(&mut self, frame: &eframe::Frame) {
+    fn present_overlay(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        self.tick_reveal(ctx, frame);
         let Some((origin, size)) = self.overlay_to_present.take() else { return };
         platform::set_window_frame(frame, origin.0 as f32, origin.1 as f32, size.0 as f32, size.1 as f32);
+        // Comes up transparent (see `platform::present_overlay`). The screenshot
+        // matches the real screen, so the transparent moment is invisible.
         platform::present_overlay(frame);
+        self.hide_until_painted(ctx, 1);
+    }
+
+    /// Keep the (already transparent) window hidden for `passes` more painted
+    /// passes, so it reappears with fresh content rather than its stale last
+    /// frame stretched to a new size, which flashes.
+    fn hide_until_painted(&mut self, ctx: &egui::Context, passes: u8) {
+        self.reveal_in = Some(passes);
+        ctx.request_repaint();
+    }
+
+    fn tick_reveal(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        match self.reveal_in {
+            Some(0) => {
+                // Ordered back while still transparent, so it never flashes in front.
+                if std::mem::take(&mut self.reveal_behind) {
+                    platform::send_window_to_back(frame);
+                }
+                platform::set_window_alpha(frame, 1.0);
+                self.reveal_in = None;
+            }
+            Some(n) => {
+                self.reveal_in = Some(n - 1);
+                ctx.request_repaint();
+            }
+            None => {}
+        }
     }
 
     fn show_recording_bar(&mut self, ctx: &egui::Context, frame: &eframe::Frame, snap_origin: (i32, i32), monitor: (u32, u32), region: Rect) {
@@ -351,6 +450,9 @@ impl RegaApp {
         };
         let x = (region.center().x - BAR_SIZE.x / 2.0).clamp(0.0, (mw - BAR_SIZE.x).max(0.0));
         let pos = Pos2::new(snap_origin.0 as f32 + x, snap_origin.1 as f32 + y);
+        // The full-screen overlay shrinks into the bar; don't flash its stale frame.
+        platform::set_window_alpha(frame, 0.0);
+        self.hide_until_painted(ctx, 2);
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::ZERO));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(BAR_SIZE));
@@ -377,10 +479,15 @@ impl RegaApp {
                 self.show_normal(ctx, frame);
                 self.import_from_dialog();
             }
+            AppEvent::CloseItem => self.close_current(),
+            AppEvent::DeleteItem => self.delete_current(),
             AppEvent::Quit => {
                 self.autosave_editor();
-                if let Activity::Recording(rec) = &self.activity {
-                    rec.stop();
+                if let Activity::Recording(rec) | Activity::Finishing(rec) = &mut self.activity {
+                    // Exiting mid-write would leave an unplayable video with no index.
+                    if rec.finish_blocking(Duration::from_secs(30)).is_none() {
+                        log::warn!("quit before the recording finished saving");
+                    }
                 }
                 ctx.send_viewport_cmd(ViewportCommand::Close);
                 std::process::exit(0);
@@ -486,10 +593,12 @@ impl RegaApp {
                     match result {
                         Ok(path) => {
                             self.refresh_library();
-                            // Open Rega on the new video.
-                            self.lib_filter = LibFilter::All;
-                            self.open_video(path.clone());
-                            self.show_normal(ctx, frame);
+                            if self.settings.focus_after_capture {
+                                // Open Rega on the new video.
+                                self.lib_filter = LibFilter::All;
+                                self.open_video(path.clone());
+                            }
+                            self.after_capture(ctx, frame);
                             self.toast(format!("Video saved: {}", path.file_name().unwrap_or_default().to_string_lossy()));
                         }
                         Err(e) => {
@@ -622,13 +731,12 @@ impl RegaApp {
             return;
         }
         self.refresh_library();
-        if self.settings.open_editor_after_capture {
+        // Focusing means showing the new capture, so it opens in the editor either way.
+        if self.settings.open_editor_after_capture || self.settings.focus_after_capture {
             self.autosave_editor();
             self.mode = Mode::Editor(Box::new(ed));
-            self.show_normal(ctx, frame);
-        } else {
-            self.return_to_rest(ctx, frame);
         }
+        self.after_capture(ctx, frame);
         let copied = if self.settings.copy_after_capture { " and copied" } else { "" };
         self.toast(format!("Captured{copied}"));
     }
@@ -709,10 +817,21 @@ impl RegaApp {
         }
     }
 
-    /// ⌘N everywhere (the File menu covers macOS), ⌘V on the welcome screen.
+    /// ⌘N everywhere (the File menu covers macOS), ⌘W closes and ⌘D deletes the
+    /// open item, ⌘V on the welcome screen.
     fn home_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
             self.show_new_dialog = true;
+        }
+        if self.current_path().is_some() {
+            let (close, delete) = ctx.input_mut(|i| {
+                (i.consume_key(egui::Modifiers::COMMAND, egui::Key::W), i.consume_key(egui::Modifiers::COMMAND, egui::Key::D))
+            });
+            if delete {
+                self.delete_current();
+            } else if close {
+                self.close_current();
+            }
         }
         if matches!(self.mode, Mode::Home) && ctx.memory(|m| m.focused().is_none()) {
             let pasted = ctx.input(|i| {
@@ -1162,11 +1281,7 @@ impl RegaApp {
     fn tray_ui(&mut self, ui: &mut egui::Ui) {
         let mut open: Option<Item> = None;
         let mut delete: Option<Item> = None;
-        let current = match &self.mode {
-            Mode::Editor(ed) => Some(ed.path.clone()),
-            Mode::Video(player) => Some(player.path.clone()),
-            Mode::Home => None,
-        };
+        let current = self.current_path().cloned();
 
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Library").font(theme::medium(14.0)).color(theme::TEXT));
@@ -1258,19 +1373,53 @@ impl RegaApp {
             self.open_item(&item);
         }
         if let Some(item) = delete {
-            let confirmed = rfd::MessageDialog::new()
-                .set_title("Delete capture?")
-                .set_description(format!("“{}” will be permanently deleted.", item.name))
-                .set_buttons(rfd::MessageButtons::OkCancel)
-                .show();
-            if confirmed == rfd::MessageDialogResult::Ok {
-                if current.as_ref() == Some(&item.path) {
-                    self.mode = Mode::Home;
-                }
-                match library::delete(&item.path) {
-                    Ok(()) => self.refresh_library(),
-                    Err(e) => self.toast(format!("Delete failed: {e}")),
-                }
+            self.confirm_delete(&item);
+        }
+    }
+
+    /// The path of the image or video open in the workspace, if any.
+    fn current_path(&self) -> Option<&PathBuf> {
+        match &self.mode {
+            Mode::Editor(ed) => Some(&ed.path),
+            Mode::Video(player) => Some(&player.path),
+            Mode::Home => None,
+        }
+    }
+
+    /// Close the open image or video and return to the home screen (⌘W).
+    fn close_current(&mut self) {
+        if self.current_path().is_none() {
+            return;
+        }
+        self.autosave_editor();
+        self.mode = Mode::Home;
+    }
+
+    /// Delete the open image or video after confirming (⌘D).
+    fn delete_current(&mut self) {
+        let Some(path) = self.current_path().cloned() else { return };
+        // Save first so a pending autosave can't recreate the file after the delete.
+        self.autosave_editor();
+        match self.library.iter().find(|i| i.path == path).cloned() {
+            Some(item) => self.confirm_delete(&item),
+            None => self.toast("This item isn't in the library"),
+        }
+    }
+
+    /// Ask, then permanently delete a library item (closing it if it is open).
+    fn confirm_delete(&mut self, item: &Item) {
+        let confirmed = rfd::MessageDialog::new()
+            .set_title("Delete capture?")
+            .set_description(format!("“{}” will be permanently deleted.", item.name))
+            .set_buttons(rfd::MessageButtons::OkCancel)
+            .show();
+        if confirmed == rfd::MessageDialogResult::Ok {
+            if self.current_path() == Some(&item.path) {
+                self.mode = Mode::Home;
+            }
+            match library::delete(&item.path) {
+                Ok(()) => self.refresh_library(),
+                Err(e) => self.toast(format!("Delete failed: {e}")),
             }
         }
     }
@@ -1404,7 +1553,8 @@ impl RegaApp {
                 });
             });
         });
-        ctx.request_repaint_after(Duration::from_millis(50));
+        // The bar only shows whole seconds; don't compete with the capture/encode threads.
+        ctx.request_repaint_after(Duration::from_millis(200));
         if discard {
             rec.discard();
             stop = true;
@@ -1459,6 +1609,8 @@ impl RegaApp {
                         theme::section(ui, "After capture");
                         theme::switch(ui, &mut self.settings.copy_after_capture, "Copy to clipboard");
                         theme::switch(ui, &mut self.settings.open_editor_after_capture, "Open in the editor");
+                        theme::switch(ui, &mut self.settings.focus_after_capture, "Focus Rega when done")
+                            .on_hover_text("On: Rega comes to the front with the new capture.\nOff: it opens behind the app you're using.");
                         ui.horizontal(|ui| {
                             ui.label("Image format");
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1814,7 +1966,8 @@ fn shortcut_chip(ui: &mut egui::Ui, text: &str, recording: bool) -> egui::Respon
         let pulse = (t * 4.0).sin() * 0.5 + 0.5;
         p.rect_filled(rect, 7.0, theme::ACCENT.gamma_multiply(0.18 + 0.12 * pulse));
         p.rect_stroke(rect, 7.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
-        ui.ctx().request_repaint();
+        // ~30 fps is plenty for the pulse; an unbounded repaint busy-loops while waiting.
+        ui.ctx().request_repaint_after(Duration::from_millis(33));
     } else {
         p.rect_filled(rect, 7.0, lerp(theme::SURFACE_3, Color32::from_rgb(46, 52, 66), hover));
         p.rect_stroke(rect, 7.0, Stroke::new(1.0, theme::BORDER_STRONG), StrokeKind::Inside);
@@ -1837,15 +1990,17 @@ fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
 impl eframe::App for RegaApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Before `advance_activity`, so it runs a pass after `show_overlay`.
-        self.present_overlay(frame);
+        self.present_overlay(ctx, frame);
         while let Ok(ev) = self.events.try_recv() {
             self.handle_event(ev, ctx, frame);
         }
+        self.sync_capture_zoom(ctx);
         while let Ok((path, modified, img)) = self.thumb_results.try_recv() {
             let tex = ctx.load_texture(path.to_string_lossy(), img, egui::TextureOptions::LINEAR);
             self.thumbs.insert(path, (modified, tex));
         }
         self.advance_activity(ctx, frame);
+        self.sync_capture_zoom(ctx);
 
         if ctx.input(|i| i.viewport().close_requested()) {
             // Closing the window keeps Rega running in the menu bar.
@@ -1911,8 +2066,9 @@ impl eframe::App for RegaApp {
             return;
         }
         self.refresh_permissions(false);
-        if self.missing_permissions() {
-            // Notice a grant made in System Settings without needing input.
+        if self.show_permissions || self.perm_status.iter().any(|(p, ok)| !ok && !p.optional()) {
+            // Notice a grant made in System Settings without needing input. A skipped
+            // optional permission must not keep the idle app redrawing every second.
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         self.workspace_ui(ui);
@@ -2035,10 +2191,15 @@ fn setup_menus(
         let _ = file_menu.append_items(&[
             &MenuItem::with_id("new-image", "New Image…", true, cmd(Code::KeyN)),
             &MenuItem::with_id("open-image", "Open Image…", true, cmd(Code::KeyO)),
+            &PredefinedMenuItem::separator(),
+            &MenuItem::with_id("close-item", "Close", true, cmd(Code::KeyW)),
+            &MenuItem::with_id("delete-item", "Delete…", true, cmd(Code::KeyD)),
         ]);
     }
     map.insert("new-image".into(), AppEvent::NewImage);
     map.insert("open-image".into(), AppEvent::OpenImage);
+    map.insert("close-item".into(), AppEvent::CloseItem);
+    map.insert("delete-item".into(), AppEvent::DeleteItem);
     let window_menu = Submenu::new("Window", true);
     let _ = window_menu.append_items(&[
         &MenuItem::with_id("show", "Library", true, None),

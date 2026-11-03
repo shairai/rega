@@ -71,6 +71,20 @@ impl Tool {
     }
 }
 
+/// Above this many pixels, moving a blur/spotlight re-rasters on release only.
+const LIVE_RASTER_PIXELS: u64 = 8_000_000;
+
+/// What `render::apply_raster` depends on, to tell whether the canvas texture is stale.
+fn raster_key(anns: &[Annotation]) -> Vec<(bool, P, P)> {
+    anns.iter()
+        .filter_map(|a| match a.kind {
+            Kind::Blur { a, b } => Some((true, a, b)),
+            Kind::Spotlight { a, b } => Some((false, a, b)),
+            _ => None,
+        })
+        .collect()
+}
+
 const PALETTE: [Rgba; 8] = [
     [235, 59, 52, 255],
     [255, 140, 0, 255],
@@ -115,7 +129,9 @@ pub struct Editor {
 
     zoom: f32,
     fit: bool,
-    texture: Option<TextureHandle>,
+    /// The flattened canvas as GPU tiles (image-pixel rect each): GPUs cap a
+    /// texture side at 8192–16384 px and scrolling captures reach 40000.
+    tiles: Vec<(TextureHandle, Rect)>,
     texture_dirty: bool,
 
     drawing: Option<Annotation>,
@@ -129,7 +145,8 @@ pub struct Editor {
     /// Eyedropper active: the flattened image to sample colors from.
     picking: Option<Arc<RgbaImage>>,
     /// GPU textures for pasted image layers, keyed by the layer's pixel buffer.
-    layer_textures: HashMap<usize, TextureHandle>,
+    /// The `Weak` guards against a freed buffer's address being reused by a new paste.
+    layer_textures: HashMap<usize, (std::sync::Weak<RgbaImage>, TextureHandle)>,
     /// Index of the image layer whose corner handle is being dragged.
     resizing: Option<usize>,
     dirty: bool,
@@ -164,7 +181,7 @@ impl Editor {
             text_bg: false,
             zoom: 1.0,
             fit: true,
-            texture: None,
+            tiles: Vec::new(),
             texture_dirty: true,
             drawing: None,
             crop_drag: None,
@@ -238,9 +255,14 @@ impl Editor {
     }
 
     fn restore(&mut self, s: State) {
-        if !Arc::ptr_eq(&s.base, &self.base) {
+        let base_differs = !Arc::ptr_eq(&s.base, &self.base);
+        if base_differs {
             self.base_changed = true;
             self.fit = true;
+        }
+        // Re-rastering a large canvas is costly; skip it when only vector shapes changed.
+        if base_differs || raster_key(&s.anns) != raster_key(&self.anns) {
+            self.texture_dirty = true;
         }
         self.base = s.base;
         self.anns = s.anns;
@@ -248,7 +270,6 @@ impl Editor {
         self.next_step = s.next_step;
         self.selected = None;
         self.editing_text = None;
-        self.texture_dirty = true;
         self.dirty = true;
     }
 
@@ -328,6 +349,48 @@ impl Editor {
         self.fit = true;
     }
 
+    /// Enlarge the canvas so the image layer `i`, just dragged past its edge, stays fully visible.
+    /// Only the dragged layer counts, so layers the user deliberately cropped stay cropped.
+    fn grow_canvas_to_layer(&mut self, i: usize) {
+        let Some(Kind::Image { pos, w, h, .. }) = self.anns.get(i).map(|a| &a.kind) else { return };
+        let (cw, ch) = (self.base.width() as f32, self.base.height() as f32);
+        // Round rather than floor/ceil: a sub-pixel overhang is not worth a new base image.
+        let x0 = pos.x.round().min(0.0);
+        let y0 = pos.y.round().min(0.0);
+        let x1 = (pos.x + w).round().max(cw);
+        let y1 = (pos.y + h).round().max(ch);
+        let (nw, nh) = ((x1 - x0) as u32, (y1 - y0) as u32);
+        if nw == self.base.width() && nh == self.base.height() {
+            return;
+        }
+        if nw > 16_000 || nh > 40_000 {
+            log::warn!("not growing canvas to {nw}x{nh}: over the size limit");
+            return;
+        }
+        let mut grown = RgbaImage::from_pixel(nw, nh, self.background_fill());
+        image::imageops::replace(&mut grown, &*self.base, (-x0) as i64, (-y0) as i64);
+        self.base = Arc::new(grown);
+        self.base_changed = true;
+        for a in &mut self.anns {
+            a.translate(-x0, -y0);
+        }
+        self.texture_dirty = true;
+        self.dirty = true;
+    }
+
+    /// The canvas colour when all four corners agree (a blank canvas), else transparent,
+    /// so a screenshot's title bar colour is not smeared into the new area.
+    fn background_fill(&self) -> image::Rgba<u8> {
+        let (w, h) = (self.base.width(), self.base.height());
+        let c = *self.base.get_pixel(0, 0);
+        let corners = [(w - 1, 0), (0, h - 1), (w - 1, h - 1)];
+        if corners.iter().all(|&(x, y)| *self.base.get_pixel(x, y) == c) {
+            c
+        } else {
+            image::Rgba([0, 0, 0, 0])
+        }
+    }
+
     fn resize(&mut self, factor: f32) {
         let w = ((self.base.width() as f32 * factor).round() as u32).max(1);
         let h = ((self.base.height() as f32 * factor).round() as u32).max(1);
@@ -380,7 +443,7 @@ impl Editor {
                     self.resizing = Some(i);
                     return;
                 }
-                self.selected = self.hit_test(p);
+                self.select(self.hit_test(p));
                 if self.selected.is_some() {
                     self.moving = Some(p);
                     self.moved = false;
@@ -412,9 +475,11 @@ impl Editor {
                 self.push_undo();
                 self.moved = true;
             }
+            let large = self.base.width() as u64 * self.base.height() as u64 > LIVE_RASTER_PIXELS;
             let ann = &mut self.anns[i];
             ann.translate(p.x - last.x, p.y - last.y);
-            if ann.is_raster() {
+            // Large canvases re-raster once on release (see `drag_end`), not every frame.
+            if ann.is_raster() && !large {
                 self.texture_dirty = true;
             }
             self.moving = Some(p);
@@ -444,8 +509,17 @@ impl Editor {
     }
 
     fn drag_end(&mut self) {
+        let dragged = self.resizing.or(self.selected.filter(|_| self.moved && self.moving.is_some()));
+        if let Some(i) = dragged
+            && self.anns.get(i).is_some_and(|a| a.is_raster())
+        {
+            self.texture_dirty = true;
+        }
         self.moving = None;
         self.resizing = None;
+        if let Some(i) = dragged {
+            self.grow_canvas_to_layer(i);
+        }
         if let Some((a, b)) = self.crop_drag.take() {
             self.crop(a, b);
         }
@@ -467,7 +541,7 @@ impl Editor {
             return;
         }
         match self.tool {
-            Tool::Select => self.selected = self.hit_test(p),
+            Tool::Select => self.select(self.hit_test(p)),
             Tool::Text => {
                 if let Some(i) = self.hit_test(p).filter(|&i| matches!(self.anns[i].kind, Kind::Text { .. })) {
                     self.start_text_edit(i);
@@ -519,19 +593,59 @@ impl Editor {
     fn start_text_edit(&mut self, i: usize) {
         self.push_undo();
         self.editing_text = Some(i);
-        self.selected = Some(i);
+        self.select(Some(i));
         self.focus_text = true;
     }
 
+    /// Select an existing element and show its style in the side panel, so the
+    /// color swatch, sliders and switches reflect what is selected.
+    fn select(&mut self, i: Option<usize>) {
+        self.selected = i;
+        let Some(ann) = i.and_then(|i| self.anns.get(i)) else { return };
+        match &ann.kind {
+            // A pasted image's color/width are unused placeholders.
+            Kind::Image { .. } => return,
+            Kind::Text { size, background, .. } => {
+                self.font_size = *size;
+                self.text_bg = *background;
+            }
+            Kind::Rect { .. } | Kind::Ellipse { .. } => {
+                self.width = ann.width;
+                self.filled = ann.filled;
+            }
+            Kind::Step { .. } => {}
+            _ => self.width = ann.width,
+        }
+        self.color = to_c32(ann.color);
+    }
+
     fn ensure_texture(&mut self, ctx: &egui::Context) {
-        if !self.texture_dirty && self.texture.is_some() {
+        if !self.texture_dirty && !self.tiles.is_empty() {
             return;
         }
         let img = render::apply_raster(&self.base, &self.anns);
-        let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
-        match &mut self.texture {
-            Some(t) => t.set(color, egui::TextureOptions::LINEAR),
-            None => self.texture = Some(ctx.load_texture("editor-image", color, egui::TextureOptions::LINEAR)),
+        let (w, h) = img.dimensions();
+        let side = (ctx.input(|i| i.max_texture_side) as u32).max(256);
+        let mut old = std::mem::take(&mut self.tiles).into_iter();
+        for y in (0..h).step_by(side as usize) {
+            for x in (0..w).step_by(side as usize) {
+                let (tw, th) = (side.min(w - x), side.min(h - y));
+                let color = if (tw, th) == (w, h) {
+                    egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw())
+                } else {
+                    let tile = image::imageops::crop_imm(&img, x, y, tw, th).to_image();
+                    egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], tile.as_raw())
+                };
+                let handle = match old.next() {
+                    Some((mut t, _)) => {
+                        t.set(color, egui::TextureOptions::LINEAR);
+                        t
+                    }
+                    None => ctx.load_texture("editor-image", color, egui::TextureOptions::LINEAR),
+                };
+                let rect = Rect::from_min_size(Pos2::new(x as f32, y as f32), Vec2::new(tw as f32, th as f32));
+                self.tiles.push((handle, rect));
+            }
         }
         self.texture_dirty = false;
     }
@@ -614,10 +728,12 @@ impl Editor {
             if let Kind::Image { img, .. } = &ann.kind {
                 let key = Arc::as_ptr(img) as usize;
                 live.push(key);
-                self.layer_textures.entry(key).or_insert_with(|| {
+                let stale = self.layer_textures.get(&key).is_none_or(|(weak, _)| !weak.upgrade().is_some_and(|w| Arc::ptr_eq(&w, img)));
+                if stale {
                     let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
-                    ctx.load_texture("image-layer", color, egui::TextureOptions::LINEAR)
-                });
+                    let tex = ctx.load_texture("image-layer", color, egui::TextureOptions::LINEAR);
+                    self.layer_textures.insert(key, (Arc::downgrade(img), tex));
+                }
             }
         }
         // Keep undo history cheap: drop textures for layers no longer on the canvas.
@@ -870,7 +986,9 @@ impl Editor {
     pub fn canvas(&mut self, ui: &mut egui::Ui) {
         self.ensure_texture(ui.ctx());
         self.ensure_layer_textures(ui.ctx());
-        let Some(tex_id) = self.texture.as_ref().map(|t| t.id()) else { return };
+        if self.tiles.is_empty() {
+            return;
+        }
         let img_size = Vec2::new(self.base.width() as f32, self.base.height() as f32);
         let avail = ui.available_size();
         if self.fit {
@@ -968,9 +1086,13 @@ impl Editor {
             if self.base.get_pixel(0, 0)[3] < 255 {
                 paint_checkerboard(&painter, img_rect);
             }
-            painter.image(tex_id, img_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            for (tex, r) in &self.tiles {
+                let screen = Rect::from_min_size(origin + r.min.to_vec2() * zoom, r.size() * zoom);
+                painter.image(tex.id(), screen, uv, Color32::WHITE);
+            }
             let layers = &self.layer_textures;
-            let layer_tex = |img: &Arc<RgbaImage>| layers.get(&(Arc::as_ptr(img) as usize)).map(|t| t.id());
+            let layer_tex = |img: &Arc<RgbaImage>| layers.get(&(Arc::as_ptr(img) as usize)).map(|(_, t)| t.id());
             for (i, ann) in self.anns.iter().enumerate() {
                 let editing = self.editing_text == Some(i);
                 paint_annotation(&painter, ann, &to_screen, zoom, editing, &layer_tex);
@@ -1385,6 +1507,8 @@ fn paint_loupe(painter: &egui::Painter, img: &RgbaImage, at: Pos2, (cx, cy): (u3
 /// Subtle dot grid behind the image.
 fn paint_backdrop(painter: &egui::Painter, rect: Rect) {
     painter.rect_filled(rect, 0.0, crate::theme::BG);
+    // Only the visible part: a zoomed tall capture would otherwise be millions of dots.
+    let rect = rect.intersect(painter.clip_rect());
     let step = 22.0;
     let dot = Color32::from_rgb(30, 34, 42);
     let mut y = rect.min.y - rect.min.y.rem_euclid(step);
@@ -1567,8 +1691,12 @@ fn paint_visual_text(
 fn paint_checkerboard(painter: &egui::Painter, rect: Rect) {
     painter.rect_filled(rect, 0.0, Color32::from_gray(235));
     let cell = 10.0;
-    let mut y = rect.min.y;
-    let mut row = 0;
+    // Start at the first visible row, keeping the pattern anchored to the image.
+    let vis = rect.intersect(painter.clip_rect());
+    let first = ((vis.min.y - rect.min.y) / cell).floor().max(0.0);
+    let mut y = rect.min.y + first * cell;
+    let mut row = first as i64;
+    let rect = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, vis.max.y));
     while y < rect.max.y {
         let mut x = rect.min.x + if row % 2 == 0 { 0.0 } else { cell };
         while x < rect.max.x {

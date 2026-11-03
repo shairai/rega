@@ -181,14 +181,11 @@ fn to_pixmap(img: &RgbaImage) -> Pixmap {
 }
 
 fn from_pixmap(pm: &Pixmap) -> RgbaImage {
-    let data = pm
-        .pixels()
-        .iter()
-        .flat_map(|p| {
-            let c = p.demultiply();
-            [c.red(), c.green(), c.blue(), c.alpha()]
-        })
-        .collect();
+    let mut data = Vec::with_capacity(pm.pixels().len() * 4);
+    for p in pm.pixels() {
+        let c = p.demultiply();
+        data.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+    }
     RgbaImage::from_raw(pm.width(), pm.height(), data).expect("pixmap dims")
 }
 
@@ -380,7 +377,7 @@ fn draw_vector(pm: &mut Pixmap, ann: &Annotation) {
     }
 }
 
-fn draw_text(pm: &mut Pixmap, pos: P, text: &str, size: f32, color: Rgba) {
+pub(crate) fn draw_text(pm: &mut Pixmap, pos: P, text: &str, size: f32, color: Rgba) {
     let fonts = [font(), hebrew_font()];
     let f = &fonts[0];
     let s = f.as_scaled(px_scale(f, size));
@@ -399,7 +396,8 @@ fn draw_text(pm: &mut Pixmap, pos: P, text: &str, size: f32, color: Rgba) {
                 if x < 0 || y < 0 || x >= pw || y >= ph {
                     return;
                 }
-                let i = ((y * pw + x) * 4) as usize;
+                // usize: y * pw overflows i32 on tall canvases (up to 16000x40000).
+                let i = (y as usize * pw as usize + x as usize) * 4;
                 let a = cov.clamp(0.0, 1.0) * color[3] as f32 / 255.0;
                 for c in 0..3 {
                     let src = color[c] as f32 * a;
