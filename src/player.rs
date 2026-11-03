@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, TextureHandle, Vec2};
 use image::RgbaImage;
 
+use crate::config::GifQuality;
 use crate::platform;
 use crate::theme::{self, icon};
 
@@ -166,8 +167,11 @@ pub fn first_frame(path: &Path) -> Result<RgbaImage> {
 }
 
 /// Write the part of `src` between `start` and `end` (seconds) to `dst`,
-/// re-encoded in the same format. The original is left untouched.
-pub fn export_trimmed(src: &Path, dst: &Path, start: f64, end: f64) -> Result<()> {
+/// encoded as GIF or MP4 according to `dst`'s extension. A video turned into a
+/// GIF is scaled and thinned to `gif`'s width, frame rate and palette (a GIF of
+/// a full-size 30 fps recording would be tens of megabytes). The original is
+/// left untouched.
+pub fn export_trimmed(src: &Path, dst: &Path, start: f64, end: f64, gif: GifQuality) -> Result<()> {
     use std::sync::atomic::AtomicBool;
 
     use crate::recorder::{TimedFrame, encode_gif, encode_mp4};
@@ -179,15 +183,34 @@ pub fn export_trimmed(src: &Path, dst: &Path, start: f64, end: f64) -> Result<()
     let first = (0..n).rev().find(|&i| source.time(i) <= start).unwrap_or(0);
     let picked: Vec<usize> = (first..n).take_while(|&i| i == first || source.time(i) < end).collect();
     let fps = ((n as f64 / media.duration.max(0.001)).round() as u32).clamp(1, 60);
-    let is_gif = matches!(source, Source::Gif { .. });
+    let to_gif = dst.extension().is_some_and(|e| e.eq_ignore_ascii_case("gif"));
+    let from_video = !matches!(source, Source::Gif { .. });
+    let shrink = to_gif && from_video;
     let (tx, rx) = mpsc::channel::<TimedFrame>();
     let dst = dst.to_path_buf();
     std::thread::scope(|scope| {
         let decoding = scope.spawn(move || -> Result<()> {
             let mut decoder = Decoder::new();
+            // Thin to the preset's fps on a fixed schedule (15 → 12 fps keeps 4 of
+            // every 5 frames); the GIF encoder stretches the kept frames' delays.
+            let step = 1.0 / gif.fps() as f64;
+            let mut next_due = f64::NEG_INFINITY;
             for i in picked {
-                let Some(image) = decoder.frame(source, i)? else { continue };
-                let at = Duration::from_secs_f64((source.time(i) - start).max(0.0));
+                let t = source.time(i);
+                if shrink && t + 1e-3 < next_due {
+                    continue;
+                }
+                next_due = next_due.max(t - step) + step;
+                if next_due <= t {
+                    next_due = t + step;
+                }
+                let Some(mut image) = decoder.frame(source, i)? else { continue };
+                let max_w = gif.max_width();
+                if shrink && image.width() > max_w {
+                    let h = (image.height() as f64 * max_w as f64 / image.width() as f64).round().max(1.0) as u32;
+                    image = image::imageops::resize(&image, max_w, h, image::imageops::FilterType::Triangle);
+                }
+                let at = Duration::from_secs_f64((t - start).max(0.0));
                 if tx.send(TimedFrame { image, at }).is_err() {
                     break;
                 }
@@ -195,7 +218,11 @@ pub fn export_trimmed(src: &Path, dst: &Path, start: f64, end: f64) -> Result<()
             Ok(())
         });
         let cancel = AtomicBool::new(false);
-        let encoded = if is_gif { encode_gif(rx, &dst, &cancel) } else { encode_mp4(rx, fps, &dst, &cancel) };
+        // Trimming a GIF keeps its full palette.
+        let colors = if from_video { gif.colors() } else { 256 };
+        // Decoded video frames carry compression noise; ignore tiny differences.
+        let tolerance = if from_video { 4 } else { 0 };
+        let encoded = if to_gif { encode_gif(rx, &dst, &cancel, colors, tolerance) } else { encode_mp4(rx, fps, &dst, &cancel) };
         decoding.join().unwrap_or_else(|_| Err(anyhow::anyhow!("decoder crashed")))?;
         encoded
     })
@@ -297,7 +324,7 @@ fn playback(media: Media, rx: Receiver<Command>, shared: Arc<Mutex<Shared>>, ctx
 /// Something the app should react to.
 pub enum PlayerAction {
     None,
-    /// A trimmed copy was written here.
+    /// A new copy (trimmed, and/or converted to GIF) was written here.
     Saved(PathBuf),
     Failed(String),
 }
@@ -368,7 +395,7 @@ impl Player {
                     self.trim = None;
                     PlayerAction::Saved(path)
                 }
-                Err(e) => PlayerAction::Failed(format!("Trim failed: {e:#}")),
+                Err(e) => PlayerAction::Failed(format!("Saving failed: {e:#}")),
             };
         }
         let (position, playing, error) = {
@@ -449,7 +476,12 @@ impl Player {
                                 ui.label(egui::RichText::new("Saving…").color(theme::TEXT_MUTED));
                             } else {
                                 if theme::primary_button(ui, Some(icon::SAVE), "Save trimmed copy").clicked() {
-                                    self.save_trimmed(a, b);
+                                    self.save_trimmed(a, b, None);
+                                }
+                                if !self.is_gif()
+                                    && let Some(q) = gif_menu(ui)
+                                {
+                                    self.save_trimmed(a, b, Some(q));
                                 }
                                 if theme::secondary_button(ui, None, "Cancel").clicked() {
                                     self.trim = None;
@@ -461,7 +493,16 @@ impl Player {
                                     .color(theme::TEXT),
                             );
                         }
+                        None if self.saving.is_some() => {
+                            ui.add(egui::Spinner::new());
+                            ui.label(egui::RichText::new("Saving GIF…").color(theme::TEXT_MUTED));
+                        }
                         None => {
+                            if !self.is_gif()
+                                && let Some(q) = gif_menu(ui)
+                            {
+                                self.save_trimmed(0.0, self.duration, Some(q));
+                            }
                             if theme::icon_button(ui, icon::FOLDER, if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Show in folder" }).clicked() {
                                 platform::reveal_path(&self.path);
                             }
@@ -482,15 +523,25 @@ impl Player {
         action
     }
 
-    fn save_trimmed(&mut self, start: f64, end: f64) {
+    fn is_gif(&self) -> bool {
+        self.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gif"))
+    }
+
+    /// Save `start..end` as a new library item: same format, or a GIF at the
+    /// given quality.
+    fn save_trimmed(&mut self, start: f64, end: f64, as_gif: Option<GifQuality>) {
         self.send(Command::Pause);
         let src = self.path.clone();
-        let ext = src.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "mp4".into());
+        let ext = if as_gif.is_some() {
+            "gif".into()
+        } else {
+            src.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "mp4".into())
+        };
         let dst = crate::library::new_capture_path(src.parent().unwrap_or(Path::new(".")), &ext);
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(export_trimmed(&src, &dst, start, end).map(|()| dst));
+            let _ = tx.send(export_trimmed(&src, &dst, start, end, as_gif.unwrap_or_default()).map(|()| dst));
             ctx.request_repaint();
         });
         self.saving = Some(rx);
@@ -579,6 +630,23 @@ fn clock(t: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// "Save as GIF" button that opens a menu of quality presets; returns the one picked.
+fn gif_menu(ui: &mut egui::Ui) -> Option<GifQuality> {
+    let resp = theme::secondary_button(ui, None, "Save as GIF");
+    let mut picked = None;
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.set_min_width(240.0);
+        for q in GifQuality::ALL {
+            let text = egui::RichText::new(format!("{}   {}", q.label(), q.details()));
+            if ui.button(text).clicked() {
+                picked = Some(q);
+                ui.close();
+            }
+        }
+    });
+    picked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,9 +672,15 @@ mod tests {
 
         // Trim 1.0–2.0 s of the 3 s video.
         let cut = dir.join("cut.mp4");
-        export_trimmed(&mp4, &cut, 1.0, 2.0).unwrap();
+        export_trimmed(&mp4, &cut, 1.0, 2.0, GifQuality::default()).unwrap();
         let trimmed = open_mp4(&cut).unwrap();
         assert!((trimmed.duration - 1.0).abs() < 0.2, "trimmed duration {}", trimmed.duration);
+
+        // MP4 → GIF: 10 fps source stays under the 15 fps cap, so 10 frames.
+        let as_gif = dir.join("cut.gif");
+        export_trimmed(&mp4, &as_gif, 1.0, 2.0, GifQuality::default()).unwrap();
+        let gif = open_gif(&as_gif).unwrap();
+        assert_eq!(gif.source.len(), 10);
 
         let gif = dir.join("t.gif");
         crate::recorder::write_test_gif(&gif, 4);

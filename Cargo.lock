@@ -4836,6 +4836,7 @@ dependencies = [
  "arboard",
  "base64",
  "chrono",
+ "color_quant",
  "dirs",
  "eframe",
  "egui_kittest",

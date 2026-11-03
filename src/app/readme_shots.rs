@@ -663,6 +663,45 @@ fn readme_screenshots() {
 }
 
 /// Renders the permissions popup + banner; writes PNGs only when
+/// Two selected library items: header shows the count and batch actions.
+/// Saved when `SELECTION_PREVIEW_DIR` is set.
+#[test]
+fn library_selection_renders() {
+    let (library, _) = demo_library();
+    let picked: Vec<PathBuf> = ["Rega 2026-11-02 at 09.40.00.png", "Rega 2026-11-02 at 09.20.00.png"].iter().map(|n| library.join(n)).collect();
+    let mut h = app_harness(Vec2::new(1360.0, 840.0), move |ctx| {
+        let mut app = RegaApp::demo(ctx, library);
+        app.lib_selection = picked.into_iter().collect();
+        app
+    });
+    for _ in 0..8 {
+        h.step();
+    }
+    h.get_by_label("2 selected");
+    if let Ok(d) = std::env::var("SELECTION_PREVIEW_DIR") {
+        h.render().unwrap().save(Path::new(&d).join("selection.png")).unwrap();
+    }
+}
+
+/// The About window shows the name and version; saved when `ABOUT_PREVIEW_DIR` is set.
+#[test]
+fn about_window_renders() {
+    let lib = std::env::temp_dir().join(format!("rega-about-{}", std::process::id()));
+    std::fs::create_dir_all(&lib).unwrap();
+    let mut h = app_harness(Vec2::new(1360.0, 840.0), move |ctx| {
+        let mut app = RegaApp::demo(ctx, lib);
+        app.show_about = true;
+        app
+    });
+    for _ in 0..6 {
+        h.step();
+    }
+    h.get_by_label(&format!("Version {}", env!("CARGO_PKG_VERSION")));
+    if let Ok(d) = std::env::var("ABOUT_PREVIEW_DIR") {
+        h.render().unwrap().save(Path::new(&d).join("about.png")).unwrap();
+    }
+}
+
 /// `PERMISSIONS_PREVIEW_DIR` is set.
 #[test]
 fn permissions_popup_renders() {

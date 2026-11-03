@@ -44,7 +44,7 @@
 | **Region & window** | Drag a region on a frozen copy of the screen, or click a window to grab it. A live size label, crosshair and pixel magnifier (with the color's hex code) help you land exactly. |
 | **Full screen** | One shortcut, the whole display under your cursor. |
 | **Scrolling capture** | Rega scrolls the page for you and stitches the frames into one tall image — sticky headers and footers included. |
-| **Video** | Record any region to **MP4** (H.264) or **GIF**, with pause/resume and an optional cursor highlight. The control bar stays out of the recording. |
+| **Video** | Record any region to **MP4** (H.264) or **GIF**, with pause/resume and an optional cursor highlight. The control bar stays out of the recording. In the built-in player, trim a recording or **Save as GIF** (the whole video or just the trimmed part). |
 | **Grab text (OCR)** | Select a region and get its text on the clipboard, using the built-in OCR engine of macOS (Vision) or Windows (Windows.Media.Ocr; install a language pack in Settings › Time & language if none is present). |
 | **Delay timer** | 3, 5 or 10 seconds to open a menu or hover state first. |
 
@@ -210,6 +210,10 @@ Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thin
 | `I` | Eyedropper |
 | `0` | Zoom to fit |
 | `Esc` | Deselect, cancel a drawing or the eyedropper |
+| `⌘W` | Close the open capture (again: close the window; Rega stays in the menu bar) |
+| `⌘D` | Delete the open capture, or the selected library items |
+| `⌘Q` | Quit Rega |
+| `⌘`-click / `⇧`-click | Select several library items, or a range, to delete them together |
 
 ## How it works
 
@@ -263,7 +267,7 @@ They are written to `docs/images/`.
 ## Roadmap
 
 - [x] Windows build
-- [ ] Audio in recordings and video trimming
+- [ ] Audio in recordings
 - [ ] Capturing across several displays at once
 - [ ] Load Cisco's prebuilt OpenH264 at runtime (H.264 patent licensing)
 - [ ] Share links / cloud upload
@@ -273,6 +277,7 @@ They are written to `docs/images/`.
 - Interface font: [Ubuntu](https://fonts.google.com/specimen/Ubuntu) — Ubuntu Font Licence 1.0 (`assets/fonts/UFL.txt`)
 - Icons: [Material Symbols](https://fonts.google.com/icons) by Google — Apache License 2.0 (`assets/fonts/MaterialSymbols-LICENSE.txt`)
 - Keyboard symbols: [Noto Sans Symbols](https://fonts.google.com/noto) — SIL Open Font License 1.1 (`assets/fonts/NotoSans-OFL.txt`)
+- Hebrew text: [Noto Sans Hebrew](https://fonts.google.com/noto/specimen/Noto+Sans+Hebrew) — SIL Open Font License 1.1 (`assets/fonts/NotoSansHebrew-OFL.txt`)
 
 The bundled icon and symbol fonts are subsets containing only the glyphs Rega uses.
 

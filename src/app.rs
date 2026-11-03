@@ -15,7 +15,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use image::RgbaImage;
 
 use crate::capture;
-use crate::config::{APP_NAME, ImageFormat, Settings, VideoFormat};
+use crate::config::{APP_NAME, GifQuality, ImageFormat, Settings, VideoFormat};
 use crate::editor::{Editor, EditorAction};
 use crate::theme::{self, ItemStyle, icon};
 use crate::library::{self, Item, ItemKind};
@@ -36,6 +36,7 @@ pub enum AppEvent {
     OpenImage,
     CloseItem,
     DeleteItem,
+    About,
     Quit,
 }
 
@@ -98,6 +99,11 @@ pub struct RegaApp {
     ocr_rx: Option<Receiver<anyhow::Result<String>>>,
     ocr_text: Option<String>,
     show_settings: bool,
+    show_about: bool,
+    /// Library items picked with ⌘/⇧-click, for acting on several at once.
+    lib_selection: HashSet<PathBuf>,
+    /// Where a ⇧-click range starts: the last item clicked with or without ⌘.
+    lib_anchor: Option<PathBuf>,
     /// Screen Recording permission is missing; captures would only show the wallpaper.
     /// macOS: overlay waiting to be shown natively on the next pass.
     overlay_to_present: Option<((i32, i32), (u32, u32))>,
@@ -205,6 +211,9 @@ impl RegaApp {
             ocr_rx: None,
             ocr_text: None,
             show_settings: false,
+            show_about: false,
+            lib_selection: HashSet::new(),
+            lib_anchor: None,
             overlay_to_present: None,
             reveal_in: None,
             reveal_behind: false,
@@ -471,6 +480,10 @@ impl RegaApp {
             AppEvent::Capture(p) => self.start_capture(ctx, p, false),
             AppEvent::FullScreen => self.start_capture(ctx, Purpose::Image, true),
             AppEvent::ShowMain => self.show_normal(ctx, frame),
+            AppEvent::About => {
+                self.show_normal(ctx, frame);
+                self.show_about = true;
+            }
             AppEvent::NewImage => {
                 self.show_normal(ctx, frame);
                 self.show_new_dialog = true;
@@ -479,7 +492,7 @@ impl RegaApp {
                 self.show_normal(ctx, frame);
                 self.import_from_dialog();
             }
-            AppEvent::CloseItem => self.close_current(),
+            AppEvent::CloseItem => self.close_current(ctx),
             AppEvent::DeleteItem => self.delete_current(),
             AppEvent::Quit => {
                 self.autosave_editor();
@@ -659,12 +672,16 @@ impl RegaApp {
                     region.3.min(snap.size.1 - region.1),
                 );
                 let fmt = self.settings.video_format;
+                // GIF recordings use the GIF quality preset's caps (smaller files).
+                let gif = self.settings.gif_quality;
+                let is_gif = fmt == VideoFormat::Gif;
                 let cfg = RecordConfig {
                     monitor_origin: snap.origin,
                     region,
-                    fps: self.settings.video_fps,
+                    fps: if is_gif { self.settings.video_fps.min(gif.fps()) } else { self.settings.video_fps },
                     format: fmt,
-                    max_width: self.settings.video_max_width,
+                    max_width: if is_gif { self.settings.video_max_width.min(gif.max_width()) } else { self.settings.video_max_width },
+                    gif_colors: gif.colors(),
                     highlight_cursor: self.settings.highlight_cursor,
                     out_path: library::new_capture_path(&self.settings.save_dir, fmt.ext()),
                 };
@@ -823,15 +840,14 @@ impl RegaApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
             self.show_new_dialog = true;
         }
-        if self.current_path().is_some() {
-            let (close, delete) = ctx.input_mut(|i| {
-                (i.consume_key(egui::Modifiers::COMMAND, egui::Key::W), i.consume_key(egui::Modifiers::COMMAND, egui::Key::D))
-            });
-            if delete {
-                self.delete_current();
-            } else if close {
-                self.close_current();
-            }
+        // On macOS the File menu catches these first; this covers Windows.
+        let (close, delete) = ctx.input_mut(|i| {
+            (i.consume_key(egui::Modifiers::COMMAND, egui::Key::W), i.consume_key(egui::Modifiers::COMMAND, egui::Key::D))
+        });
+        if delete {
+            self.delete_current();
+        } else if close {
+            self.close_current(ctx);
         }
         if matches!(self.mode, Mode::Home) && ctx.memory(|m| m.focused().is_none()) {
             let pasted = ctx.input(|i| {
@@ -1060,8 +1076,9 @@ impl RegaApp {
             PlayerAction::None => {}
             PlayerAction::Saved(path) => {
                 self.refresh_library();
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 self.open_video(path);
-                self.toast("Trimmed copy saved");
+                self.toast(format!("Saved {name}"));
             }
             PlayerAction::Failed(msg) => self.toast(msg),
         }
@@ -1283,6 +1300,22 @@ impl RegaApp {
         let mut delete: Option<Item> = None;
         let current = self.current_path().cloned();
 
+        let needle = self.filter.to_lowercase();
+        let items: Vec<Item> = self
+            .library
+            .iter()
+            .filter(|i| match self.lib_filter {
+                LibFilter::All => true,
+                LibFilter::Images => i.kind == ItemKind::Image,
+                LibFilter::Videos => i.kind == ItemKind::Video,
+            })
+            .filter(|i| needle.is_empty() || i.name.to_lowercase().contains(&needle))
+            .cloned()
+            .collect();
+        // Items hidden by the filter or search can't be acted on unseen.
+        self.lib_selection.retain(|p| items.iter().any(|i| &i.path == p));
+        let mut delete_selection = false;
+
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Library").font(theme::medium(14.0)).color(theme::TEXT));
             let images = self.library.iter().filter(|i| i.kind == ItemKind::Image).count();
@@ -1293,6 +1326,21 @@ impl RegaApp {
             let vids = format!("Videos {videos}");
             theme::segmented(ui, &mut self.lib_filter, &[(LibFilter::All, &all), (LibFilter::Images, &imgs), (LibFilter::Videos, &vids)]);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // While items are selected, the header offers actions on them.
+                if !self.lib_selection.is_empty() {
+                    let n = self.lib_selection.len();
+                    if theme::danger_button(ui, Some(icon::DELETE), &format!("Delete {n}")).clicked() {
+                        delete_selection = true;
+                    }
+                    if theme::ghost_button(ui, None, "Clear").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        self.lib_selection.clear();
+                    }
+                    if theme::ghost_button(ui, None, "Select all").clicked() {
+                        self.lib_selection = items.iter().map(|i| i.path.clone()).collect();
+                    }
+                    ui.label(egui::RichText::new(format!("{n} selected")).font(theme::medium(13.0)).color(theme::TEXT));
+                    return;
+                }
                 if theme::icon_button_sized(ui, icon::FOLDER, "Show library folder", 30.0, true).clicked() {
                     platform::open_path(&self.settings.save_dir);
                 }
@@ -1308,18 +1356,6 @@ impl RegaApp {
         });
         ui.add_space(8.0);
 
-        let needle = self.filter.to_lowercase();
-        let items: Vec<Item> = self
-            .library
-            .iter()
-            .filter(|i| match self.lib_filter {
-                LibFilter::All => true,
-                LibFilter::Images => i.kind == ItemKind::Image,
-                LibFilter::Videos => i.kind == ItemKind::Video,
-            })
-            .filter(|i| needle.is_empty() || i.name.to_lowercase().contains(&needle))
-            .cloned()
-            .collect();
         if items.is_empty() {
             ui.add_space(30.0);
             ui.vertical_centered(|ui| {
@@ -1333,12 +1369,34 @@ impl RegaApp {
                 ui.spacing_mut().item_spacing.x = 12.0;
                 for item in &items {
                     let selected = current.as_ref() == Some(&item.path);
-                    let (resp, delete_clicked) = self.tray_thumb(ui, item, selected);
+                    let checked = self.lib_selection.contains(&item.path);
+                    let (resp, delete_clicked) = self.tray_thumb(ui, item, selected, checked);
+                    let mods = ui.input(|i| i.modifiers);
                     if delete_clicked {
                         delete = Some(item.clone());
-                    } else if resp.clicked() && !selected {
-                        open = Some(item.clone());
+                    } else if resp.clicked() && mods.shift {
+                        // Range from the anchor (or the open item) to here.
+                        let from = self.lib_anchor.as_ref().or(current.as_ref());
+                        let a = from.and_then(|f| items.iter().position(|i| &i.path == f));
+                        let b = items.iter().position(|i| i.path == item.path);
+                        if let (Some(a), Some(b)) = (a.or(b), b) {
+                            for i in &items[a.min(b)..=a.max(b)] {
+                                self.lib_selection.insert(i.path.clone());
+                            }
+                        }
+                    } else if resp.clicked() && mods.command {
+                        if !self.lib_selection.remove(&item.path) {
+                            self.lib_selection.insert(item.path.clone());
+                        }
+                        self.lib_anchor = Some(item.path.clone());
+                    } else if resp.clicked() {
+                        self.lib_selection.clear();
+                        self.lib_anchor = Some(item.path.clone());
+                        if !selected {
+                            open = Some(item.clone());
+                        }
                     }
+                    let many = checked && self.lib_selection.len() > 1;
                     resp.context_menu(|ui| {
                         ui.set_min_width(180.0);
                         if ui.button("Open").clicked() {
@@ -1360,8 +1418,13 @@ impl RegaApp {
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button(egui::RichText::new("Delete").color(theme::DANGER)).clicked() {
-                            delete = Some(item.clone());
+                        let label = if many { format!("Delete {} selected", self.lib_selection.len()) } else { "Delete".into() };
+                        if ui.button(egui::RichText::new(label).color(theme::DANGER)).clicked() {
+                            if many {
+                                delete_selection = true;
+                            } else {
+                                delete = Some(item.clone());
+                            }
                             ui.close();
                         }
                     });
@@ -1375,6 +1438,9 @@ impl RegaApp {
         if let Some(item) = delete {
             self.confirm_delete(&item);
         }
+        if delete_selection {
+            self.delete_selection();
+        }
     }
 
     /// The path of the image or video open in the workspace, if any.
@@ -1386,23 +1452,73 @@ impl RegaApp {
         }
     }
 
-    /// Close the open image or video and return to the home screen (⌘W).
-    fn close_current(&mut self) {
+    /// ⌘W: close the open image or video; with nothing open, close the window
+    /// (Rega keeps running in the menu bar, as with the window's close button).
+    fn close_current(&mut self, ctx: &egui::Context) {
         if self.current_path().is_none() {
+            self.close_window(ctx);
             return;
         }
         self.autosave_editor();
         self.mode = Mode::Home;
     }
 
-    /// Delete the open image or video after confirming (⌘D).
+    fn close_window(&mut self, ctx: &egui::Context) {
+        self.autosave_editor();
+        self.hide_window(ctx);
+        self.hidden_by_user = true;
+    }
+
+    /// ⌘D: delete the selected library items, or else the open image or video,
+    /// after confirming.
     fn delete_current(&mut self) {
+        if !self.lib_selection.is_empty() {
+            self.delete_selection();
+            return;
+        }
         let Some(path) = self.current_path().cloned() else { return };
         // Save first so a pending autosave can't recreate the file after the delete.
         self.autosave_editor();
         match self.library.iter().find(|i| i.path == path).cloned() {
             Some(item) => self.confirm_delete(&item),
             None => self.toast("This item isn't in the library"),
+        }
+    }
+
+    /// Ask once, then permanently delete every selected library item.
+    fn delete_selection(&mut self) {
+        let items: Vec<Item> = self.library.iter().filter(|i| self.lib_selection.contains(&i.path)).cloned().collect();
+        match items.len() {
+            0 => return,
+            1 => {
+                self.confirm_delete(&items[0]);
+                self.lib_selection.clear();
+                return;
+            }
+            _ => {}
+        }
+        let n = items.len();
+        let confirmed = rfd::MessageDialog::new()
+            .set_title(format!("Delete {n} captures?"))
+            .set_description(format!("{n} captures will be permanently deleted."))
+            .set_buttons(rfd::MessageButtons::OkCancel)
+            .show();
+        if confirmed != rfd::MessageDialogResult::Ok {
+            return;
+        }
+        // Save first so a pending autosave can't recreate a deleted file.
+        self.autosave_editor();
+        if self.current_path().is_some_and(|p| self.lib_selection.contains(p)) {
+            self.mode = Mode::Home;
+        }
+        let failed = items.iter().filter(|i| library::delete(&i.path).is_err()).count();
+        self.lib_selection.clear();
+        self.lib_anchor = None;
+        self.refresh_library();
+        if failed == 0 {
+            self.toast(format!("Deleted {n} captures"));
+        } else {
+            self.toast(format!("Deleted {} of {n} captures; {failed} could not be deleted", n - failed));
         }
     }
 
@@ -1426,7 +1542,7 @@ impl RegaApp {
 
     /// One library thumbnail; returns its response and whether its hover
     /// delete button was clicked.
-    fn tray_thumb(&mut self, ui: &mut egui::Ui, item: &Item, selected: bool) -> (egui::Response, bool) {
+    fn tray_thumb(&mut self, ui: &mut egui::Ui, item: &Item, selected: bool, checked: bool) -> (egui::Response, bool) {
         let size = Vec2::new(156.0, 100.0);
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         if !ui.is_rect_visible(rect) {
@@ -1482,7 +1598,14 @@ impl RegaApp {
                 p.text(badge.center(), Align2::CENTER_CENTER, ext, theme::medium(10.0), Color32::WHITE);
             }
         }
-        if selected {
+        if checked {
+            p.rect_filled(thumb, 10.0, theme::ACCENT.gamma_multiply(0.18));
+            p.rect_stroke(thumb, 10.0, Stroke::new(2.5, theme::ACCENT), StrokeKind::Outside);
+            let c = thumb.left_bottom() + Vec2::new(18.0, -18.0);
+            p.circle_filled(c, 11.0, theme::ACCENT);
+            p.circle_stroke(c, 11.0, Stroke::new(1.5, Color32::WHITE));
+            p.text(c, Align2::CENTER_CENTER, icon::CHECK, theme::icon_font(15.0), Color32::WHITE);
+        } else if selected {
             p.rect_stroke(thumb, 10.0, Stroke::new(2.5, theme::ACCENT), StrokeKind::Outside);
         } else {
             let c = lerp(theme::BORDER, theme::BORDER_STRONG, hover);
@@ -1617,6 +1740,15 @@ impl RegaApp {
                                 theme::segmented(ui, &mut self.settings.image_format, &[(ImageFormat::Png, "PNG"), (ImageFormat::Jpeg, "JPEG")]);
                             });
                         });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("{APP_NAME} {}", env!("CARGO_PKG_VERSION"))).color(theme::TEXT_FAINT));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.link("About Rega").clicked() {
+                                    self.show_about = true;
+                                }
+                            });
+                        });
                     }
                     SettingsTab::Video => {
                         theme::section(ui, "Video");
@@ -1639,6 +1771,23 @@ impl RegaApp {
                             });
                         });
                         theme::switch(ui, &mut self.settings.highlight_cursor, "Highlight the cursor");
+                        ui.add_space(8.0);
+                        theme::section(ui, "GIF");
+                        ui.horizontal(|ui| {
+                            ui.label("Quality");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let options: Vec<(GifQuality, &str)> = GifQuality::ALL.iter().map(|q| (*q, q.label())).collect();
+                                theme::segmented(ui, &mut self.settings.gif_quality, &options);
+                            });
+                        });
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "GIF recordings: up to {}. Smaller means lighter files.",
+                                self.settings.gif_quality.details()
+                            ))
+                            .small()
+                            .color(theme::TEXT_FAINT),
+                        );
                     }
                     SettingsTab::Shortcuts => {
                         theme::section(ui, "Global shortcuts");
@@ -1762,6 +1911,68 @@ impl RegaApp {
         } else {
             self.toast(format!("Couldn't register (used by another app?): {}", failed.join(", ")));
         }
+    }
+
+    /// About Rega: what it is, version, what it's built with, credits, license.
+    fn about_window(&mut self, ctx: &egui::Context) {
+        if !self.show_about {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new(egui::RichText::new("About Rega").font(theme::bold(17.0)))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(400.0, 0.0))
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(6.0);
+                    theme::logo(ui, 72.0);
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(APP_NAME).font(theme::bold(26.0)).color(theme::TEXT));
+                    ui.label(egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(theme::TEXT_MUTED));
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Capture anything on your screen, mark it up, and share it — in seconds.")
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        egui::RichText::new("Screenshots, scrolling captures, screen recordings (MP4/GIF), annotation and OCR, in one native app.")
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                    );
+                });
+                ui.add_space(12.0);
+                theme::section(ui, "Built with");
+                ui.label(
+                    egui::RichText::new("Rust · egui · xcap · tiny-skia · ab_glyph · OpenH264 · gif")
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.label(
+                    egui::RichText::new("OpenH264 Video Codec provided by Cisco Systems, Inc.").small().color(theme::TEXT_FAINT),
+                );
+                ui.add_space(8.0);
+                theme::section(ui, "Credits");
+                for (what, credit) in [
+                    ("Interface font", "Ubuntu · Ubuntu Font Licence 1.0"),
+                    ("Hebrew text", "Noto Sans Hebrew · SIL OFL 1.1"),
+                    ("Icons", "Material Symbols by Google · Apache 2.0"),
+                    ("Key symbols", "Noto Sans Symbols · SIL OFL 1.1"),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(what).color(theme::TEXT));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(credit).color(theme::TEXT_MUTED));
+                        });
+                    });
+                }
+                ui.add_space(12.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("© 2026 Shai Raiten · MIT License").small().color(theme::TEXT_FAINT));
+                });
+            });
+        self.show_about = open;
     }
 
     fn ocr_window(&mut self, ctx: &egui::Context) {
@@ -2005,9 +2216,7 @@ impl eframe::App for RegaApp {
         if ctx.input(|i| i.viewport().close_requested()) {
             // Closing the window keeps Rega running in the menu bar.
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            self.autosave_editor();
-            self.hide_window(ctx);
-            self.hidden_by_user = true;
+            self.close_window(ctx);
         }
         if self.win == Win::Normal && self.library_scanned.elapsed() > Duration::from_secs(5) {
             self.refresh_library();
@@ -2076,6 +2285,7 @@ impl eframe::App for RegaApp {
         self.home_shortcuts(&ctx);
         self.new_canvas_dialog(&ctx);
         self.settings_window(&ctx);
+        self.about_window(&ctx);
         self.ocr_window(&ctx);
         self.toast_ui(&ctx);
     }
@@ -2141,6 +2351,7 @@ fn setup_menus(
 
     let mut map: HashMap<String, AppEvent> = Action::ALL.iter().map(|a| (format!("{a:?}"), a.event())).collect();
     map.insert("show".into(), AppEvent::ShowMain);
+    map.insert("about".into(), AppEvent::About);
     map.insert("quit".into(), AppEvent::Quit);
     // Labels are filled in by `apply_hotkeys`.
     let mut all_items = Vec::new();
@@ -2162,13 +2373,14 @@ fn setup_menus(
     }
     let _ = tray_menu.append(&PredefinedMenuItem::separator());
     let _ = tray_menu.append(&MenuItem::with_id("show", "Open Rega", true, None));
+    let _ = tray_menu.append(&MenuItem::with_id("about", "About Rega", true, None));
     let _ = tray_menu.append(&MenuItem::with_id("quit", "Quit Rega", true, None));
 
     // App menu bar: Rega | Capture | Window
     let menu_bar = Menu::new();
     let app_menu = Submenu::new(APP_NAME, true);
     let _ = app_menu.append_items(&[
-        &PredefinedMenuItem::about(None, None),
+        &MenuItem::with_id("about", "About Rega", true, None),
         &PredefinedMenuItem::separator(),
         &PredefinedMenuItem::services(None),
         &PredefinedMenuItem::separator(),
@@ -2176,7 +2388,16 @@ fn setup_menus(
         &PredefinedMenuItem::hide_others(None),
         &PredefinedMenuItem::show_all(None),
         &PredefinedMenuItem::separator(),
-        &MenuItem::with_id("quit", "Quit Rega", true, None),
+        // This menu replaces winit's default one, so ⌘Q must be bound here.
+        &MenuItem::with_id(
+            "quit",
+            "Quit Rega",
+            true,
+            Some(tray_icon::menu::accelerator::Accelerator::new(
+                tray_icon::menu::accelerator::Modifiers::META,
+                tray_icon::menu::accelerator::Code::KeyQ,
+            )),
+        ),
     ]);
     // No Edit menu on purpose: its ⌘C/⌘V key equivalents would swallow the
     // keystrokes before the editor and text fields see them.

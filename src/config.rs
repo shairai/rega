@@ -33,6 +33,56 @@ impl VideoFormat {
     }
 }
 
+/// GIF size/quality trade-off: frame width, frame rate and palette size.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub enum GifQuality {
+    Small,
+    #[default]
+    Balanced,
+    High,
+}
+
+impl GifQuality {
+    pub const ALL: [GifQuality; 3] = [GifQuality::Small, GifQuality::Balanced, GifQuality::High];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GifQuality::Small => "Small",
+            GifQuality::Balanced => "Balanced",
+            GifQuality::High => "High",
+        }
+    }
+
+    pub fn max_width(self) -> u32 {
+        match self {
+            GifQuality::Small => 640,
+            GifQuality::Balanced => 960,
+            GifQuality::High => 1280,
+        }
+    }
+
+    pub fn fps(self) -> u32 {
+        match self {
+            GifQuality::Small => 10,
+            GifQuality::Balanced => 12,
+            GifQuality::High => 15,
+        }
+    }
+
+    pub fn colors(self) -> usize {
+        match self {
+            GifQuality::Small => 64,
+            GifQuality::Balanced => 128,
+            GifQuality::High => 256,
+        }
+    }
+
+    /// e.g. "960 px · 12 fps · 128 colors"
+    pub fn details(self) -> String {
+        format!("{} px · {} fps · {} colors", self.max_width(), self.fps(), self.colors())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -46,6 +96,7 @@ pub struct Settings {
     pub video_format: VideoFormat,
     pub video_fps: u32,
     pub video_max_width: u32,
+    pub gif_quality: GifQuality,
     pub highlight_cursor: bool,
     pub launch_at_login: bool,
     /// The first-launch permissions popup has been shown once.
@@ -70,6 +121,7 @@ impl Default for Settings {
             video_format: VideoFormat::Mp4,
             video_fps: 15,
             video_max_width: 1920,
+            gif_quality: GifQuality::default(),
             highlight_cursor: true,
             launch_at_login: true,
             permissions_prompt_shown: false,
