@@ -39,21 +39,74 @@ pub struct Overlay {
     texture: TextureHandle,
     drag_from: Option<Pos2>,
     drag_to: Option<Pos2>,
+    /// Where the cursor was when the shortcut was pressed (monitor-local).
+    initial_pointer: Option<Pos2>,
+    /// Poll the real cursor every frame. egui's own pointer is unknown until the
+    /// first mouse move and unreliable right after the window appears.
+    track_cursor: bool,
 }
 
-const ACCENT: Color32 = Color32::from_rgb(255, 94, 98);
+/// A color along the logo gradient (0 = top-left coral, 1 = bottom-right violet).
+fn logo_color(t: f32) -> Color32 {
+    let (a, b) = (crate::icon::LOGO_FROM, crate::icon::LOGO_TO);
+    let mix = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t.clamp(0.0, 1.0)).round() as u8;
+    Color32::from_rgb(mix(0), mix(1), mix(2))
+}
+
+/// Logo gradient color at `p`, running diagonally across `area`.
+fn logo_at(p: Pos2, area: Rect) -> Color32 {
+    logo_color(((p.x - area.min.x) / area.width().max(1.0) + (p.y - area.min.y) / area.height().max(1.0)) / 2.0)
+}
+
+/// A 1-pt crosshair guide in the logo gradient (slightly transparent).
+fn gradient_line(painter: &egui::Painter, a: Pos2, b: Pos2, area: Rect) {
+    let n = (b - a).normalized().rot90() * 0.5;
+    let fade = |c: Color32| c.gamma_multiply(0.85);
+    let mut mesh = egui::Mesh::default();
+    for p in [a + n, b + n, b - n, a - n] {
+        mesh.colored_vertex(p, fade(logo_at(p, area)));
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Selection outline in the logo's diagonal gradient, drawn just outside `r`.
+fn gradient_border(painter: &egui::Painter, r: Rect, width: f32) {
+    let outer = r.expand(width);
+    let color_at = |p: Pos2| {
+        let t = ((p.x - outer.min.x) / outer.width().max(1.0) + (p.y - outer.min.y) / outer.height().max(1.0)) / 2.0;
+        logo_color(t)
+    };
+    let mut mesh = egui::Mesh::default();
+    let corners = |q: Rect| [q.left_top(), q.right_top(), q.right_bottom(), q.left_bottom()];
+    for p in corners(outer).into_iter().chain(corners(r)) {
+        mesh.colored_vertex(p, color_at(p));
+    }
+    // Ring of four quads: outer corners 0..4, inner corners 4..8.
+    for i in 0..4u32 {
+        let j = (i + 1) % 4;
+        mesh.add_triangle(i, j, 4 + i);
+        mesh.add_triangle(j, 4 + j, 4 + i);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
 
 impl Overlay {
     pub fn new(ctx: &egui::Context, snap: Snapshot, purpose: Purpose) -> Self {
         let img = &snap.image;
         let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
         let texture = ctx.load_texture("overlay-snapshot", color, egui::TextureOptions::NEAREST);
+        let initial_pointer = Some(Pos2::new((snap.cursor.0 - snap.origin.0) as f32, (snap.cursor.1 - snap.origin.1) as f32))
+            .filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x < snap.size.0 as f32 && p.y < snap.size.1 as f32);
         Self {
             snap,
             purpose,
             texture,
             drag_from: None,
             drag_to: None,
+            track_cursor: initial_pointer.is_some(),
+            initial_pointer,
         }
     }
 
@@ -74,7 +127,17 @@ impl Overlay {
         painter.image(self.texture.id(), full, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         ctx.set_cursor_icon(CursorIcon::Crosshair);
 
-        let pointer = resp.hover_pos().or(ctx.input(|i| i.pointer.latest_pos())).map(to_local);
+        let (ox, oy) = (self.snap.origin.0, self.snap.origin.1);
+        let global = self
+            .track_cursor
+            .then(crate::capture::try_cursor_position)
+            .flatten()
+            // Raw pixels on Windows; the overlay works in logical points.
+            .map(crate::capture::to_logical)
+            .map(|(x, y)| Pos2::new((x - ox) as f32, (y - oy) as f32));
+        let pointer = global
+            .or_else(|| resp.hover_pos().or(ctx.input(|i| i.pointer.latest_pos())).map(to_local))
+            .or(self.initial_pointer);
 
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             return Outcome::Cancel;
@@ -124,7 +187,7 @@ impl Overlay {
                 ] {
                     painter.rect_filled(r, 0.0, shade);
                 }
-                painter.rect_stroke(f, 0.0, Stroke::new(2.0, ACCENT), StrokeKind::Outside);
+                gradient_border(&painter, f, 2.5);
                 let label = match (dragging, hovered_window) {
                     (Some(d), _) => {
                         let s = self.snap.scale;
@@ -143,9 +206,8 @@ impl Overlay {
         if let Some(p) = pointer {
             let pw = to_win(p);
             if dragging.is_none() {
-                let guide = Stroke::new(1.0, Color32::from_white_alpha(140));
-                painter.line_segment([Pos2::new(full.min.x, pw.y), Pos2::new(full.max.x, pw.y)], guide);
-                painter.line_segment([Pos2::new(pw.x, full.min.y), Pos2::new(pw.x, full.max.y)], guide);
+                gradient_line(&painter, Pos2::new(full.min.x, pw.y), Pos2::new(full.max.x, pw.y), full);
+                gradient_line(&painter, Pos2::new(pw.x, full.min.y), Pos2::new(pw.x, full.max.y), full);
             }
             self.magnifier(&painter, p, pw, full);
         }
@@ -171,8 +233,9 @@ impl Overlay {
         if px < 0.0 || py < 0.0 || px >= iw || py >= ih {
             return;
         }
-        let cells: f32 = 15.0;
-        let size = 135.0;
+        // 25 source pixels across: ~6x magnification.
+        let cells: f32 = 25.0;
+        let size = 150.0;
         let mut pos = win + Vec2::new(24.0, 24.0);
         if pos.x + size > full.max.x {
             pos.x = win.x - 24.0 - size;
@@ -190,7 +253,7 @@ impl Overlay {
         painter.image(self.texture.id(), r, uv, Color32::WHITE);
         let cell = size / cells;
         let center = Rect::from_min_size(r.min + Vec2::splat(half * cell), Vec2::splat(cell));
-        painter.rect_stroke(center, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
+        painter.rect_stroke(center, 0.0, Stroke::new(1.5, logo_color(0.5)), StrokeKind::Outside);
         painter.rect_stroke(r, 4.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
 
         let c = self.snap.image.get_pixel(px as u32, py as u32);

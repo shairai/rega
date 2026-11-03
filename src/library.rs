@@ -1,5 +1,5 @@
 //! The capture library: every capture is saved into one folder, and images
-//! keep an editable sidecar (original pixels + annotations) under `.snapquill/`.
+//! keep an editable sidecar (original pixels + annotations) under `.rega/`.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -54,7 +54,7 @@ pub fn scan(dir: &Path) -> Vec<Item> {
     items
 }
 
-/// A fresh, unique path such as `Snapquill 2026-11-02 at 14.03.22.png`.
+/// A fresh, unique path such as `Rega 2026-11-02 at 14.03.22.png`.
 pub fn new_capture_path(dir: &Path, ext: &str) -> PathBuf {
     let _ = std::fs::create_dir_all(dir);
     let stamp = chrono::Local::now().format("%Y-%m-%d at %H.%M.%S");
@@ -69,7 +69,7 @@ pub fn new_capture_path(dir: &Path, ext: &str) -> PathBuf {
 
 /// Sidecar files that make an image re-editable: (annotations json, original image).
 pub fn project_paths(image: &Path) -> (PathBuf, PathBuf) {
-    let dir = image.parent().unwrap_or_else(|| Path::new(".")).join(".snapquill");
+    let dir = image.parent().unwrap_or_else(|| Path::new(".")).join(".rega");
     let name = image
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

@@ -13,7 +13,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use image::RgbaImage;
 
-use super::{Activity, SnapquillApp, Mode, SettingsTab};
+use super::{Activity, RegaApp, Mode, SettingsTab};
 use crate::capture::{Snapshot, WinRect};
 use crate::editor::Editor;
 use crate::editor::model::{Annotation, Kind, P, Project};
@@ -320,7 +320,7 @@ fn dashboard_project() -> Project {
 // ---------- app shots ----------
 
 /// Build the app inside the harness so it shares the harness's egui context.
-fn app_harness(size: Vec2, make: impl FnOnce(&egui::Context) -> SnapquillApp + 'static) -> Harness<'static, SnapquillApp> {
+fn app_harness(size: Vec2, make: impl FnOnce(&egui::Context) -> RegaApp + 'static) -> Harness<'static, RegaApp> {
     Harness::builder()
         .with_size(size)
         .with_pixels_per_point(PPP)
@@ -331,7 +331,7 @@ fn app_harness(size: Vec2, make: impl FnOnce(&egui::Context) -> SnapquillApp + '
 }
 
 /// Step until the library thumbnails have loaded.
-fn settle(h: &mut Harness<'_, SnapquillApp>) {
+fn settle(h: &mut Harness<'_, RegaApp>) {
     for _ in 0..80 {
         h.step();
         let app = h.state();
@@ -414,7 +414,7 @@ fn save(img: &RgbaImage, name: &str) {
 }
 
 fn demo_library() -> (PathBuf, RgbaImage) {
-    let dir = std::env::temp_dir().join(format!("snapquill-demo-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rega-demo-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let dashboard = render_ui(DASH, draw_dashboard);
@@ -423,17 +423,17 @@ fn demo_library() -> (PathBuf, RgbaImage) {
     let annotated = crate::editor::render::render(&dashboard, &dashboard_project().annotations, &Default::default());
     // Newest first in the tray: give them increasing timestamps.
     let items: [(&str, &RgbaImage); 4] = [
-        ("Snapquill 2026-11-02 at 09.10.00.png", &landing),
-        ("Snapquill 2026-11-02 at 09.20.00.png", &code),
-        ("Snapquill 2026-11-02 at 09.40.00.png", &annotated),
-        ("Snapquill 2026-11-02 at 09.50.00.png", &dashboard),
+        ("Rega 2026-11-02 at 09.10.00.png", &landing),
+        ("Rega 2026-11-02 at 09.20.00.png", &code),
+        ("Rega 2026-11-02 at 09.40.00.png", &annotated),
+        ("Rega 2026-11-02 at 09.50.00.png", &dashboard),
     ];
     for (name, img) in items {
         img.save(dir.join(name)).unwrap();
         std::thread::sleep(Duration::from_millis(20));
     }
-    std::fs::write(dir.join("Snapquill 2026-11-02 at 09.30.00.mp4"), b"demo").unwrap();
-    let mp4 = dir.join("Snapquill 2026-11-02 at 09.30.00.mp4");
+    std::fs::write(dir.join("Rega 2026-11-02 at 09.30.00.mp4"), b"demo").unwrap();
+    let mp4 = dir.join("Rega 2026-11-02 at 09.30.00.mp4");
     let older = std::time::SystemTime::now() - Duration::from_secs(60);
     let _ = std::fs::File::options().write(true).open(&mp4).and_then(|f| f.set_modified(older));
     (dir, dashboard)
@@ -484,14 +484,14 @@ fn readme_screenshots() {
     let code = render_ui(CODE, draw_code_editor);
 
     let editor_for = |library: &Path, dashboard: &RgbaImage| {
-        let path = library.join("Snapquill 2026-11-02 at 09.50.00.png");
+        let path = library.join("Rega 2026-11-02 at 09.50.00.png");
         Editor::new(path, dashboard.clone(), Some(dashboard_project()), true)
     };
 
     // 1. Editor with annotations (hero).
     let (lib, ed) = (library.clone(), editor_for(&library, &dashboard));
     let mut h = app_harness(APP_SIZE, move |ctx| {
-        let mut app = SnapquillApp::demo(ctx, lib);
+        let mut app = RegaApp::demo(ctx, lib);
         app.mode = Mode::Editor(Box::new(ed));
         app
     });
@@ -508,7 +508,7 @@ fn readme_screenshots() {
 
     // 3. Welcome screen + library tray.
     let lib = library.clone();
-    let mut h = app_harness(APP_SIZE, move |ctx| SnapquillApp::demo(ctx, lib));
+    let mut h = app_harness(APP_SIZE, move |ctx| RegaApp::demo(ctx, lib));
     settle(&mut h);
     save(&window_chrome(&h.render().unwrap()), "welcome.png");
 
@@ -537,8 +537,8 @@ fn readme_screenshots() {
     let (desk, windows) = desktop(&dashboard, &code);
     let lib = library.clone();
     let mut h = app_harness(Vec2::new(1440.0, 900.0), move |ctx| {
-        let snap = Snapshot { image: desk, origin: (0, 0), size: (1440, 900), scale: PPP, windows };
-        let mut app = SnapquillApp::demo(ctx, lib);
+        let snap = Snapshot { image: desk, origin: (0, 0), size: (1440, 900), scale: PPP, windows, cursor: (-1, -1) };
+        let mut app = RegaApp::demo(ctx, lib);
         app.activity = Activity::Selecting(Box::new(Overlay::new(ctx, snap, Purpose::Image)));
         app
     });
@@ -557,4 +557,100 @@ fn readme_screenshots() {
     save(&h.render().unwrap(), "capture-overlay.png");
 
     let _ = std::fs::remove_dir_all(&library);
+}
+
+/// Renders the permissions popup + banner; writes PNGs only when
+/// `PERMISSIONS_PREVIEW_DIR` is set.
+#[test]
+fn permissions_popup_renders() {
+    use crate::platform::Permission;
+    let dir = std::env::var("PERMISSIONS_PREVIEW_DIR").ok();
+    let lib = std::env::temp_dir().join(format!("rega-perm-{}", std::process::id()));
+    std::fs::create_dir_all(&lib).unwrap();
+    let mut h = app_harness(Vec2::new(1360.0, 840.0), move |ctx| {
+        let mut app = RegaApp::demo(ctx, lib);
+        app.perm_status = vec![(Permission::ScreenRecording, false), (Permission::Accessibility, true)];
+        // A poll time in the future keeps the live refresh from replacing the fake status.
+        app.perm_polled = Some(std::time::Instant::now() + Duration::from_secs(3600));
+        app.show_permissions = true;
+        app
+    });
+    for _ in 0..6 {
+        h.step();
+    }
+    if let Some(d) = &dir {
+        h.render().unwrap().save(Path::new(d).join("permissions-popup.png")).unwrap();
+    }
+    // Skipping closes the popup but the missing-permissions banner stays.
+    h.state_mut().show_permissions = false;
+    for _ in 0..6 {
+        h.step();
+    }
+    assert!(!h.state().show_permissions);
+    assert!(h.state().missing_permissions());
+    if let Some(d) = &dir {
+        h.render().unwrap().save(Path::new(d).join("permissions-banner.png")).unwrap();
+    }
+}
+
+/// Renders the capture overlay (hover + drag); writes PNGs only when
+/// `OVERLAY_PREVIEW_DIR` is set.
+#[test]
+fn overlay_renders() {
+    let Ok(dir) = std::env::var("OVERLAY_PREVIEW_DIR") else { return };
+    let (desk, windows) = desktop(&render_ui(DASH, draw_dashboard), &render_ui(CODE, draw_code_editor));
+    let lib = std::env::temp_dir().join(format!("rega-overlay-{}", std::process::id()));
+    std::fs::create_dir_all(&lib).unwrap();
+    let mut h = app_harness(Vec2::new(1440.0, 900.0), move |ctx| {
+        let snap = Snapshot { image: desk, origin: (0, 0), size: (1440, 900), scale: PPP, windows, cursor: (-1, -1) };
+        let mut app = RegaApp::demo(ctx, lib);
+        app.activity = Activity::Selecting(Box::new(Overlay::new(ctx, snap, Purpose::Image)));
+        app
+    });
+    h.hover_at(Pos2::new(900.0, 520.0));
+    for _ in 0..4 {
+        h.step();
+    }
+    h.render().unwrap().save(Path::new(&dir).join("overlay-hover.png")).unwrap();
+    let (start, end) = (Pos2::new(218.0, 150.0), Pos2::new(712.0, 478.0));
+    h.hover_at(start);
+    h.step();
+    h.event(egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    for i in 1..=10 {
+        h.hover_at(start + (end - start) * (i as f32 / 10.0));
+        h.step();
+    }
+    h.render().unwrap().save(Path::new(&dir).join("overlay-drag.png")).unwrap();
+}
+
+/// Renders the in-app video player; writes a PNG only when `PLAYER_PREVIEW_DIR` is set.
+#[test]
+fn video_player_renders() {
+    let Ok(dir) = std::env::var("PLAYER_PREVIEW_DIR") else { return };
+    let lib = std::env::temp_dir().join(format!("rega-player-shot-{}", std::process::id()));
+    std::fs::create_dir_all(&lib).unwrap();
+    let video = lib.join("Rega 2026-11-03 at 09.00.00.mp4");
+    crate::recorder::write_test_video(&video, 40, 10, (960, 600));
+    let mut h = app_harness(APP_SIZE, move |ctx| {
+        let mut app = RegaApp::demo(ctx, lib);
+        app.refresh_library();
+        app.open_video(video);
+        app
+    });
+    for _ in 0..30 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    h.render().unwrap().save(Path::new(&dir).join("player.png")).unwrap();
+    // Trim: in at the playhead now, out a moment later.
+    h.key_press(egui::Key::I);
+    for _ in 0..25 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    h.key_press(egui::Key::O);
+    for _ in 0..4 {
+        h.step();
+    }
+    h.render().unwrap().save(Path::new(&dir).join("player-trim.png")).unwrap();
 }

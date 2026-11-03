@@ -511,10 +511,10 @@ mod tests {
     #[test]
     fn ocr_reads_rendered_text() {
         let base = RgbaImage::from_pixel(900, 160, Px([255, 255, 255, 255]));
-        let mut a = ann(Kind::Text { pos: P::new(20.0, 40.0), text: "Hello Snapquill 2026".into(), size: 64.0, background: false });
+        let mut a = ann(Kind::Text { pos: P::new(20.0, 40.0), text: "Hello Rega 2026".into(), size: 64.0, background: false });
         a.color = [0, 0, 0, 255];
         let img = render(&base, &[a], &Effects::default());
         let text = crate::ocr::recognize(&img).expect("ocr");
-        assert!(text.to_lowercase().contains("hello snapquill 2026"), "got {text:?}");
+        assert!(text.to_lowercase().contains("hello rega 2026"), "got {text:?}");
     }
 }

@@ -1,3 +1,6 @@
+// No console window on Windows release builds.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod capture;
 mod config;
@@ -7,6 +10,7 @@ mod library;
 mod ocr;
 mod overlay;
 mod platform;
+mod player;
 mod recorder;
 mod scroll;
 mod shortcuts;
@@ -17,7 +21,7 @@ use std::sync::Arc;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("snapquill=info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("rega=info")).init();
 
     // Used by scripts/bundle-macos.sh to produce the .icns.
     let args: Vec<String> = std::env::args().collect();
@@ -38,11 +42,19 @@ fn main() -> eframe::Result<()> {
             // The labeled top bar needs ~1180 pt; keep room for it.
             .with_min_inner_size([1300.0, 640.0])
             .with_icon(Arc::new(egui::IconData { rgba, width, height })),
+        // Start as a menu-bar agent so our window may appear over other apps'
+        // full-screen Spaces; the Dock icon is switched on while the main window
+        // is open (see `platform::set_dock_icon`).
+        #[cfg(target_os = "macos")]
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            builder.with_activation_policy(ActivationPolicy::Accessory);
+        })),
         ..Default::default()
     };
     eframe::run_native(
         config::APP_NAME,
         options,
-        Box::new(|cc| Ok(Box::new(app::SnapquillApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::RegaApp::new(cc)))),
     )
 }

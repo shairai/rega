@@ -2,7 +2,7 @@
 
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
-/// Four viewfinder corners and a dot — the Snapquill mark.
+/// Four viewfinder corners and a dot — the Rega mark.
 fn draw_mark(pixmap: &mut Pixmap, size: f32, inset: f32, color: (u8, u8, u8, u8)) {
     let mut paint = Paint::default();
     paint.set_color_rgba8(color.0, color.1, color.2, color.3);
@@ -40,6 +40,10 @@ fn to_rgba(pixmap: Pixmap) -> Vec<u8> {
         .collect()
 }
 
+/// The logo's gradient, top-left to bottom-right.
+pub const LOGO_FROM: [u8; 3] = [255, 94, 98];
+pub const LOGO_TO: [u8; 3] = [124, 77, 255];
+
 /// Colorful app icon (window / dock).
 pub fn app_icon(size: u32) -> (Vec<u8>, u32, u32) {
     let mut pixmap = Pixmap::new(size, size).expect("icon size");
@@ -50,8 +54,8 @@ pub fn app_icon(size: u32) -> (Vec<u8>, u32, u32) {
         tiny_skia::Point::from_xy(0.0, 0.0),
         tiny_skia::Point::from_xy(s, s),
         vec![
-            tiny_skia::GradientStop::new(0.0, tiny_skia::Color::from_rgba8(255, 94, 98, 255)),
-            tiny_skia::GradientStop::new(1.0, tiny_skia::Color::from_rgba8(124, 77, 255, 255)),
+            tiny_skia::GradientStop::new(0.0, tiny_skia::Color::from_rgba8(LOGO_FROM[0], LOGO_FROM[1], LOGO_FROM[2], 255)),
+            tiny_skia::GradientStop::new(1.0, tiny_skia::Color::from_rgba8(LOGO_TO[0], LOGO_TO[1], LOGO_TO[2], 255)),
         ],
         tiny_skia::SpreadMode::Pad,
         Transform::identity(),

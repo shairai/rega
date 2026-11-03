@@ -21,19 +21,21 @@ const SAMPLES: usize = 64;
 pub fn run(monitor_origin: (i32, i32), region: (u32, u32, u32, u32), progress: &Sender<ScrollMsg>) -> Result<RgbaImage> {
     use enigo::{Axis, Coordinate, Enigo, Mouse, Settings};
 
-    let monitor = xcap::Monitor::from_point(monitor_origin.0 + 1, monitor_origin.1 + 1)
-        .context("monitor not found")?;
+    let monitor = crate::capture::monitor_with_origin(monitor_origin).context("monitor not found")?;
+    let d = crate::capture::dpi(&monitor);
+    let phys = |v: u32| (v as f32 * d).round() as u32;
     let (x, y, w, h) = region;
+    let (px, py, pw, ph_) = (phys(x), phys(y), phys(w).max(2), phys(h).max(2));
     let mut enigo = Enigo::new(&Settings::default())
         .context("input control unavailable — grant Accessibility permission")?;
     enigo.move_mouse(
-        monitor_origin.0 + (x + w / 2) as i32,
-        monitor_origin.1 + (y + h / 2) as i32,
+        ((monitor_origin.0 as f32 + (x + w / 2) as f32) * d).round() as i32,
+        ((monitor_origin.1 as f32 + (y + h / 2) as f32) * d).round() as i32,
         Coordinate::Abs,
     )?;
     thread::sleep(Duration::from_millis(150));
 
-    let first = monitor.capture_region(x, y, w, h)?;
+    let first = monitor.capture_region(px, py, pw, ph_)?;
     let ph = first.height();
     let mut prev = first.clone();
     // Stitched output so far, and how many bottom rows of `prev` are a fixed footer.
@@ -45,7 +47,7 @@ pub fn run(monitor_origin: (i32, i32), region: (u32, u32, u32, u32), progress: &
         let _ = progress.send(ScrollMsg::Progress(format!("Scrolling… step {}, {} px", step + 1, out.height())));
         enigo.scroll(clicks, Axis::Vertical)?;
         thread::sleep(Duration::from_millis(450));
-        let cur = monitor.capture_region(x, y, w, h)?;
+        let cur = monitor.capture_region(px, py, pw, ph_)?;
 
         let Some(m) = find_shift(&prev, &cur) else {
             log::info!("scroll capture: could not match frames, stopping");

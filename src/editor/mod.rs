@@ -651,13 +651,13 @@ impl Editor {
 
         theme::toolbar_group(ui, |ui| {
             if theme::toolbar_item(ui, icon::UNDO, "Undo", ItemStyle::Normal, !self.undo.is_empty())
-                .on_hover_text("Undo (⌘Z)")
+                .on_hover_text(format!("Undo ({}Z)", crate::platform::CMD))
                 .clicked()
             {
                 self.undo();
             }
             if theme::toolbar_item(ui, icon::REDO, "Redo", ItemStyle::Normal, !self.redo.is_empty())
-                .on_hover_text("Redo (⌘⇧Z)")
+                .on_hover_text(format!("Redo ({}{}Z)", crate::platform::CMD, crate::platform::SHIFT))
                 .clicked()
             {
                 self.redo();
@@ -667,7 +667,7 @@ impl Editor {
 
         theme::toolbar_group(ui, |ui| {
             if theme::toolbar_item(ui, icon::PASTE, "Paste", ItemStyle::Normal, true)
-                .on_hover_text("Paste an image from the clipboard onto the canvas (⌘V)")
+                .on_hover_text(format!("Paste an image from the clipboard onto the canvas ({}V)", crate::platform::CMD))
                 .clicked()
             {
                 action = self.paste_from_clipboard();
@@ -705,13 +705,13 @@ impl Editor {
                 }
             });
             if theme::toolbar_item(ui, icon::SAVE, "Save", ItemStyle::Normal, true)
-                .on_hover_text("Save to library (⌘S)")
+                .on_hover_text(format!("Save to library ({}S)", crate::platform::CMD))
                 .clicked()
             {
                 action = self.save_action();
             }
             if theme::toolbar_item(ui, icon::COPY, "Copy", ItemStyle::Primary, true)
-                .on_hover_text("Copy image (⌘C)")
+                .on_hover_text(format!("Copy image ({}C)", crate::platform::CMD))
                 .clicked()
             {
                 action = self.copy_action();
@@ -861,7 +861,8 @@ impl Editor {
             Tool::Text => "Click to place text · Esc to finish",
             Tool::Step => "Click to drop the next number",
             Tool::Crop => "Drag over the area to keep",
-            _ => "Drag to draw · hold ⇧ to constrain",
+            _ if cfg!(target_os = "macos") => "Drag to draw · hold ⇧ to constrain",
+            _ => "Drag to draw · hold Shift to constrain",
         };
         ui.label(egui::RichText::new(hint).color(theme::TEXT_FAINT));
     }
@@ -1036,8 +1037,8 @@ impl Editor {
         let screen = to_screen(*pos);
         let mut focus = std::mem::take(&mut self.focus_text);
         let mut finished = false;
-        let input_id = egui::Id::unique("snapquill-text-input");
-        egui::Area::new(egui::Id::unique("snapquill-text-edit"))
+        let input_id = egui::Id::unique("rega-text-input");
+        egui::Area::new(egui::Id::unique("rega-text-edit"))
             .fixed_pos(screen)
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
@@ -1594,7 +1595,7 @@ mod tests {
 
     #[test]
     fn exports_every_format() {
-        let dir = std::env::temp_dir().join(format!("snapquill-export-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rega-export-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let img = RgbaImage::from_fn(64, 40, |x, y| image::Rgba([x as u8 * 4, y as u8 * 6, 120, 255]));
         for fmt in ExportFormat::ALL {

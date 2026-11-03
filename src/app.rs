@@ -22,6 +22,7 @@ use crate::library::{self, Item, ItemKind};
 use crate::ocr;
 use crate::overlay::{Outcome, Overlay, Purpose};
 use crate::platform;
+use crate::player::{Player, PlayerAction};
 use crate::recorder::{RecordConfig, Recorder};
 use crate::scroll::{self, ScrollMsg};
 use crate::shortcuts::{self, Action};
@@ -39,12 +40,13 @@ pub enum AppEvent {
 enum Mode {
     Home,
     Editor(Box<Editor>),
+    Video(Box<Player>),
 }
 
 enum Activity {
     Idle,
     /// Window hidden, waiting for it to disappear (and for the user's delay).
-    Pending { purpose: Purpose, full: bool, at: Instant },
+    Pending { purpose: Purpose, full: bool, at: Instant, cursor: (i32, i32) },
     Selecting(Box<Overlay>),
     Recording(Recorder),
     Finishing(Recorder),
@@ -61,7 +63,9 @@ enum Win {
 
 const BAR_SIZE: Vec2 = Vec2::new(340.0, 52.0);
 
-pub struct SnapquillApp {
+pub struct RegaApp {
+    /// For background work (e.g. the video player) that needs to request repaints.
+    ctx: egui::Context,
     settings: Settings,
     mode: Mode,
     activity: Activity,
@@ -93,23 +97,43 @@ pub struct SnapquillApp {
     ocr_text: Option<String>,
     show_settings: bool,
     /// Screen Recording permission is missing; captures would only show the wallpaper.
-    needs_permission: bool,
+    /// macOS: overlay waiting to be shown natively on the next pass.
+    overlay_to_present: Option<((i32, i32), (u32, u32))>,
+    show_permissions: bool,
+    perm_status: Vec<(platform::Permission, bool)>,
+    /// Smallest the main window may be; shrinks on small screens.
+    min_size: Vec2,
+    perm_polled: Option<Instant>,
+    /// The user pressed Enable at least once: offer a restart.
+    perm_opened: bool,
     hover_tracking: bool,
     new_canvas: NewCanvas,
     show_new_dialog: bool,
     settings_tab: SettingsTab,
 }
 
-impl SnapquillApp {
+impl RegaApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self::build(&cc.egui_ctx, Settings::load(), true);
+        // The window opens at launch, so show the Dock icon (we start as an agent).
+        platform::set_dock_icon(true);
         // Dev builds would register a throwaway target/ binary.
         if !cfg!(debug_assertions) {
             platform::set_launch_at_login(app.settings.launch_at_login);
         }
-        if !platform::has_screen_permission() {
-            app.needs_permission = true;
-            platform::request_screen_permission();
+        app.refresh_permissions(true);
+        if app.missing_permissions() && !app.settings.permissions_prompt_shown {
+            app.show_permissions = true;
+            app.settings.permissions_prompt_shown = true;
+            app.settings.save();
+        }
+        if cfg!(target_os = "macos")
+            && platform::is_granted(platform::Permission::ScreenRecording)
+            && !app.settings.screen_access_probed
+        {
+            app.settings.screen_access_probed = true;
+            app.settings.save();
+            std::thread::spawn(capture::probe_screen_access);
         }
         let failed = app.apply_hotkeys();
         if !failed.is_empty() && app.toast.is_none() {
@@ -118,7 +142,7 @@ impl SnapquillApp {
         app
     }
 
-    /// Snapquill without menus, tray, global hotkeys or permission prompts,
+    /// Rega without menus, tray, global hotkeys or permission prompts,
     /// showing `library` — used to render the README screenshots.
     #[cfg(test)]
     pub fn demo(ctx: &egui::Context, library: PathBuf) -> Self {
@@ -144,6 +168,7 @@ impl SnapquillApp {
         let library = library::scan(&settings.save_dir);
 
         Self {
+            ctx: ctx.clone(),
             settings,
             mode: Mode::Home,
             activity: Activity::Idle,
@@ -171,7 +196,12 @@ impl SnapquillApp {
             ocr_rx: None,
             ocr_text: None,
             show_settings: false,
-            needs_permission: false,
+            overlay_to_present: None,
+            show_permissions: false,
+            perm_status: Vec::new(),
+            min_size: Vec2::new(1300.0, 640.0),
+            perm_polled: None,
+            perm_opened: false,
             hover_tracking: false,
             new_canvas: NewCanvas::default(),
             show_new_dialog: false,
@@ -244,15 +274,18 @@ impl SnapquillApp {
             self.normal_inner = ctx.input(|i| i.viewport().inner_rect);
         }
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        platform::set_dock_icon(false);
         self.win = Win::Hidden;
     }
 
     fn show_normal(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        platform::set_overlay_level(frame, false);
+        platform::set_dock_icon(true);
+        platform::set_overlay_level(ctx, frame, false);
         if self.win != Win::Normal {
             ctx.send_viewport_cmd(ViewportCommand::ContentProtected(false));
             ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
             ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
+            ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(self.min_size));
             let size = self.normal_inner.map(|r| r.size()).unwrap_or(Vec2::new(1360.0, 840.0));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
             if let Some(outer) = self.normal_outer {
@@ -268,7 +301,7 @@ impl SnapquillApp {
     /// After a flow that produced nothing to show, go back to where the user was.
     fn return_to_rest(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if self.hidden_by_user {
-            platform::set_overlay_level(frame, false);
+            platform::set_overlay_level(ctx, frame, false);
             self.hide_window(ctx);
             self.hidden_by_user = true;
         } else {
@@ -279,14 +312,31 @@ impl SnapquillApp {
     fn show_overlay(&mut self, ctx: &egui::Context, frame: &eframe::Frame, origin: (i32, i32), size: (u32, u32)) {
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
+        // The main window's minimum size would stretch the overlay on small
+        // (or highly scaled) monitors and misalign it with the cursor.
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::ZERO));
         // Size before position: macOS resizes around the bottom-left corner.
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(size.0 as f32, size.1 as f32)));
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(Pos2::new(origin.0 as f32, origin.1 as f32)));
-        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
-        platform::set_overlay_level(frame, true);
-        platform::set_window_frame(frame, origin.0 as f32, origin.1 as f32, size.0 as f32, size.1 as f32);
+        if cfg!(target_os = "macos") {
+            // Shown natively on the next pass, once winit has applied the style
+            // changes above (they would reset the panel style), see `present_overlay`.
+            self.overlay_to_present = Some((origin, size));
+            ctx.request_repaint();
+        } else {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+            platform::set_overlay_level(ctx, frame, true);
+        }
         self.win = Win::Overlay;
+    }
+
+    /// macOS: show the overlay as a non-activating panel on the current Space
+    /// (over full-screen apps too) instead of activating Rega.
+    fn present_overlay(&mut self, frame: &eframe::Frame) {
+        let Some((origin, size)) = self.overlay_to_present.take() else { return };
+        platform::set_window_frame(frame, origin.0 as f32, origin.1 as f32, size.0 as f32, size.1 as f32);
+        platform::present_overlay(frame);
     }
 
     fn show_recording_bar(&mut self, ctx: &egui::Context, frame: &eframe::Frame, snap_origin: (i32, i32), monitor: (u32, u32), region: Rect) {
@@ -302,12 +352,13 @@ impl SnapquillApp {
         let x = (region.center().x - BAR_SIZE.x / 2.0).clamp(0.0, (mw - BAR_SIZE.x).max(0.0));
         let pos = Pos2::new(snap_origin.0 as f32 + x, snap_origin.1 as f32 + y);
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::ZERO));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(BAR_SIZE));
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         // Keep the bar itself out of the recording.
         ctx.send_viewport_cmd(ViewportCommand::ContentProtected(true));
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        platform::set_overlay_level(frame, true);
+        platform::set_overlay_level(ctx, frame, true);
         self.win = Win::Bar;
     }
 
@@ -346,36 +397,53 @@ impl SnapquillApp {
             }
             _ => return,
         }
-        if !platform::has_screen_permission() {
+        if !platform::is_granted(platform::Permission::ScreenRecording) {
             // Capturing now would only produce an empty desktop.
-            self.needs_permission = true;
-            platform::request_screen_permission();
+            self.refresh_permissions(true);
+            self.show_permissions = true;
+            platform::set_dock_icon(true);
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(ViewportCommand::Focus);
             self.win = Win::Normal;
             self.hidden_by_user = false;
-            self.toast("Snapquill needs Screen Recording permission to capture");
+            self.toast("Rega needs Screen Recording permission to capture");
             return;
         }
         if let Mode::Editor(ed) = &mut self.mode {
             ed.commit_pending();
         }
         let was_hidden = self.win == Win::Hidden;
+        // Started from a hotkey or the tray (our window isn't focused): cancelling
+        // should leave the user where they were, not pop the app up.
+        let from_outside = !ctx.input(|i| i.focused);
+        // Windows fades a hiding window out over a few hundred ms (longer in a
+        // VM); keep it out of the screenshot no matter how long that takes.
+        // `show_normal` turns this off again.
+        ctx.send_viewport_cmd(ViewportCommand::ContentProtected(true));
         self.hide_window(ctx);
-        self.hidden_by_user = was_hidden || self.hidden_by_user;
-        let delay = Duration::from_secs(self.settings.delay_secs as u64).max(Duration::from_millis(350));
+        self.hidden_by_user = was_hidden || self.hidden_by_user || from_outside;
+        // Only wait for our own window to leave the screen if it was on it.
+        let settle = if was_hidden {
+            Duration::ZERO
+        } else if cfg!(target_os = "windows") {
+            Duration::from_millis(450)
+        } else {
+            Duration::from_millis(120)
+        };
+        let delay = Duration::from_secs(self.settings.delay_secs as u64).max(settle);
         self.activity = Activity::Pending {
             purpose,
             full,
             at: Instant::now() + delay,
+            cursor: capture::cursor_position(),
         };
         ctx.request_repaint();
     }
 
     fn advance_activity(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         match &mut self.activity {
-            Activity::Pending { purpose, full, at } => {
-                let (purpose, full, at) = (*purpose, *full, *at);
+            Activity::Pending { purpose, full, at, cursor } => {
+                let (purpose, full, at, cursor) = (*purpose, *full, *at, *cursor);
                 let now = Instant::now();
                 if now < at {
                     let left = at - now;
@@ -387,7 +455,7 @@ impl SnapquillApp {
                     return;
                 }
                 self.set_tray_title(None);
-                match capture::snapshot_at_cursor() {
+                match capture::snapshot_at(cursor) {
                     Err(e) => {
                         self.activity = Activity::Idle;
                         self.show_normal(ctx, frame);
@@ -418,9 +486,16 @@ impl SnapquillApp {
                     match result {
                         Ok(path) => {
                             self.refresh_library();
+                            // Open Rega on the new video.
+                            self.lib_filter = LibFilter::All;
+                            self.open_video(path.clone());
+                            self.show_normal(ctx, frame);
                             self.toast(format!("Video saved: {}", path.file_name().unwrap_or_default().to_string_lossy()));
                         }
-                        Err(e) => self.toast(format!("{e:#}")),
+                        Err(e) => {
+                            self.return_to_rest(ctx, frame);
+                            self.toast(format!("{e:#}"));
+                        }
                     }
                 }
             },
@@ -487,6 +562,8 @@ impl SnapquillApp {
                 match Recorder::start(cfg) {
                     Ok(rec) => {
                         self.activity = Activity::Recording(rec);
+                        let (x, y) = (snap.origin.0 as f32 + region.0 as f32, snap.origin.1 as f32 + region.1 as f32);
+                        platform::show_recording_frame((x, y, region.2 as f32, region.3 as f32));
                         self.show_recording_bar(ctx, frame, snap.origin, snap.size, rect);
                     }
                     Err(e) => {
@@ -496,7 +573,7 @@ impl SnapquillApp {
                 }
             }
             Purpose::Scroll => {
-                platform::set_overlay_level(frame, false);
+                platform::set_overlay_level(ctx, frame, false);
                 self.hide_window(ctx);
                 let origin = snap.origin;
                 let region = (
@@ -521,6 +598,9 @@ impl SnapquillApp {
     fn stop_recording(&mut self, ctx: &egui::Context) {
         if let Activity::Recording(rec) = std::mem::replace(&mut self.activity, Activity::Idle) {
             rec.stop();
+            platform::hide_recording_frame();
+            // The bar has nothing left to show; without this it lingers as a black box.
+            self.hide_window(ctx);
             self.activity = Activity::Finishing(rec);
             self.toast("Saving video…");
             ctx.request_repaint();
@@ -574,7 +654,7 @@ impl SnapquillApp {
 
     fn open_item(&mut self, item: &Item) {
         match item.kind {
-            ItemKind::Video => platform::open_path(&item.path),
+            ItemKind::Video => self.open_video(item.path.clone()),
             ItemKind::Image => match Editor::open(item.path.clone()) {
                 Ok(ed) => {
                     self.autosave_editor();
@@ -582,6 +662,18 @@ impl SnapquillApp {
                 }
                 Err(e) => self.toast(format!("{e:#}")),
             },
+        }
+    }
+
+    /// Preview a video inside Rega; fall back to the system player.
+    fn open_video(&mut self, path: PathBuf) {
+        self.autosave_editor();
+        match Player::open(&self.ctx, path.clone()) {
+            Ok(player) => self.mode = Mode::Video(Box::new(player)),
+            Err(e) => {
+                log::warn!("in-app preview failed: {e:#}");
+                platform::open_path(&path);
+            }
         }
     }
 
@@ -611,7 +703,7 @@ impl SnapquillApp {
                 self.autosave_editor();
                 self.mode = Mode::Editor(Box::new(ed));
                 self.refresh_library();
-                self.toast("New canvas — press ⌘V to paste an image onto it");
+                self.toast(format!("New canvas — press {}V to paste an image onto it", platform::CMD));
             }
             Err(e) => self.toast(format!("Couldn't create the canvas: {e:#}")),
         }
@@ -786,7 +878,7 @@ impl SnapquillApp {
                 });
             });
 
-        if self.needs_permission {
+        if self.missing_permissions() {
             egui::Panel::top("permission_banner")
                 .frame(theme::panel_frame(Color32::from_rgb(52, 30, 38), egui::Margin::symmetric(16, 10)))
                 .show(ui, |ui| self.permission_banner(ui));
@@ -798,6 +890,7 @@ impl SnapquillApp {
             .frame(theme::panel_frame(theme::SURFACE, egui::Margin { left: 16, right: 16, top: 10, bottom: 12 }))
             .show(ui, |ui| self.tray_ui(ui));
 
+        let mut player_action = PlayerAction::None;
         match &mut self.mode {
             Mode::Editor(ed) => {
                 egui::Panel::right("tools")
@@ -824,11 +917,34 @@ impl SnapquillApp {
                     .show(ui, |ui| ed.canvas(ui));
                 actions.push(ed.end_frame(&ctx));
             }
+            Mode::Video(player) => {
+                egui::Panel::bottom("status")
+                    .frame(theme::panel_frame(theme::BG, egui::Margin::symmetric(12, 4)))
+                    .show(ui, |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(player.file_name()).color(theme::TEXT_MUTED));
+                        });
+                    });
+                player_action = egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(theme::BG))
+                    .show(ui, |ui| player.ui(ui))
+                    .inner;
+            }
             Mode::Home => {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(theme::BG))
                     .show(ui, |ui| self.welcome_ui(ui));
             }
+        }
+
+        match player_action {
+            PlayerAction::None => {}
+            PlayerAction::Saved(path) => {
+                self.refresh_library();
+                self.open_video(path);
+                self.toast("Trimmed copy saved");
+            }
+            PlayerAction::Failed(msg) => self.toast(msg),
         }
 
         for action in actions {
@@ -844,37 +960,145 @@ impl SnapquillApp {
     }
 
     fn permission_banner(&mut self, ui: &mut egui::Ui) {
+        let missing: Vec<&str> = self.perm_status.iter().filter(|(_, ok)| !ok).map(|(p, _)| p.title()).collect();
+        let screen_missing = self.perm_status.iter().any(|(p, ok)| *p == platform::Permission::ScreenRecording && !ok);
         // Buttons first (right-aligned) so the text wraps in the space left over.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if theme::secondary_button(ui, None, "Restart Snapquill").on_hover_text("Needed after granting access").clicked() {
-                self.autosave_editor();
-                platform::relaunch();
-            }
-            if theme::primary_button(ui, Some(icon::SETTINGS), "Open Settings").clicked() {
-                platform::open_screen_recording_settings();
+            if theme::primary_button(ui, Some(icon::SETTINGS), "Review permissions").clicked() {
+                self.show_permissions = true;
             }
             ui.add_space(16.0);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.label(egui::RichText::new(icon::INFO).font(theme::icon_font(22.0)).color(theme::CORAL));
                 ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("Screen Recording permission needed")
-                            .font(theme::medium(14.0))
-                            .color(theme::TEXT),
-                    );
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(
-                                "Without it, macOS only shows Snapquill the empty desktop. \
-                                 Switch on Snapquill in Screen Recording, then restart Snapquill.",
-                            )
-                            .color(theme::TEXT_MUTED),
-                        )
-                        .wrap(),
-                    );
+                    let title = if missing.len() == 1 { "1 permission missing" } else { "Permissions missing" };
+                    ui.label(egui::RichText::new(title).font(theme::medium(14.0)).color(theme::TEXT));
+                    let detail = if screen_missing {
+                        format!("{} — without Screen Recording, captures come out blank.", missing.join(", "))
+                    } else {
+                        format!("{} — some features won't work.", missing.join(", "))
+                    };
+                    ui.add(egui::Label::new(egui::RichText::new(detail).color(theme::TEXT_MUTED)).wrap());
                 });
             });
         });
+    }
+
+    /// Re-read permission status (at most once per ~0.7 s unless `force`).
+    fn refresh_permissions(&mut self, force: bool) {
+        let stale = self.perm_polled.is_none_or(|t| t.elapsed() > Duration::from_millis(700));
+        if force || stale {
+            self.perm_status = platform::permissions_needed().iter().map(|&p| (p, platform::is_granted(p))).collect();
+            self.perm_polled = Some(Instant::now());
+        }
+    }
+
+    fn missing_permissions(&self) -> bool {
+        self.perm_status.iter().any(|(_, ok)| !ok)
+    }
+
+    /// The permissions popup: shown on first launch and from the banner.
+    fn permissions_window(&mut self, ctx: &egui::Context) {
+        if !self.show_permissions {
+            return;
+        }
+        let mut open = true;
+        let mut done = false;
+        let mut enable: Option<platform::Permission> = None;
+        let all_granted = !self.missing_permissions();
+        egui::Window::new(egui::RichText::new("Set up Rega").font(theme::bold(17.0)))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size(Vec2::new(520.0, 0.0))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Rega needs your approval to work with your screen. Switch each one on in System Settings.")
+                            .color(theme::TEXT_MUTED),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(12.0);
+                for &(permission, granted) in &self.perm_status {
+                    egui::Frame::new()
+                        .fill(theme::SURFACE_2)
+                        .stroke(Stroke::new(1.0, theme::BORDER))
+                        .corner_radius(12)
+                        .inner_margin(egui::Margin::same(14))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let glyph = match permission {
+                                    platform::Permission::ScreenRecording => icon::FULLSCREEN,
+                                    platform::Permission::Accessibility => icon::SCROLL,
+                                };
+                                ui.label(egui::RichText::new(glyph).font(theme::icon_font(26.0)).color(theme::ACCENT));
+                                ui.add_space(8.0);
+                                ui.vertical(|ui| {
+                                    ui.set_width(ui.available_width() - 110.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(permission.title()).font(theme::medium(14.5)).color(theme::TEXT));
+                                        if permission.optional() {
+                                            ui.label(egui::RichText::new("Optional").font(theme::medium(11.5)).color(theme::TEXT_FAINT));
+                                        }
+                                    });
+                                    ui.add(egui::Label::new(egui::RichText::new(permission.description()).color(theme::TEXT_MUTED)).wrap());
+                                    ui.add_space(2.0);
+                                    let (g, text, color) = if granted {
+                                        (icon::CHECK, "Enabled", theme::SUCCESS)
+                                    } else {
+                                        (icon::INFO, "Not enabled", theme::CORAL)
+                                    };
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(g).font(theme::icon_font(15.0)).color(color));
+                                        ui.label(egui::RichText::new(text).font(theme::medium(12.5)).color(color));
+                                    });
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if !granted && theme::primary_button(ui, None, "Enable").clicked() {
+                                        enable = Some(permission);
+                                    }
+                                });
+                            });
+                        });
+                    ui.add_space(8.0);
+                }
+                let screen_missing = self.perm_status.iter().any(|(p, ok)| *p == platform::Permission::ScreenRecording && !ok);
+                if self.perm_opened && screen_missing {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("macOS applies Screen Recording only after Rega restarts.").color(theme::TEXT_MUTED),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(4.0);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if all_granted {
+                        if theme::primary_button(ui, Some(icon::CHECK), "Done").clicked() {
+                            done = true;
+                        }
+                    } else {
+                        if theme::secondary_button(ui, None, "Skip for now").clicked() {
+                            done = true;
+                        }
+                        if self.perm_opened && theme::primary_button(ui, None, "Restart Rega").clicked() {
+                            self.autosave_editor();
+                            platform::relaunch();
+                        }
+                    }
+                });
+            });
+        if let Some(permission) = enable {
+            platform::request(permission);
+            platform::open_settings(permission);
+            self.perm_opened = true;
+        }
+        if done || !open {
+            self.show_permissions = false;
+        }
     }
 
     /// Empty state shown when no capture is open.
@@ -940,6 +1164,7 @@ impl SnapquillApp {
         let mut delete: Option<Item> = None;
         let current = match &self.mode {
             Mode::Editor(ed) => Some(ed.path.clone()),
+            Mode::Video(player) => Some(player.path.clone()),
             Mode::Home => None,
         };
 
@@ -1083,8 +1308,23 @@ impl SnapquillApp {
                 }
                 p.text(thumb.center(), Align2::CENTER_CENTER, icon::IMAGE, theme::icon_font(26.0), theme::TEXT_FAINT);
             }
-            (ItemKind::Video, _) => {
-                theme::gradient_rect(p, thumb, 10, Color32::from_white_alpha(60));
+            (ItemKind::Video, fresh) => {
+                match fresh {
+                    Some(tex) => {
+                        let ts = tex.size_vec2();
+                        let scale = (thumb.width() / ts.x).max(thumb.height() / ts.y);
+                        let vis = Vec2::new(thumb.width() / (ts.x * scale), thumb.height() / (ts.y * scale));
+                        let uv = Rect::from_center_size(Pos2::new(0.5, 0.5), vis);
+                        p.add(egui::epaint::RectShape::filled(thumb, 10, Color32::WHITE).with_texture(tex.id(), uv));
+                    }
+                    None => {
+                        let key = (item.path.clone(), item.modified);
+                        if self.thumbs_requested.insert(key) {
+                            let _ = self.thumb_jobs.send((item.path.clone(), item.modified));
+                        }
+                        theme::gradient_rect(p, thumb, 10, Color32::from_white_alpha(60));
+                    }
+                }
                 p.circle_filled(thumb.center(), 20.0, Color32::from_black_alpha(120));
                 p.text(thumb.center(), Align2::CENTER_CENTER, icon::PLAY, theme::icon_font(26.0), Color32::WHITE);
                 let ext = item.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
@@ -1594,8 +1834,10 @@ fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
-impl eframe::App for SnapquillApp {
+impl eframe::App for RegaApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Before `advance_activity`, so it runs a pass after `show_overlay`.
+        self.present_overlay(frame);
         while let Ok(ev) = self.events.try_recv() {
             self.handle_event(ev, ctx, frame);
         }
@@ -1606,7 +1848,7 @@ impl eframe::App for SnapquillApp {
         self.advance_activity(ctx, frame);
 
         if ctx.input(|i| i.viewport().close_requested()) {
-            // Closing the window keeps Snapquill running in the menu bar.
+            // Closing the window keeps Rega running in the menu bar.
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.autosave_editor();
             self.hide_window(ctx);
@@ -1622,6 +1864,14 @@ impl eframe::App for SnapquillApp {
         if !self.hover_tracking {
             platform::enable_hover_when_inactive(frame);
             self.hover_tracking = true;
+            // On a small or highly scaled screen (e.g. 300%: ~1008x633 points)
+            // the default window would be bigger than the monitor.
+            if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
+                let fit = Vec2::new(monitor.x.min(1360.0), (monitor.y - 80.0).min(840.0)).max(Vec2::new(640.0, 400.0));
+                ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(fit.x.min(1300.0), fit.y.min(640.0))));
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(fit));
+                self.min_size = Vec2::new(fit.x.min(1300.0), fit.y.min(640.0));
+            }
         }
         if let Activity::Selecting(overlay) = &mut self.activity {
             // The overlay must cover the whole monitor, Dock and menu bar included.
@@ -1632,6 +1882,10 @@ impl eframe::App for SnapquillApp {
                 && (have.min - want.min).length() + (have.size() - want.size()).length() > 1.0
             {
                 platform::set_window_frame(frame, ox, oy, sw, sh);
+                if !cfg!(target_os = "macos") {
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(want.size()));
+                    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(want.min));
+                }
             }
             let outcome = egui::CentralPanel::no_frame().show(ui, |ui| overlay.ui(ui)).inner;
             match outcome {
@@ -1649,13 +1903,20 @@ impl eframe::App for SnapquillApp {
             return;
         }
         if matches!(self.activity, Activity::Recording(_)) {
+            platform::paint_recording_frame(&ctx);
             self.recording_bar_ui(ui);
             return;
         }
         if self.win != Win::Normal {
             return;
         }
+        self.refresh_permissions(false);
+        if self.missing_permissions() {
+            // Notice a grant made in System Settings without needing input.
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         self.workspace_ui(ui);
+        self.permissions_window(&ctx);
         self.home_shortcuts(&ctx);
         self.new_canvas_dialog(&ctx);
         self.settings_window(&ctx);
@@ -1744,10 +2005,10 @@ fn setup_menus(
         let _ = tray_menu.append(&item);
     }
     let _ = tray_menu.append(&PredefinedMenuItem::separator());
-    let _ = tray_menu.append(&MenuItem::with_id("show", "Open Snapquill", true, None));
-    let _ = tray_menu.append(&MenuItem::with_id("quit", "Quit Snapquill", true, None));
+    let _ = tray_menu.append(&MenuItem::with_id("show", "Open Rega", true, None));
+    let _ = tray_menu.append(&MenuItem::with_id("quit", "Quit Rega", true, None));
 
-    // App menu bar: Snapquill | Capture | Window
+    // App menu bar: Rega | Capture | Window
     let menu_bar = Menu::new();
     let app_menu = Submenu::new(APP_NAME, true);
     let _ = app_menu.append_items(&[
@@ -1759,7 +2020,7 @@ fn setup_menus(
         &PredefinedMenuItem::hide_others(None),
         &PredefinedMenuItem::show_all(None),
         &PredefinedMenuItem::separator(),
-        &MenuItem::with_id("quit", "Quit Snapquill", true, None),
+        &MenuItem::with_id("quit", "Quit Rega", true, None),
     ]);
     // No Edit menu on purpose: its ⌘C/⌘V key equivalents would swallow the
     // keystrokes before the editor and text fields see them.
@@ -1818,7 +2079,17 @@ fn spawn_thumbnailer(ctx: egui::Context) -> (Sender<(PathBuf, SystemTime)>, Rece
     let (res_tx, res_rx) = mpsc::channel();
     std::thread::spawn(move || {
         for (path, modified) in job_rx {
-            let Ok(img) = image::open(&path) else { continue };
+            let is_mp4 = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4"));
+            let img = if is_mp4 {
+                match crate::player::first_frame(&path) {
+                    Ok(frame) => image::DynamicImage::ImageRgba8(frame),
+                    Err(_) => continue,
+                }
+            } else {
+                // GIFs open as their first frame.
+                let Ok(img) = image::open(&path) else { continue };
+                img
+            };
             let thumb = img.thumbnail(400, 270).to_rgba8();
             let color = egui::ColorImage::from_rgba_unmultiplied([thumb.width() as usize, thumb.height() as usize], thumb.as_raw());
             if res_tx.send((path, modified, color)).is_err() {

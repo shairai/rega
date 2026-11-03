@@ -35,10 +35,10 @@ pub struct Recorder {
     handle: Option<JoinHandle<Result<PathBuf>>>,
 }
 
-struct TimedFrame {
-    image: RgbaImage,
+pub(crate) struct TimedFrame {
+    pub(crate) image: RgbaImage,
     /// Recording time (pauses excluded) at which this frame was captured.
-    at: Duration,
+    pub(crate) at: Duration,
 }
 
 impl Recorder {
@@ -46,21 +46,24 @@ impl Recorder {
         let stop = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
-        let point = (cfg.monitor_origin.0 + 1, cfg.monitor_origin.1 + 1);
+        let origin = cfg.monitor_origin;
         // Fail fast here; the capture thread looks the monitor up again because
         // `Monitor` holds a raw handle that is not `Send` on Windows.
-        xcap::Monitor::from_point(point.0, point.1).context("recording monitor not found")?;
+        crate::capture::monitor_with_origin(origin).context("recording monitor not found")?;
 
         let (tx, rx) = mpsc::channel::<TimedFrame>();
         let (stop_c, paused_c) = (stop.clone(), paused.clone());
         let fps = cfg.fps.clamp(1, 60);
         let (rx_, ry, rw, rh) = cfg.region;
-        let origin = cfg.monitor_origin;
         let highlight = cfg.highlight_cursor;
         let max_width = cfg.max_width.max(320);
 
         let capture = thread::spawn(move || -> Result<()> {
-            let monitor = xcap::Monitor::from_point(point.0, point.1).context("recording monitor not found")?;
+            let monitor = crate::capture::monitor_with_origin(origin).context("recording monitor not found")?;
+            // The region is in logical points; xcap wants its own units.
+            let d = crate::capture::dpi(&monitor);
+            let phys = |v: u32| (v as f32 * d).round() as u32;
+            let (px, py, pw, ph) = (phys(rx_), phys(ry), phys(rw).max(2), phys(rh).max(2));
             let interval = Duration::from_secs_f64(1.0 / fps as f64);
             let mut rec_time = Duration::ZERO;
             let mut last = Instant::now();
@@ -75,10 +78,10 @@ impl Recorder {
                 rec_time += tick - last;
                 last = tick;
 
-                let mut img = monitor.capture_region(rx_, ry, rw, rh)?;
+                let mut img = monitor.capture_region(px, py, pw, ph)?;
                 let scale = img.width() as f32 / rw as f32;
                 if highlight {
-                    let (cx, cy) = crate::capture::cursor_position();
+                    let (cx, cy) = crate::capture::to_logical(crate::capture::cursor_position());
                     let lx = (cx - origin.0 - rx_ as i32) as f32 * scale;
                     let ly = (cy - origin.1 - ry as i32) as f32 * scale;
                     draw_cursor_halo(&mut img, lx, ly, 18.0 * scale);
@@ -193,8 +196,8 @@ fn draw_cursor_halo(img: &mut RgbaImage, cx: f32, cy: f32, r: f32) {
     }
 }
 
-fn encode_mp4(rx: Receiver<TimedFrame>, fps: u32, path: &PathBuf, cancel: &AtomicBool) -> Result<()> {
-    use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, UsageType};
+pub(crate) fn encode_mp4(rx: Receiver<TimedFrame>, fps: u32, path: &PathBuf, cancel: &AtomicBool) -> Result<()> {
+    use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, UsageType};
     use openh264::formats::{RgbaSliceU8, YUVBuffer};
 
     let mut encoder: Option<Encoder> = None;
@@ -215,7 +218,9 @@ fn encode_mp4(rx: Receiver<TimedFrame>, fps: u32, path: &PathBuf, cancel: &Atomi
                 let config = EncoderConfig::new()
                     .max_frame_rate(FrameRate::from_hz(fps as f32))
                     .bitrate(BitRate::from_bps(bps))
-                    .usage_type(UsageType::ScreenContentRealTime);
+                    .usage_type(UsageType::ScreenContentRealTime)
+                    // A keyframe every 2 s keeps seeking in the in-app player fast.
+                    .intra_frame_period(IntraFramePeriod::from_num_frames(fps * 2));
                 encoder.insert(Encoder::with_api_config(openh264::OpenH264API::from_source(), config)?)
             }
         };
@@ -236,13 +241,13 @@ fn encode_mp4(rx: Receiver<TimedFrame>, fps: u32, path: &PathBuf, cancel: &Atomi
     }
     let file = std::fs::File::create(path)?;
     let mut muxer = minimp4::Mp4Muxer::new(file);
-    muxer.init_video(dims.0 as i32, dims.1 as i32, false, "Snapquill recording");
+    muxer.init_video(dims.0 as i32, dims.1 as i32, false, "Rega recording");
     muxer.write_video_with_fps(&h264, fps);
     muxer.close();
     Ok(())
 }
 
-fn encode_gif(rx: Receiver<TimedFrame>, path: &PathBuf, cancel: &AtomicBool) -> Result<()> {
+pub(crate) fn encode_gif(rx: Receiver<TimedFrame>, path: &PathBuf, cancel: &AtomicBool) -> Result<()> {
     let mut encoder: Option<gif::Encoder<std::fs::File>> = None;
     let mut pending: Option<TimedFrame> = None;
 
@@ -282,6 +287,15 @@ fn encode_gif(rx: Receiver<TimedFrame>, path: &PathBuf, cancel: &AtomicBool) -> 
 mod tests {
     use super::*;
 
+    pub(super) fn frames_sized(n: u32, w: u32, h: u32) -> Receiver<TimedFrame> {
+        let (tx, rx) = mpsc::channel();
+        for i in 0..n {
+            let image = RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x + i * 8) as u8, y as u8, 128, 255]));
+            tx.send(TimedFrame { image, at: Duration::from_millis(i as u64 * 100) }).unwrap();
+        }
+        rx
+    }
+
     fn frames(n: u32) -> Receiver<TimedFrame> {
         let (tx, rx) = mpsc::channel();
         for i in 0..n {
@@ -293,7 +307,7 @@ mod tests {
 
     #[test]
     fn encodes_mp4_and_gif() {
-        let dir = std::env::temp_dir().join(format!("snapquill-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rega-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cancel = AtomicBool::new(false);
         let mp4 = dir.join("t.mp4");
@@ -304,4 +318,16 @@ mod tests {
         assert!(image::open(&gif).is_ok());
         assert_eq!(even_fit(2881, 1801, 1920), (1920, 1200));
     }
+}
+
+/// An MP4 of `n` frames at `size` and `fps`, for other modules' tests.
+#[cfg(test)]
+pub fn write_test_video(path: &std::path::Path, n: u32, fps: u32, size: (u32, u32)) {
+    encode_mp4(tests::frames_sized(n, size.0, size.1), fps, &path.to_path_buf(), &AtomicBool::new(false)).unwrap();
+}
+
+/// A small animated GIF with `n` frames, for other modules' tests.
+#[cfg(test)]
+pub fn write_test_gif(path: &std::path::Path, n: u32) {
+    encode_gif(tests::frames_sized(n, 64, 48), &path.to_path_buf(), &AtomicBool::new(false)).unwrap();
 }

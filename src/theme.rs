@@ -1,4 +1,4 @@
-//! Snapquill's design system: palette, typography, icons, and shared widgets.
+//! Rega's design system: palette, typography, icons, and shared widgets.
 
 use std::sync::Arc;
 
@@ -96,7 +96,7 @@ pub fn install(ctx: &egui::Context) {
     add("ubuntu", include_bytes!("../assets/fonts/Ubuntu-Regular.ttf"));
     add(MEDIUM, include_bytes!("../assets/fonts/Ubuntu-Medium.ttf"));
     add(BOLD, crate::editor::render::annotation_font_bytes());
-    add(ICON_FONT, include_bytes!("../assets/fonts/SnapquillIcons.ttf"));
+    add(ICON_FONT, include_bytes!("../assets/fonts/RegaIcons.ttf"));
     add("hebrew", crate::editor::render::hebrew_font_bytes());
     // Keyboard symbols (⌃ ⌥ ⇧ ⌘ ⌫ …) from Noto Sans Symbols, subset to a few glyphs.
     add("keys-a", include_bytes!("../assets/fonts/KeySymbolsA.ttf"));
@@ -186,19 +186,19 @@ pub fn install(ctx: &egui::Context) {
         .map(|i| lerp_color(CORAL, ACCENT, i as f32 / (n - 1) as f32))
         .collect::<Vec<_>>();
     let tex = ctx.load_texture(
-        "snapquill-gradient",
+        "rega-gradient",
         egui::ColorImage::new([n, 1], pixels),
         egui::TextureOptions::LINEAR,
     );
-    ctx.data_mut(|d| d.insert_temp(Id::unique("snapquill-gradient"), tex));
+    ctx.data_mut(|d| d.insert_temp(Id::unique("rega-gradient"), tex));
 
     let (rgba, w, h) = crate::icon::app_icon(128);
     let logo = ctx.load_texture(
-        "snapquill-logo",
+        "rega-logo",
         egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba),
         egui::TextureOptions::LINEAR,
     );
-    ctx.data_mut(|d| d.insert_temp(Id::unique("snapquill-logo"), logo));
+    ctx.data_mut(|d| d.insert_temp(Id::unique("rega-logo"), logo));
 }
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -212,7 +212,7 @@ fn texture(ctx: &egui::Context, name: &str) -> Option<TextureHandle> {
 
 /// Paint a rounded rect filled with the brand gradient (left → right).
 pub fn gradient_rect(painter: &egui::Painter, rect: Rect, radius: impl Into<CornerRadius>, tint: Color32) {
-    if let Some(tex) = texture(painter.ctx(), "snapquill-gradient") {
+    if let Some(tex) = texture(painter.ctx(), "rega-gradient") {
         let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         painter.add(epaint::RectShape::filled(rect, radius, tint).with_texture(tex.id(), uv));
     } else {
@@ -222,7 +222,7 @@ pub fn gradient_rect(painter: &egui::Painter, rect: Rect, radius: impl Into<Corn
 
 pub fn logo(ui: &mut Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    if let Some(tex) = texture(ui.ctx(), "snapquill-logo") {
+    if let Some(tex) = texture(ui.ctx(), "rega-logo") {
         ui.painter().image(tex.id(), rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
     }
 }
@@ -410,7 +410,7 @@ pub fn toolbar_brand(ui: &mut Ui, name: &str) -> Rect {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, GROUP_HEIGHT), Sense::hover());
     let cy = rect.center().y;
     let logo_rect = Rect::from_min_size(egui::pos2(rect.min.x, cy - logo_size / 2.0), Vec2::splat(logo_size));
-    if let Some(tex) = texture(ui.ctx(), "snapquill-logo") {
+    if let Some(tex) = texture(ui.ctx(), "rega-logo") {
         ui.painter().image(tex.id(), logo_rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
     }
     let text_pos = egui::pos2(logo_rect.max.x + 10.0, cy - galley.size().y / 2.0);
@@ -530,7 +530,7 @@ mod tests {
                 egui::Panel::top("bar").show(ui, |ui| {
                     toolbar_row(ui, |ui| {
                         let mut found = vec![];
-                        found.push(toolbar_brand(ui, "Snapquill"));
+                        found.push(toolbar_brand(ui, "Rega"));
                         for n in 0..3 {
                             let r = ui.scope(|ui| {
                                 toolbar_group(ui, |ui| {

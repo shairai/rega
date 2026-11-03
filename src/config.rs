@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const APP_NAME: &str = "Snapquill";
+pub const APP_NAME: &str = "Rega";
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub enum ImageFormat {
@@ -46,6 +46,10 @@ pub struct Settings {
     pub video_max_width: u32,
     pub highlight_cursor: bool,
     pub launch_at_login: bool,
+    /// The first-launch permissions popup has been shown once.
+    pub permissions_prompt_shown: bool,
+    /// macOS's direct-screen-access confirmation has been triggered once.
+    pub screen_access_probed: bool,
     pub shortcuts: crate::shortcuts::Shortcuts,
 }
 
@@ -65,6 +69,8 @@ impl Default for Settings {
             video_max_width: 1920,
             highlight_cursor: true,
             launch_at_login: true,
+            permissions_prompt_shown: false,
+            screen_access_probed: false,
             shortcuts: Default::default(),
         }
     }

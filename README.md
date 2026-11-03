@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/images/icon.png" width="96" alt="Snapquill icon">
+  <img src="docs/images/icon.png" width="96" alt="Rega icon">
 </p>
 
-<h1 align="center">Snapquill</h1>
+<h1 align="center">Rega</h1>
 
 <p align="center">
   <b>Capture anything on your screen, mark it up, and share it — in seconds.</b><br>
@@ -10,14 +10,14 @@
 </p>
 
 <p align="center">
-  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-black?logo=apple">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-black">
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust">
   <img alt="UI" src="https://img.shields.io/badge/UI-egui-7c5cff">
   <img alt="Status" src="https://img.shields.io/badge/status-early%20preview-ff5e7a">
 </p>
 
 <p align="center">
-  <img src="docs/images/editor.png" alt="Snapquill editor with an annotated dashboard: arrow, callout, highlight, blurred emails and numbered steps" width="100%">
+  <img src="docs/images/editor.png" alt="Rega editor with an annotated dashboard: arrow, callout, highlight, blurred emails and numbered steps" width="100%">
 </p>
 
 ---
@@ -43,9 +43,9 @@
 |---|---|
 | **Region & window** | Drag a region on a frozen copy of the screen, or click a window to grab it. A live size label, crosshair and pixel magnifier (with the color's hex code) help you land exactly. |
 | **Full screen** | One shortcut, the whole display under your cursor. |
-| **Scrolling capture** | Snapquill scrolls the page for you and stitches the frames into one tall image — sticky headers and footers included. |
+| **Scrolling capture** | Rega scrolls the page for you and stitches the frames into one tall image — sticky headers and footers included. |
 | **Video** | Record any region to **MP4** (H.264) or **GIF**, with pause/resume and an optional cursor highlight. The control bar stays out of the recording. |
-| **Grab text (OCR)** | Select a region and get its text on the clipboard, using macOS's built-in Vision engine. |
+| **Grab text (OCR)** | Select a region and get its text on the clipboard, using the built-in OCR engine of macOS (Vision) or Windows (Windows.Media.Ocr; install a language pack in Settings › Time & language if none is present). |
 | **Delay timer** | 3, 5 or 10 seconds to open a menu or hover state first. |
 
 <p align="center">
@@ -67,7 +67,7 @@ Twelve tools in the right-hand panel, each with a one-key shortcut:
 
 - **Every mark stays editable** — select it to move, recolor, resize or delete. A freshly drawn mark stays selected, so you can tweak its color right away.
 - **Eyedropper** (`I`) picks any color straight from the image.
-- **Paste images onto the canvas** (`⌘V`) as movable, resizable layers.
+- **Paste images onto the canvas** (`⌘V` / `Ctrl+V`) as movable, resizable layers.
 - Undo/redo, resize, zoom, `⇧` to snap lines to 45° and keep shapes square.
 
 ### Export & share
@@ -80,7 +80,7 @@ Twelve tools in the right-hand panel, each with a one-key shortcut:
 
 ### Library
 
-Every capture is saved automatically and appears in the **library tray** along the bottom of the window. Filter by images or videos, search, open, reveal in Finder, or delete with the button that appears on hover. Images remain fully re-editable later — the original pixels and your annotations are kept side by side.
+Every capture is saved automatically and appears in the **library tray** along the bottom of the window. Filter by images or videos, search, open, reveal in Finder / Explorer, or delete with the button that appears on hover. Images remain fully re-editable later — the original pixels and your annotations are kept side by side.
 
 <p align="center">
   <img src="docs/images/welcome.png" alt="Welcome screen with capture modes and the library tray" width="100%">
@@ -102,26 +102,29 @@ Settings are grouped into **General**, **Video** and **Shortcuts**. Every global
   <img src="docs/images/settings-shortcuts.png" alt="Settings window on the Shortcuts tab" width="100%">
 </p>
 
-Snapquill also lives in the **menu bar**, so captures are one click (or one shortcut) away even when the window is closed.
+Rega also lives in the **menu bar** (macOS) or **system tray** (Windows), so captures are one click (or one shortcut) away even when the window is closed.
 
 ## Install
 
 ### Requirements
 
-- macOS 12.3 or later (Apple Silicon or Intel)
+- macOS 12.3 or later (Apple Silicon or Intel), or Windows 10 / 11 (64-bit)
 - [Rust](https://rustup.rs) 1.88 or later
-- Xcode Command Line Tools (`xcode-select --install`)
+- macOS: Xcode Command Line Tools (`xcode-select --install`)
+- Windows: Visual Studio Build Tools (C++ workload)
 
 No other system libraries are needed — the H.264 encoder is compiled from source.
 
 ### Build the app
 
 ```sh
-git clone https://github.com/<you>/snapquill.git
-cd snapquill
-./scripts/bundle-macos.sh          # builds target/release/Snapquill.app
-open target/release/Snapquill.app
+git clone https://github.com/<you>/Rega.git
+cd Rega
+./scripts/bundle-macos.sh          # builds target/release/Rega.app
+open target/release/Rega.app
 ```
+
+On Windows, `cargo build --release` produces `target\release\rega.exe`; the installer is built in CI from `scripts/installer.nsi`.
 
 To run straight from source instead:
 
@@ -131,6 +134,8 @@ cargo run --release
 
 ### Permissions
 
+*Windows needs none of this: capture and shortcuts work without any permission prompt.*
+
 macOS asks once for each of these:
 
 | Permission | Needed for | Where to grant it |
@@ -138,12 +143,12 @@ macOS asks once for each of these:
 | **Screen Recording** | All captures and video | System Settings › Privacy & Security › Screen Recording |
 | **Accessibility** | Scrolling capture only (it sends scroll events) | System Settings › Privacy & Security › Accessibility |
 
-If Screen Recording is missing, macOS only shows apps the empty desktop — Snapquill detects this and shows a banner with **Open Settings** and **Restart** buttons instead of saving a blank capture. Run the `.app` bundle (not the bare binary) so the permission belongs to Snapquill rather than your terminal.
+On first launch Rega shows a **Set up** popup listing each permission with its live status and an **Enable** button that opens the right System Settings pane (and adds Rega to the list). You can skip it; while anything is missing a banner stays at the top with **Review permissions** to reopen the popup. macOS applies Screen Recording only after a restart, so the popup offers **Restart Rega** once you've pressed Enable. Without Screen Recording, Rega won't save a blank capture: it opens the popup instead. Run the `.app` bundle (not the bare binary) so the permissions belong to Rega rather than your terminal.
 
 ## Quick start
 
-1. Launch Snapquill — its icon appears in the menu bar.
-2. Press **`⌃⌥C`** anywhere.
+1. Launch Rega — its icon appears in the menu bar (macOS) or system tray (Windows).
+2. Press **`⌃⌥C`** (`Ctrl+Alt+C` on Windows) anywhere.
 3. Drag over what you want, or click a window, or press **Enter** for the full screen.
 4. The capture opens in the editor (and is already on your clipboard).
 5. Mark it up, then **`⌘C`** to copy or **Export** to save in another format.
@@ -153,8 +158,11 @@ If Screen Recording is missing, macOS only shows apps the empty desktop — Snap
 **Annotate a bug report**
 `⌃⌥C` → click the broken window → `A` and drag an arrow to the problem → `T` and type what's wrong → `B` and drag over any personal data → `⌘C` and paste into your issue tracker.
 
+**Hide sensitive info**
+Open any capture → press `B` and drag over emails, names, tokens or faces → they're pixelated in the image and in every export. The blur stays a mark you can select, move or resize until you export, so you can fix a missed spot later.
+
 **Walk someone through a UI**
-Capture the screen → press `N` and click each control in order to drop numbered steps **1, 2, 3** → export as **PDF** for a one-page guide.
+Capture the screen → press `N` and click each control in order to drop numbered steps **1, 2, 3** (the count goes up automatically) → add a `T` label beside each → export as **PDF** for a one-page guide. Combine with `B` to blur anything private first.
 
 **Record a quick demo GIF**
 Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thing → `⌃⌥R` again to stop. The GIF lands in the library tray.
@@ -163,12 +171,14 @@ Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thin
 `⌃⌥T` → select the text → it's on your clipboard, and shown in a window you can edit before copying again.
 
 **Capture a whole web page**
-`⌃⌥S` → select the browser's content area → Snapquill scrolls to the end and stitches one tall image.
+`⌃⌥S` → select the browser's content area → Rega scrolls to the end and stitches one tall image.
 
 **Build a before/after comparison**
 `⌘N` → *Full HD, white* → paste the first screenshot, drag it left → paste the second, drag it right → add labels with `T` → export.
 
 ## Keyboard shortcuts
+
+> **Windows:** read `⌘` as `Ctrl`, `⌥` as `Alt`, `⇧` as `Shift`. `⌃` is `Ctrl`.
 
 ### Global (work in any app — all customizable)
 
@@ -195,7 +205,7 @@ Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thin
 
 ## How it works
 
-Snapquill is a single native binary built on [egui](https://github.com/emilk/egui) (GPU-rendered immediate-mode UI) with a small platform layer for macOS.
+Rega is a single native binary built on [egui](https://github.com/emilk/egui) (GPU-rendered immediate-mode UI) with a small platform layer for macOS and Windows.
 
 | Area | Implementation |
 |---|---|
@@ -224,7 +234,7 @@ src/
 ├── ocr.rs             text recognition
 ├── shortcuts.rs       customizable global shortcuts
 ├── library.rs         capture library on disk
-└── platform.rs        macOS integration (window levels, permissions, clipboard)
+└── platform.rs        macOS / Windows integration (window levels, permissions, clipboard)
 ```
 
 ## Development
@@ -244,7 +254,7 @@ They are written to `docs/images/`.
 
 ## Roadmap
 
-- [ ] Windows and Linux builds (the code is cross-platform except OCR and a few macOS integrations)
+- [x] Windows build
 - [ ] Audio in recordings and video trimming
 - [ ] Capturing across several displays at once
 - [ ] Load Cisco's prebuilt OpenH264 at runtime (H.264 patent licensing)
@@ -256,8 +266,8 @@ They are written to `docs/images/`.
 - Icons: [Material Symbols](https://fonts.google.com/icons) by Google — Apache License 2.0 (`assets/fonts/MaterialSymbols-LICENSE.txt`)
 - Keyboard symbols: [Noto Sans Symbols](https://fonts.google.com/noto) — SIL Open Font License 1.1 (`assets/fonts/NotoSans-OFL.txt`)
 
-The bundled icon and symbol fonts are subsets containing only the glyphs Snapquill uses.
+The bundled icon and symbol fonts are subsets containing only the glyphs Rega uses.
 
 ## License
 
-Snapquill is released under the [MIT License](LICENSE). Bundled fonts keep their own licenses, listed above.
+Rega is released under the [MIT License](LICENSE). Bundled fonts keep their own licenses, listed above.
