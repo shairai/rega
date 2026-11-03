@@ -7,8 +7,7 @@ cd "$(dirname "$0")/.."
 ./scripts/bundle-macos.sh
 APP=target/release/Rega.app
 VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
-ARCH=$(uname -m)
-OUT="dist/Rega-${VERSION}-macos-${ARCH}.dmg"
+OUT="dist/Rega-${VERSION}-macos-universal.dmg"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT

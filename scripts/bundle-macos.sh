@@ -4,11 +4,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build --release
+# Universal binary: Apple Silicon + Intel, both for the minimum macOS in Info.plist.
+export MACOSX_DEPLOYMENT_TARGET=12.3
+cargo build --release --target aarch64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
 APP=target/release/Rega.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/rega "$APP/Contents/MacOS/Rega"
+lipo -create -output "$APP/Contents/MacOS/Rega" \
+  target/aarch64-apple-darwin/release/rega target/x86_64-apple-darwin/release/rega
 
 # Icon: render the in-app icon to PNG sizes, then pack an .icns.
 ICONSET=$(mktemp -d)/Rega.iconset
