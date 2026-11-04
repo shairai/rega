@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/editor.png" alt="Rega editor with an annotated dashboard: arrow, callout, highlight, blurred emails and numbered steps" width="100%">
+  <img src="docs/images/editor.png" alt="Rega editor with an annotated dashboard: arrow, callout, highlight, blurred emails, numbered steps and status stamps, with the Stamp tool's 24 symbols in the side panel" width="100%">
 </p>
 
 ---
@@ -165,7 +165,7 @@ On first launch Rega shows a **Set up** popup listing each permission with its l
 Open any capture → press `B` and drag over emails, names, tokens or faces → they're hidden in the image and in every export. Choose **Pixelate** or a smooth **Blur**, each with adjustable strength. To black out text completely, draw a rectangle with **Fill shape** instead. The blur stays a mark you can select, move or resize until you export, so you can fix a missed spot later.
 
 <p align="center">
-  <img src="docs/images/example-blur.png" alt="A customer table before and after: names and email addresses pixelated with the Blur tool" width="100%">
+  <img src="docs/images/example-blur.png" alt="A customer table before and after: names pixelated and email addresses blurred with the Blur tool" width="100%">
 </p>
 
 **Walk someone through a UI**
@@ -173,6 +173,13 @@ Capture the screen → press `N` and click each control in order to drop numbere
 
 <p align="center">
   <img src="docs/images/example-steps.png" alt="A dashboard with numbered steps 1 to 4 on the Customers menu, the search box and two stat cards, with a legend explaining each step" width="100%">
+</p>
+
+**Give review feedback**
+Open a capture → press `K` and click to drop stamps (✓, 👍, ?, ! and 20 more) on what's good, unclear or broken → press `M` and drag a magnifier over small text so nobody has to squint → `⌘C` and paste into the review thread. Drag any corner to resize a stamp or loupe.
+
+<p align="center">
+  <img src="docs/images/example-feedback.png" alt="A dashboard reviewed with stamps: a check on Revenue, thumbs up on Active users, a question mark on Conversion, a warning on Churn, a star on December's bar, and a magnifier enlarging the small 10% Referral share" width="100%">
 </p>
 
 **Record a quick demo GIF**
@@ -185,7 +192,7 @@ Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thin
 `⌃⌥S` → select the browser's content area → Rega scrolls to the end and stitches one tall image.
 
 **Build a before/after comparison**
-`⌘N` → *Full HD, white* → paste the first screenshot, drag it left → paste the second, drag it right → add labels with `T` → export.
+`⌘N` → *Full HD, white* → paste the first screenshot, drag it left → paste the second, drag it right → add labels with `T` → export. To blur or fill inside a pasted shot, right-click it → **Flatten image** first.
 
 ## Keyboard shortcuts
 

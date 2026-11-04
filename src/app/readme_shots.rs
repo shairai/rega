@@ -17,7 +17,7 @@ use image::RgbaImage;
 use super::{Activity, RegaApp, Mode, SettingsTab};
 use crate::capture::{Snapshot, WinRect};
 use crate::editor::Editor;
-use crate::editor::model::{Annotation, Kind, P, Project};
+use crate::editor::model::{Annotation, BlurStyle, DEFAULT_BLUR_STRENGTH, Kind, P, Project, Stamp};
 use crate::overlay::{Overlay, Purpose};
 use crate::theme;
 
@@ -277,6 +277,10 @@ fn px(r: Rect) -> (P, P) {
     (P::new(r.min.x * PPP, r.min.y * PPP), P::new(r.max.x * PPP, r.max.y * PPP))
 }
 
+fn green() -> [u8; 4] {
+    [46, 184, 92, 255]
+}
+
 fn ann(kind: Kind, color: [u8; 4], width: f32) -> Annotation {
     Annotation { kind, color, width, filled: false }
 }
@@ -314,6 +318,11 @@ fn dashboard_project() -> Project {
             blue,
             6.0,
         ));
+    }
+    // Stamps beside the status pills.
+    for (row, stamp, color) in [(0, Stamp::Check, green()), (2, Stamp::Check, green()), (3, Stamp::Warning, red)] {
+        let at = Pos2::new(d.table.min.x + 870.0, d.rows[row].center().y);
+        annotations.push(ann(Kind::Stamp { pos: P::new(at.x * PPP, at.y * PPP), size: 30.0 * PPP, stamp }, color, 6.0));
     }
     Project { annotations, effects: Default::default(), next_step: 4 }
 }
@@ -355,11 +364,13 @@ fn flatten(w: f32, h: f32, anns: &[Annotation]) -> RgbaImage {
 fn blur_example(dashboard: &RgbaImage) -> RgbaImage {
     let d = dash_layout();
     // One blur per cell, as a user would drag them, so row dividers stay intact.
-    let blur = |x0: f32, x1: f32, r: &Rect| {
+    let blur = |x0: f32, x1: f32, r: &Rect, style| {
         let (a, b) = px(Rect::from_min_max(Pos2::new(d.table.min.x + x0, r.center().y - 13.0), Pos2::new(d.table.min.x + x1, r.center().y + 13.0)));
-        ann(Kind::pixelate(a, b), [0; 4], 0.0)
+        ann(Kind::Blur { a, b, style, strength: DEFAULT_BLUR_STRENGTH }, [0; 4], 0.0)
     };
-    let marks: Vec<Annotation> = d.rows.iter().flat_map(|r| [blur(12.0, 150.0, r), blur(222.0, 440.0, r)]).collect();
+    // Both styles: names pixelated, emails blurred.
+    let marks: Vec<Annotation> =
+        d.rows.iter().flat_map(|r| [blur(12.0, 150.0, r, BlurStyle::Pixelate), blur(222.0, 440.0, r, BlurStyle::Gaussian)]).collect();
     let blurred = crate::editor::render::render(dashboard, &marks, &Default::default());
     // Customer, email and plan columns.
     let region = Rect::from_min_max(d.table.min - Vec2::splat(12.0), Pos2::new(d.table.min.x + 620.0, d.table.max.y + 12.0));
@@ -370,7 +381,7 @@ fn blur_example(dashboard: &RgbaImage) -> RgbaImage {
     let right = EX_MARGIN + pw + gap;
     let mut anns = vec![
         label(P::new(EX_MARGIN, EX_MARGIN), "Before", 36.0, EX_MUTED),
-        label(P::new(right, EX_MARGIN), "After: press B and drag over names and emails", 36.0, EX_INK),
+        label(P::new(right, EX_MARGIN), "After: B, then Pixelate names and Blur emails", 36.0, EX_INK),
     ];
     anns.extend(pasted(before, P::new(EX_MARGIN, top)));
     anns.extend(pasted(after, P::new(right, top)));
@@ -408,9 +419,37 @@ fn steps_example(dashboard: &RgbaImage) -> RgbaImage {
     flatten(pw + 2.0 * EX_MARGIN, legend_top + 2.0 * row_h + EX_MARGIN - 20.0, &anns)
 }
 
+/// Review feedback on the dashboard: stamps (`K`) and a magnifier (`M`).
+fn feedback_example(dashboard: &RgbaImage) -> RgbaImage {
+    let d = dash_layout();
+    let (red, blue, orange) = ([235, 59, 52, 255], [30, 136, 229, 255], [255, 140, 0, 255]);
+    let at = |p: Pos2| P::new(p.x * PPP, p.y * PPP);
+    let stamp = |p: Pos2, stamp, color| ann(Kind::Stamp { pos: at(p), size: 46.0 * PPP, stamp }, color, 6.0);
+    let corner = |r: &Rect| Pos2::new(r.max.x - 28.0, r.min.y + 28.0);
+    let side = Rect::from_min_max(Pos2::new(d.chart.max.x + 16.0, d.chart.min.y), Pos2::new(DASH.x - 32.0, d.chart.max.y));
+    // The tiny "10%" share of the last channel, under a 2.5x loupe.
+    let referral = Pos2::new(side.max.x - 34.0, side.min.y + 62.0 + 3.0 * 48.0 + 9.0);
+    let marks = vec![
+        stamp(corner(&d.cards[0]), Stamp::Check, green()),
+        stamp(corner(&d.cards[1]), Stamp::ThumbsUp, blue),
+        stamp(corner(&d.cards[2]), Stamp::Question, orange),
+        stamp(corner(&d.cards[3]), Stamp::Warning, red),
+        stamp(Pos2::new(d.bars[11].center().x, d.bars[11].min.y - 30.0), Stamp::Star, orange),
+        ann(Kind::Magnify { a: at(referral - Vec2::splat(46.0)), b: at(referral + Vec2::splat(46.0)), zoom: 2.0 }, red, 6.0),
+    ];
+    let marked = crate::editor::render::render(dashboard, &marks, &Default::default());
+    let shot = crop_pts(&marked, Rect::from_min_max(Pos2::new(220.0, 38.0), Pos2::new(DASH.x, d.chart.max.y + 14.0)));
+    let (pw, ph) = (shot.width() as f32, shot.height() as f32);
+    let title = 76.0;
+    let mut anns = vec![label(P::new(EX_MARGIN, EX_MARGIN), "Review feedback: K for stamps, M for the magnifier", 36.0, EX_INK)];
+    anns.extend(pasted(shot, P::new(EX_MARGIN, EX_MARGIN + title)));
+    flatten(pw + 2.0 * EX_MARGIN, ph + title + 2.0 * EX_MARGIN, &anns)
+}
+
 fn write_examples(dashboard: &RgbaImage) {
     save(&blur_example(dashboard), "example-blur.png");
     save(&steps_example(dashboard), "example-steps.png");
+    save(&feedback_example(dashboard), "example-feedback.png");
 }
 
 #[test]
@@ -591,8 +630,9 @@ fn readme_screenshots() {
         Editor::new(path, dashboard.clone(), Some(dashboard_project()), true)
     };
 
-    // 1. Editor with annotations (hero).
-    let (lib, ed) = (library.clone(), editor_for(&library, &dashboard));
+    // 1. Editor with annotations (hero), on the Stamp tool to show its symbols.
+    let (lib, mut ed) = (library.clone(), editor_for(&library, &dashboard));
+    ed.set_demo_state(egui::Key::K, None);
     let mut h = app_harness(APP_SIZE, move |ctx| {
         let mut app = RegaApp::demo(ctx, lib);
         app.mode = Mode::Editor(Box::new(ed));
