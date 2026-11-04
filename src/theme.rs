@@ -70,6 +70,7 @@ pub mod icon {
     pub const NEW: &str = "\u{e89c}";
     pub const IMPORT: &str = "\u{e43e}";
     pub const INFO: &str = "\u{e88e}";
+    pub const MAGNIFIER: &str = "\u{e8b6}";
 }
 
 pub const ICON_FONT: &str = "icons";
@@ -430,6 +431,14 @@ pub fn toolbar_divider(ui: &mut Ui) {
 
 /// Tool tile for the editor tool grid.
 pub fn tool_tile(ui: &mut Ui, glyph: &str, selected: bool, tooltip: &str) -> Response {
+    tool_tile_painted(ui, selected, tooltip, |p, c, color| {
+        p.text(c, Align2::CENTER_CENTER, glyph, icon_font(23.0), color);
+    })
+}
+
+/// A tool tile whose icon is drawn by `icon(painter, center, color)`, for tools
+/// without a glyph in the icon font. Icons are about 23 pt across.
+pub fn tool_tile_painted(ui: &mut Ui, selected: bool, tooltip: &str, icon: impl FnOnce(&egui::Painter, egui::Pos2, Color32)) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(46.0), Sense::click());
     let t = hover_anim(ui, resp.id, resp.hovered());
     let p = ui.painter();
@@ -440,7 +449,7 @@ pub fn tool_tile(ui: &mut Ui, glyph: &str, selected: bool, tooltip: &str) -> Res
         p.rect_stroke(rect, 11.0, Stroke::new(1.0, lerp_color(BORDER, BORDER_STRONG, t)), StrokeKind::Inside);
     }
     let color = if selected { Color32::WHITE } else { lerp_color(TEXT_MUTED, TEXT, t) };
-    p.text(rect.center(), Align2::CENTER_CENTER, glyph, icon_font(23.0), color);
+    icon(p, rect.center(), color);
     resp.on_hover_text(tooltip)
 }
 

@@ -6,7 +6,7 @@ use ab_glyph::{Font, FontRef, ScaleFont};
 use image::{Rgba as Px, RgbaImage};
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
-use super::model::{Annotation, Effects, Kind, P, Rgba, arrow_geometry, contrast_on, ellipse_points, norm};
+use super::model::{Annotation, BlurStyle, Effects, Kind, P, Rgba, StampSymbol, arrow_geometry, contrast_on, ellipse_points, norm, stamp_symbol};
 
 /// Ubuntu Bold from Google Fonts (Ubuntu Font Licence, see assets/fonts/UFL.txt),
 /// bundled so annotations render identically on every platform.
@@ -189,17 +189,112 @@ fn from_pixmap(pm: &Pixmap) -> RgbaImage {
     RgbaImage::from_raw(pm.width(), pm.height(), data).expect("pixmap dims")
 }
 
-/// Apply pixel-changing annotations (blur, spotlight) in order.
+/// Apply pixel-changing annotations (blur, spotlight, magnifier, fill) in order.
 pub fn apply_raster(base: &RgbaImage, anns: &[Annotation]) -> RgbaImage {
     let mut img = base.clone();
     for ann in anns.iter().filter(|a| a.is_raster()) {
         match &ann.kind {
-            Kind::Blur { a, b } => pixelate(&mut img, *a, *b),
+            Kind::Blur { a, b, style, strength } => match style {
+                BlurStyle::Pixelate => pixelate(&mut img, *a, *b, *strength),
+                BlurStyle::Gaussian => gaussian(&mut img, *a, *b, *strength),
+            },
             Kind::Spotlight { a, b } => spotlight(&mut img, *a, *b),
+            Kind::Magnify { a, b, zoom } => magnify(&mut img, *a, *b, *zoom),
+            Kind::Fill { seed, tolerance, .. } => {
+                if let Some((mask, _)) = flood_region(&img, *seed, *tolerance) {
+                    for (i, px) in img.pixels_mut().enumerate() {
+                        if mask[i / 64] >> (i % 64) & 1 == 1 {
+                            *px = Px(ann.color);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
     img
+}
+
+/// `(x0, y0, x1, y1)` in pixels, `x1`/`y1` exclusive.
+pub type PixelBounds = (u32, u32, u32, u32);
+
+/// The pixels a paint-bucket click at `seed` covers: those connected to it
+/// whose every channel is within `tolerance` of the seed pixel (compared with
+/// the seed, not neighbours, so gradients don't leak). Returns a bit mask
+/// (row-major) and the bounds `(x0, y0, x1, y1)`, exclusive.
+pub fn flood_region(img: &RgbaImage, seed: P, tolerance: f32) -> Option<(Vec<u64>, PixelBounds)> {
+    let (w, h) = img.dimensions();
+    let (sx, sy) = (seed.x.floor(), seed.y.floor());
+    if sx < 0.0 || sy < 0.0 || sx >= w as f32 || sy >= h as f32 {
+        return None;
+    }
+    let (sx, sy) = (sx as u32, sy as u32);
+    let target = img.get_pixel(sx, sy).0;
+    let tol = tolerance.clamp(0.0, 255.0) as i16;
+    let raw = img.as_raw();
+    let at = |x: u32, y: u32| y as usize * w as usize + x as usize;
+    let matches = |i: usize| (0..4).all(|c| (raw[i * 4 + c] as i16 - target[c] as i16).abs() <= tol);
+    let mut mask = vec![0u64; (w as usize * h as usize).div_ceil(64)];
+    let is_set = |m: &[u64], i: usize| m[i / 64] >> (i % 64) & 1 == 1;
+    let (mut x0, mut y0, mut x1, mut y1) = (sx, sy, sx + 1, sy + 1);
+    let mut stack = vec![(sx, sy)];
+    while let Some((x, y)) = stack.pop() {
+        let i = at(x, y);
+        if is_set(&mask, i) || !matches(i) {
+            continue;
+        }
+        // Grow the run left and right, mark it, then queue the rows above and below.
+        let (mut l, mut r) = (x, x);
+        while l > 0 && !is_set(&mask, at(l - 1, y)) && matches(at(l - 1, y)) {
+            l -= 1;
+        }
+        while r + 1 < w && !is_set(&mask, at(r + 1, y)) && matches(at(r + 1, y)) {
+            r += 1;
+        }
+        for xx in l..=r {
+            let j = at(xx, y);
+            mask[j / 64] |= 1 << (j % 64);
+        }
+        (x0, x1, y0, y1) = (x0.min(l), x1.max(r + 1), y0.min(y), y1.max(y + 1));
+        for ny in [y.checked_sub(1), (y + 1 < h).then_some(y + 1)].into_iter().flatten() {
+            let mut in_run = false;
+            for xx in l..=r {
+                let j = at(xx, ny);
+                let open = !is_set(&mask, j) && matches(j);
+                if open && !in_run {
+                    stack.push((xx, ny));
+                }
+                in_run = open;
+            }
+        }
+    }
+    Some((mask, (x0, y0, x1, y1)))
+}
+
+/// A loupe: inside the ellipse `a`–`b`, show the pixels around its centre `zoom`× larger.
+fn magnify(img: &mut RgbaImage, a: P, b: P, zoom: f32) {
+    let (min, max) = norm(a, b);
+    let (cx, cy) = ((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
+    let (rx, ry) = ((max.x - min.x) / 2.0, (max.y - min.y) / 2.0);
+    let zoom = zoom.max(1.0);
+    let (x0, y0, x1, y1) = clamp_rect(img, a, b);
+    if rx < 1.0 || ry < 1.0 || x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    // Sample from a copy: the loupe reads pixels it is also overwriting.
+    let src = image::imageops::crop_imm(img, x0, y0, x1 - x0, y1 - y0).to_image();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            if (dx / rx).powi(2) + (dy / ry).powi(2) > 1.0 {
+                continue;
+            }
+            // Nearest pixel keeps screenshots crisp when enlarged.
+            let sx = ((cx + dx / zoom).floor() as i64 - x0 as i64).clamp(0, src.width() as i64 - 1) as u32;
+            let sy = ((cy + dy / zoom).floor() as i64 - y0 as i64).clamp(0, src.height() as i64 - 1) as u32;
+            img.put_pixel(x, y, *src.get_pixel(sx, sy));
+        }
+    }
 }
 
 fn clamp_rect(img: &RgbaImage, a: P, b: P) -> (u32, u32, u32, u32) {
@@ -211,9 +306,16 @@ fn clamp_rect(img: &RgbaImage, a: P, b: P) -> (u32, u32, u32, u32) {
     (x0, y0, x1, y1)
 }
 
-fn pixelate(img: &mut RgbaImage, a: P, b: P) {
+/// Effect size in pixels at `strength` (1–100): at 50 it's the original
+/// pixelate block, scaled to the image so it reads the same at any resolution.
+fn blur_radius(img: &RgbaImage, strength: f32) -> f32 {
+    let base = (img.width().max(img.height()) / 120).max(8) as f32;
+    base * strength.clamp(1.0, 100.0) / crate::editor::model::DEFAULT_BLUR_STRENGTH
+}
+
+fn pixelate(img: &mut RgbaImage, a: P, b: P, strength: f32) {
     let (x0, y0, x1, y1) = clamp_rect(img, a, b);
-    let block = (img.width().max(img.height()) / 120).max(8);
+    let block = (blur_radius(img, strength).round() as u32).max(2);
     let mut by = y0;
     while by < y1 {
         let mut bx = x0;
@@ -240,6 +342,25 @@ fn pixelate(img: &mut RgbaImage, a: P, b: P) {
         }
         by += block;
     }
+}
+
+/// Smooth blur inside `a`–`b`. Strong blurs run on a downscaled copy (a large
+/// Gaussian kernel at full size is slow) and are scaled back up, which looks
+/// the same once blurred.
+fn gaussian(img: &mut RgbaImage, a: P, b: P, strength: f32) {
+    let (x0, y0, x1, y1) = clamp_rect(img, a, b);
+    let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if w < 2 || h < 2 {
+        return;
+    }
+    let sigma = (blur_radius(img, strength) * 0.6).max(1.0);
+    let region = image::imageops::crop_imm(img, x0, y0, w, h).to_image();
+    let factor = (sigma / 3.0).floor().max(1.0);
+    let (sw, sh) = (((w as f32 / factor) as u32).max(2), ((h as f32 / factor) as u32).max(2));
+    let small = if factor > 1.0 { image::imageops::resize(&region, sw, sh, image::imageops::FilterType::Triangle) } else { region };
+    let blurred = imageproc::filter::gaussian_blur_f32(&small, sigma / factor);
+    let out = if factor > 1.0 { image::imageops::resize(&blurred, w, h, image::imageops::FilterType::Triangle) } else { blurred };
+    image::imageops::replace(img, &out, x0 as i64, y0 as i64);
 }
 
 fn spotlight(img: &mut RgbaImage, a: P, b: P) {
@@ -373,7 +494,40 @@ fn draw_vector(pm: &mut Pixmap, ann: &Annotation) {
             let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
             pm.draw_pixmap(0, 0, src.as_ref(), &paint, Transform::from_row(sx, 0.0, 0.0, sy, pos.x, pos.y), None);
         }
-        Kind::Blur { .. } | Kind::Spotlight { .. } => {}
+        Kind::Magnify { a, b, .. } => {
+            // The ring; the enlarged pixels come from `apply_raster`.
+            if let Some(path) = polyline(&ellipse_points(*a, *b, 96), true) {
+                pm.stroke_path(&path, &paint(color), &stroke(ann.width), t, None);
+            }
+        }
+        Kind::Stamp { pos, size, stamp } => {
+            if let Some(path) = PathBuilder::from_circle(pos.x, pos.y, size / 2.0) {
+                pm.fill_path(&path, &paint(color), FillRule::Winding, t, None);
+            }
+            let ink = contrast_on(color);
+            for part in stamp_symbol(*stamp, *pos, *size) {
+                match part {
+                    StampSymbol::Strokes(lines, width) => {
+                        for line in lines {
+                            if let Some(path) = polyline(&line, false) {
+                                pm.stroke_path(&path, &paint(ink), &stroke(width), t, None);
+                            }
+                        }
+                    }
+                    StampSymbol::Fill(ref pts) | StampSymbol::Cut(ref pts) => {
+                        let c = if matches!(part, StampSymbol::Cut(_)) { color } else { ink };
+                        if let Some(path) = polyline(&pts[1..], true) {
+                            pm.fill_path(&path, &paint(c), FillRule::Winding, t, None);
+                        }
+                    }
+                    StampSymbol::Glyph(g, size) => {
+                        let (w, h) = measure_text(g, size);
+                        draw_text(pm, P::new(pos.x - w / 2.0, pos.y - h / 2.0), g, size, ink);
+                    }
+                }
+            }
+        }
+        Kind::Blur { .. } | Kind::Spotlight { .. } | Kind::Fill { .. } => {}
     }
 }
 
@@ -413,7 +567,8 @@ pub(crate) fn draw_text(pm: &mut Pixmap, pos: P, text: &str, size: f32, color: R
 pub fn render(base: &RgbaImage, anns: &[Annotation], effects: &Effects) -> RgbaImage {
     let rastered = apply_raster(base, anns);
     let mut pm = to_pixmap(&rastered);
-    for ann in anns.iter().filter(|a| !a.is_raster()) {
+    // Every mark in order: raster ones only add their outline (the magnifier ring).
+    for ann in anns {
         draw_vector(&mut pm, ann);
     }
     apply_effects(from_pixmap(&pm), effects)
@@ -453,6 +608,90 @@ mod tests {
     }
 
     #[test]
+    fn blur_styles_and_strength() {
+        // Vertical stripes, so any blur or pixelation visibly changes pixels.
+        let img = RgbaImage::from_fn(240, 240, |x, _| if x % 4 < 2 { Px([0, 0, 0, 255]) } else { Px([255, 255, 255, 255]) });
+        let blur = |style, strength| Annotation {
+            kind: Kind::Blur { a: P::new(40.0, 40.0), b: P::new(200.0, 200.0), style, strength },
+            color: [30, 136, 229, 255],
+            width: 1.0,
+            filled: false,
+        };
+        for style in BlurStyle::ALL {
+            let out = apply_raster(&img, &[blur(style, 50.0)]);
+            assert_ne!(out.get_pixel(120, 120), img.get_pixel(120, 120), "{style:?} changes the inside");
+            assert_eq!(out.get_pixel(10, 10), img.get_pixel(10, 10), "{style:?} leaves the outside");
+        }
+        // Pixel blocks grow with strength: count color runs along one row.
+        let runs = |im: &RgbaImage| (41..200).filter(|&x| im.get_pixel(x, 100) != im.get_pixel(x - 1, 100)).count();
+        let (weak, strong) = (apply_raster(&img, &[blur(BlurStyle::Pixelate, 20.0)]), apply_raster(&img, &[blur(BlurStyle::Pixelate, 100.0)]));
+        assert!(runs(&strong) < runs(&weak), "stronger pixelate means bigger blocks");
+    }
+
+    #[test]
+    fn old_projects_load_blur_as_pixelate() {
+        let json = r#"{"kind":{"Blur":{"a":{"x":0.0,"y":0.0},"b":{"x":10.0,"y":10.0}}},"color":[0,0,0,255],"width":1.0,"filled":false}"#;
+        let ann: Annotation = serde_json::from_str(json).unwrap();
+        assert!(matches!(ann.kind, Kind::Blur { style: BlurStyle::Pixelate, strength, .. } if strength == 50.0));
+    }
+
+    #[test]
+    fn paint_bucket_fills_only_the_connected_area() {
+        // White canvas with a closed black ring; fill inside the ring.
+        let mut img = RgbaImage::from_pixel(60, 60, Px([255, 255, 255, 255]));
+        for i in 10..50 {
+            for (x, y) in [(i, 10), (i, 49), (10, i), (49, i)] {
+                img.put_pixel(x, y, Px([0, 0, 0, 255]));
+            }
+        }
+        let fill = Annotation {
+            kind: Kind::Fill { seed: P::new(30.0, 30.0), tolerance: 32.0, area: (P::new(0.0, 0.0), P::new(1.0, 1.0)) },
+            color: [30, 136, 229, 255],
+            width: 1.0,
+            filled: true,
+        };
+        let out = render(&img, &[fill], &Effects::default());
+        assert_eq!(out.get_pixel(30, 30).0, [30, 136, 229, 255], "inside filled");
+        assert_eq!(out.get_pixel(10, 30).0, [0, 0, 0, 255], "ring kept");
+        assert_eq!(out.get_pixel(5, 5).0, [255, 255, 255, 255], "outside untouched");
+        let (_, bounds) = flood_region(&img, P::new(30.0, 30.0), 32.0).unwrap();
+        assert_eq!(bounds, (11, 11, 49, 49));
+        assert!(flood_region(&img, P::new(-1.0, 5.0), 32.0).is_none());
+    }
+
+    #[test]
+    fn magnifier_enlarges_inside_the_loupe_only() {
+        // A 2x2 dark dot at the centre of a white image, magnified 3x.
+        let mut img = RgbaImage::from_pixel(80, 80, Px([255, 255, 255, 255]));
+        for (x, y) in [(39, 39), (40, 39), (39, 40), (40, 40)] {
+            img.put_pixel(x, y, Px([0, 0, 0, 255]));
+        }
+        let corner = Px([200, 0, 0, 255]);
+        img.put_pixel(0, 0, corner);
+        let loupe = Annotation { kind: Kind::Magnify { a: P::new(20.0, 20.0), b: P::new(60.0, 60.0), zoom: 3.0 }, color: [0, 0, 0, 255], width: 0.5, filled: false };
+        let out = apply_raster(&img, &[loupe]);
+        let dark = |im: &RgbaImage| im.pixels().filter(|p| p.0 == [0, 0, 0, 255]).count();
+        assert_eq!(dark(&img), 4);
+        assert_eq!(dark(&out), 36, "2x2 dot becomes 6x6");
+        assert_eq!(*out.get_pixel(0, 0), corner, "outside the loupe untouched");
+    }
+
+    #[test]
+    fn stamps_draw_inside_their_badge() {
+        let base = RgbaImage::from_pixel(120, 120, Px([255, 255, 255, 255]));
+        for stamp in super::super::model::Stamp::ALL {
+            let mut a = ann(Kind::Stamp { pos: P::new(60.0, 60.0), size: 80.0, stamp });
+            a.color = [46, 184, 92, 255];
+            let out = render(&base, &[a], &Effects::default());
+            // Badge colour at its edge, the white symbol somewhere inside, nothing outside.
+            assert_eq!(out.get_pixel(60, 24).0, [46, 184, 92, 255], "{stamp:?} badge");
+            let symbol = (30..90).flat_map(|y| (30..90).map(move |x| (x, y))).any(|(x, y)| out.get_pixel(x, y).0[1] == 255 && out.get_pixel(x, y).0[0] == 255);
+            assert!(symbol, "{stamp:?} symbol");
+            assert_eq!(out.get_pixel(5, 5).0, [255, 255, 255, 255], "{stamp:?} outside");
+        }
+    }
+
+    #[test]
     fn renders_pasted_image_layers() {
         let base = RgbaImage::from_pixel(200, 100, Px([255, 255, 255, 255]));
         let pasted = std::sync::Arc::new(RgbaImage::from_pixel(10, 10, Px([0, 0, 255, 255])));
@@ -472,7 +711,7 @@ mod tests {
         let anns = vec![
             ann(Kind::Arrow { a: P::new(20.0, 20.0), b: P::new(180.0, 120.0) }),
             ann(Kind::Text { pos: P::new(200.0, 40.0), text: "Hi".into(), size: 40.0, background: true }),
-            ann(Kind::Blur { a: P::new(0.0, 150.0), b: P::new(100.0, 200.0) }),
+            ann(Kind::pixelate(P::new(0.0, 150.0), P::new(100.0, 200.0))),
         ];
         let out = render(&base, &anns, &Effects::default());
         assert_eq!(out.dimensions(), (400, 200));
@@ -516,3 +755,4 @@ mod tests {
         assert!(text.to_lowercase().contains("hello rega 2026"), "got {text:?}");
     }
 }
+

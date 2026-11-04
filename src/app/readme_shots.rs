@@ -291,7 +291,7 @@ fn dashboard_project() -> Project {
     let (ea, eb) = px(d.email_col);
     let row = d.rows[3];
     let mut annotations = vec![
-        ann(Kind::Blur { a: ea, b: eb }, red, 8.0),
+        ann(Kind::pixelate(ea, eb), red, 8.0),
         ann(Kind::Rect { a: ca, b: cb }, red, 8.0),
         ann(Kind::Arrow { a: P::new(1180.0, 760.0), b: P::new(cb.x + 30.0, cb.y + 10.0) }, red, 12.0),
         ann(
@@ -357,7 +357,7 @@ fn blur_example(dashboard: &RgbaImage) -> RgbaImage {
     // One blur per cell, as a user would drag them, so row dividers stay intact.
     let blur = |x0: f32, x1: f32, r: &Rect| {
         let (a, b) = px(Rect::from_min_max(Pos2::new(d.table.min.x + x0, r.center().y - 13.0), Pos2::new(d.table.min.x + x1, r.center().y + 13.0)));
-        ann(Kind::Blur { a, b }, [0; 4], 0.0)
+        ann(Kind::pixelate(a, b), [0; 4], 0.0)
     };
     let marks: Vec<Annotation> = d.rows.iter().flat_map(|r| [blur(12.0, 150.0, r), blur(222.0, 440.0, r)]).collect();
     let blurred = crate::editor::render::render(dashboard, &marks, &Default::default());
@@ -663,6 +663,81 @@ fn readme_screenshots() {
 }
 
 /// Renders the permissions popup + banner; writes PNGs only when
+/// The new marks (magnifier, stamps, paint-bucket fill) and the tool-specific
+/// properties panel. Saved when `TOOLS_PREVIEW_DIR` is set.
+#[test]
+fn editor_tools_render() {
+    use crate::editor::model::Stamp;
+    let Ok(dir) = std::env::var("TOOLS_PREVIEW_DIR") else { return };
+    let dashboard = render_ui(DASH, draw_dashboard);
+    let d = dash_layout();
+    let (ba, bb) = px(d.bars[11].expand(30.0));
+    let card = d.cards[1];
+    let seed = P::new((card.min.x + 8.0) * PPP, (card.max.y - 8.0) * PPP);
+    let mut annotations = vec![
+        ann(Kind::Fill { seed, tolerance: 12.0, area: px(card) }, [255, 236, 179, 255], 1.0),
+        ann(Kind::Magnify { a: P::new(ba.x - 60.0, ba.y - 60.0), b: P::new(ba.x - 60.0 + 360.0, ba.y - 60.0 + 360.0), zoom: 2.0 }, [124, 92, 255, 255], 8.0),
+    ];
+    let _ = bb;
+    for (n, (stamp, color)) in [(Stamp::Check, [46, 184, 92, 255]), (Stamp::Cross, [235, 59, 52, 255]), (Stamp::Warning, [255, 140, 0, 255]), (Stamp::Question, [30, 136, 229, 255]), (Stamp::Star, [255, 214, 0, 255]), (Stamp::Heart, [235, 59, 52, 255])].into_iter().enumerate() {
+        annotations.push(ann(Kind::Stamp { pos: P::new(560.0 + n as f32 * 130.0, 1380.0), size: 104.0, stamp }, color, 6.0));
+    }
+    annotations.push(ann(Kind::Rect { a: P::new(1700.0, 1250.0), b: P::new(2400.0, 1500.0) }, [235, 59, 52, 255], 8.0));
+    let project = Project { annotations, effects: Default::default(), next_step: 1 };
+    for (name, key, selected) in [("tools-stamp.png", egui::Key::K, None), ("tools-rect-selected.png", egui::Key::V, Some(8)), ("tools-magnify-selected.png", egui::Key::V, Some(1)), ("tools-fill.png", egui::Key::F, None)] {
+        let lib = std::env::temp_dir().join(format!("rega-tools-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&lib).unwrap();
+        let mut ed = Editor::new(lib.join("x.png"), dashboard.clone(), Some(project.clone()), true);
+        ed.set_demo_state(key, selected);
+        let mut h = app_harness(APP_SIZE, move |ctx| {
+            let mut app = RegaApp::demo(ctx, lib);
+            app.mode = Mode::Editor(Box::new(ed));
+            app
+        });
+        settle(&mut h);
+        h.render().unwrap().save(Path::new(&dir).join(name)).unwrap();
+        if name == "tools-stamp.png" {
+            // The custom color picker opens from the color chip.
+            h.get_by_label("Custom color").click();
+            settle(&mut h);
+            h.render().unwrap().save(Path::new(&dir).join("tools-picker-open.png")).unwrap();
+        }
+    }
+}
+
+/// The two blur styles on the customer emails, and the blur panel.
+/// Saved when `TOOLS_PREVIEW_DIR` is set.
+#[test]
+fn blur_styles_render() {
+    use crate::editor::model::BlurStyle;
+    let Ok(dir) = std::env::var("TOOLS_PREVIEW_DIR") else { return };
+    let dashboard = render_ui(DASH, draw_dashboard);
+    let d = dash_layout();
+    let annotations: Vec<Annotation> = [BlurStyle::Pixelate, BlurStyle::Gaussian]
+        .into_iter()
+        .zip(&d.rows)
+        .map(|(style, r)| {
+            let cell = Rect::from_min_max(Pos2::new(d.table.min.x + 222.0, r.center().y - 13.0), Pos2::new(d.table.min.x + 440.0, r.center().y + 13.0));
+            let (a, b) = px(cell);
+            ann(Kind::Blur { a, b, style, strength: 50.0 }, [24, 24, 24, 255], 1.0)
+        })
+        .collect();
+    let project = Project { annotations, effects: Default::default(), next_step: 1 };
+    for (name, selected) in [("blur-pixelate-selected.png", 0), ("blur-gaussian-selected.png", 1)] {
+        let lib = std::env::temp_dir().join(format!("rega-blur-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&lib).unwrap();
+        let mut ed = Editor::new(lib.join("x.png"), dashboard.clone(), Some(project.clone()), true);
+        ed.set_demo_state(egui::Key::V, Some(selected));
+        let mut h = app_harness(APP_SIZE, move |ctx| {
+            let mut app = RegaApp::demo(ctx, lib);
+            app.mode = Mode::Editor(Box::new(ed));
+            app
+        });
+        settle(&mut h);
+        h.render().unwrap().save(Path::new(&dir).join(name)).unwrap();
+    }
+}
+
 /// Two selected library items: header shows the count and batch actions.
 /// Saved when `SELECTION_PREVIEW_DIR` is set.
 #[test]

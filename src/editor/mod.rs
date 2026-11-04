@@ -15,7 +15,7 @@ use eframe::egui::{
 use image::RgbaImage;
 
 use crate::library;
-use model::{Annotation, Effects, Kind, P, Project, Rgba, arrow_geometry, contrast_on, ellipse_points, norm};
+use model::{Annotation, BlurStyle, Effects, Kind, P, Project, Rgba, Stamp, StampSymbol, arrow_geometry, contrast_on, ellipse_points, norm, stamp_symbol};
 
 pub const ANNOT_FONT: &str = "annot";
 
@@ -30,13 +30,17 @@ pub enum Tool {
     Highlight,
     Text,
     Step,
+    Stamp,
+    Magnify,
     Blur,
     Spotlight,
+    Fill,
+    Eraser,
     Crop,
 }
 
 impl Tool {
-    const ALL: [Tool; 12] = [
+    const ALL: [Tool; 16] = [
         Tool::Select,
         Tool::Arrow,
         Tool::Line,
@@ -46,8 +50,12 @@ impl Tool {
         Tool::Highlight,
         Tool::Text,
         Tool::Step,
+        Tool::Stamp,
+        Tool::Magnify,
         Tool::Blur,
         Tool::Spotlight,
+        Tool::Fill,
+        Tool::Eraser,
         Tool::Crop,
     ];
 
@@ -64,25 +72,171 @@ impl Tool {
             Tool::Highlight => (icon::MARKER, "Highlighter", Key::H),
             Tool::Text => (icon::TEXT, "Text & callout", Key::T),
             Tool::Step => (icon::STEP, "Step number", Key::N),
+            // No icon-font glyph: drawn by `paint_tool_icon`.
+            Tool::Stamp => ("", "Stamp", Key::K),
+            Tool::Magnify => (icon::MAGNIFIER, "Magnifier", Key::M),
             Tool::Blur => (icon::BLUR, "Blur", Key::B),
             Tool::Spotlight => (icon::SPOTLIGHT, "Spotlight", Key::S),
+            Tool::Fill => ("", "Fill", Key::F),
+            Tool::Eraser => ("", "Eraser", Key::X),
             Tool::Crop => (icon::CROP, "Crop", Key::C),
         }
     }
+
+    /// The tool that makes this kind of mark (`None` for pasted images).
+    fn for_kind(kind: &Kind) -> Option<Tool> {
+        Some(match kind {
+            Kind::Arrow { .. } => Tool::Arrow,
+            Kind::Line { .. } => Tool::Line,
+            Kind::Rect { .. } => Tool::Rect,
+            Kind::Ellipse { .. } => Tool::Ellipse,
+            Kind::Pen { .. } => Tool::Pen,
+            Kind::Highlight { .. } => Tool::Highlight,
+            Kind::Text { .. } => Tool::Text,
+            Kind::Step { .. } => Tool::Step,
+            Kind::Stamp { .. } => Tool::Stamp,
+            Kind::Magnify { .. } => Tool::Magnify,
+            Kind::Blur { .. } => Tool::Blur,
+            Kind::Spotlight { .. } => Tool::Spotlight,
+            Kind::Fill { .. } => Tool::Fill,
+            Kind::Image { .. } => return None,
+        })
+    }
+
+    /// Tools that draw by dragging: a plain click on a mark selects it instead.
+    fn draws_by_drag(self) -> bool {
+        matches!(
+            self,
+            Tool::Arrow | Tool::Line | Tool::Rect | Tool::Ellipse | Tool::Pen | Tool::Highlight | Tool::Magnify | Tool::Blur | Tool::Spotlight
+        )
+    }
+}
+
+/// Which properties the side panel shows for a tool (or a mark made by it).
+#[derive(Default)]
+struct Props {
+    color: bool,
+    width: Option<&'static str>,
+    fill: bool,
+    text: bool,
+    step: bool,
+    stamp: bool,
+    zoom: bool,
+    tolerance: bool,
+    blur: bool,
+    hint: Option<&'static str>,
+}
+
+impl Props {
+    fn of(tool: Tool) -> Self {
+        let color = true;
+        match tool {
+            Tool::Select => Props { hint: Some("Click a mark to see and change its properties."), ..Default::default() },
+            Tool::Arrow | Tool::Line | Tool::Pen => Props { color, width: Some("Line width"), ..Default::default() },
+            Tool::Rect | Tool::Ellipse => Props { color, width: Some("Line width"), fill: true, ..Default::default() },
+            Tool::Highlight => Props { color, width: Some("Thickness"), ..Default::default() },
+            Tool::Text => Props { color, text: true, ..Default::default() },
+            Tool::Step => Props { color, step: true, ..Default::default() },
+            Tool::Stamp => Props { color, stamp: true, ..Default::default() },
+            Tool::Magnify => Props { color, width: Some("Ring width"), zoom: true, ..Default::default() },
+            // Color and hint depend on the style; see `tools_panel`.
+            Tool::Blur => Props { blur: true, ..Default::default() },
+            Tool::Spotlight => Props { hint: Some("Drag around what matters; the rest is dimmed."), ..Default::default() },
+            Tool::Fill => Props { color, tolerance: true, hint: Some("Click an area to flood it with the color."), ..Default::default() },
+            Tool::Eraser => Props { width: Some("Eraser size"), hint: Some("Click or drag over marks to remove them."), ..Default::default() },
+            Tool::Crop => Props { hint: Some("Drag over the area to keep."), ..Default::default() },
+        }
+    }
+}
+
+/// Icons for tools the icon font has no glyph for (about 23 pt across).
+fn paint_tool_icon(tool: Tool, p: &egui::Painter, c: Pos2, color: Color32) {
+    let s = Stroke::new(2.0, color);
+    let v = Vec2::new;
+    match tool {
+        Tool::Stamp => {
+            p.circle_stroke(c, 9.5, s);
+            p.add(Shape::line(vec![c + v(-4.5, 0.5), c + v(-1.2, 3.8), c + v(4.8, -3.2)], s));
+        }
+        Tool::Fill => {
+            // A tipped bucket, half full, and a drop.
+            let pts = [c + v(-9.0, -1.0), c + v(-2.0, -8.0), c + v(5.5, -0.5), c + v(-1.5, 6.5)];
+            p.add(Shape::convex_polygon(vec![pts[0], pts[2], pts[3]], color, Stroke::NONE));
+            p.add(Shape::closed_line(pts.to_vec(), s));
+            p.add(Shape::convex_polygon(vec![c + v(8.0, 0.5), c + v(10.6, 5.2), c + v(5.4, 5.2)], color, Stroke::NONE));
+            p.circle_filled(c + v(8.0, 6.0), 2.6, color);
+        }
+        Tool::Eraser => {
+            // A block tilted 45°, its tip filled, on a baseline.
+            let k = std::f32::consts::FRAC_1_SQRT_2;
+            let rot = |x: f32, y: f32| c + v((x + y) * k, (-x + y) * k) + v(0.0, -1.5);
+            p.add(Shape::convex_polygon(vec![rot(-9.0, -4.5), rot(-2.0, -4.5), rot(-2.0, 4.5), rot(-9.0, 4.5)], color, Stroke::NONE));
+            p.add(Shape::closed_line(vec![rot(-9.0, -4.5), rot(9.0, -4.5), rot(9.0, 4.5), rot(-9.0, 4.5)], s));
+            p.line_segment([c + v(-9.0, 9.5), c + v(9.0, 9.5)], Stroke::new(1.6, color));
+        }
+        _ => {}
+    }
+}
+
+/// A stamp badge at `center`, `diameter` across, on screen (also used for the picker).
+fn paint_stamp(painter: &egui::Painter, center: Pos2, diameter: f32, stamp: Stamp, color: Color32) {
+    painter.circle_filled(center, diameter / 2.0, color);
+    let ink = to_c32(contrast_on(from_c32(color)));
+    let at = |q: &P| Pos2::new(q.x, q.y);
+    let fan = |pts: &[P], c: Color32| {
+        // Fan from the first point (the outline is star-shaped around it), plus a
+        // thin outline for anti-aliased edges.
+        let mut mesh = egui::Mesh::default();
+        for q in pts {
+            mesh.colored_vertex(at(q), c);
+        }
+        for i in 1..pts.len() as u32 - 1 {
+            mesh.add_triangle(0, i, i + 1);
+        }
+        painter.add(Shape::mesh(mesh));
+        painter.add(Shape::closed_line(pts[1..].iter().map(at).collect(), Stroke::new(1.0, c)));
+    };
+    for part in stamp_symbol(stamp, P::new(center.x, center.y), diameter) {
+        match part {
+            StampSymbol::Strokes(lines, w) => {
+                for line in lines {
+                    let pts: Vec<Pos2> = line.iter().map(at).collect();
+                    // Round caps and joins.
+                    for q in &pts {
+                        painter.circle_filled(*q, w / 2.0, ink);
+                    }
+                    painter.add(Shape::line(pts, Stroke::new(w, ink)));
+                }
+            }
+            StampSymbol::Fill(pts) => fan(&pts, ink),
+            StampSymbol::Cut(pts) => fan(&pts, color),
+            StampSymbol::Glyph(g, size) => {
+                painter.text(center, Align2::CENTER_CENTER, g, FontId::new(size, FontFamily::Name(ANNOT_FONT.into())), ink);
+            }
+        }
+    }
+}
+
+/// How close (screen points) the pointer must be to grab a resize handle.
+const HANDLE_GRAB: f32 = 10.0;
+/// Gap (screen points) between a selected mark and its dashed outline.
+const SELECTION_PAD: f32 = 4.0;
+
+/// A corner resize handle: a small white square with an accent border.
+fn paint_resize_handle(painter: &egui::Painter, c: Pos2, hot: bool) {
+    let r = Rect::from_center_size(c, Vec2::splat(if hot { 11.0 } else { 9.0 }));
+    painter.rect_filled(r.translate(Vec2::new(0.0, 0.5)).expand(1.0), 3.0, Color32::from_black_alpha(35));
+    painter.rect_filled(r, 2.0, if hot { crate::theme::ACCENT } else { Color32::WHITE });
+    painter.rect_stroke(r, 2.0, Stroke::new(1.5, if hot { Color32::WHITE } else { crate::theme::ACCENT }), StrokeKind::Inside);
 }
 
 /// Above this many pixels, moving a blur/spotlight re-rasters on release only.
 const LIVE_RASTER_PIXELS: u64 = 8_000_000;
 
 /// What `render::apply_raster` depends on, to tell whether the canvas texture is stale.
-fn raster_key(anns: &[Annotation]) -> Vec<(bool, P, P)> {
-    anns.iter()
-        .filter_map(|a| match a.kind {
-            Kind::Blur { a, b } => Some((true, a, b)),
-            Kind::Spotlight { a, b } => Some((false, a, b)),
-            _ => None,
-        })
-        .collect()
+fn raster_key(anns: &[Annotation]) -> String {
+    let raster: Vec<&Annotation> = anns.iter().filter(|a| a.is_raster()).collect();
+    serde_json::to_string(&raster).unwrap_or_default()
 }
 
 const PALETTE: [Rgba; 8] = [
@@ -126,6 +280,19 @@ pub struct Editor {
     font_size: f32,
     filled: bool,
     text_bg: bool,
+    stamp: Stamp,
+    stamp_size: f32,
+    /// Magnifier enlargement for new loupes.
+    loupe_zoom: f32,
+    /// Paint-bucket tolerance, 0–255.
+    fill_tolerance: f32,
+    blur_style: BlurStyle,
+    /// 1–100 for new blurs.
+    blur_strength: f32,
+    /// Picker hue, kept separately so greys (no hue) don't reset it.
+    picker_hue: f32,
+    /// The hex field while it is being typed in.
+    hex_edit: Option<String>,
 
     zoom: f32,
     fit: bool,
@@ -147,8 +314,11 @@ pub struct Editor {
     /// GPU textures for pasted image layers, keyed by the layer's pixel buffer.
     /// The `Weak` guards against a freed buffer's address being reused by a new paste.
     layer_textures: HashMap<usize, (std::sync::Weak<RgbaImage>, TextureHandle)>,
-    /// Index of the image layer whose corner handle is being dragged.
-    resizing: Option<usize>,
+    /// The mark whose corner handle is being dragged, and which corner
+    /// (0–3 clockwise from top-left, as in `resize_handles`).
+    resizing: Option<(usize, usize)>,
+    /// The mark right-clicked to open the canvas menu.
+    menu_target: Option<usize>,
     dirty: bool,
 }
 
@@ -158,6 +328,17 @@ fn to_c32(c: Rgba) -> Color32 {
 
 fn from_c32(c: Color32) -> Rgba {
     c.to_srgba_unmultiplied()
+}
+
+/// "#RRGGBB" or "RRGGBB" (also 3-digit "#RGB").
+fn parse_hex(text: &str) -> Option<Color32> {
+    let hex = text.trim().trim_start_matches('#');
+    let digits: Vec<u8> = hex.chars().map(|c| c.to_digit(16).map(|d| d as u8)).collect::<Option<_>>()?;
+    match digits.as_slice() {
+        [r, g, b] => Some(Color32::from_rgb(r * 17, g * 17, b * 17)),
+        [r1, r2, g1, g2, b1, b2] => Some(Color32::from_rgb(r1 * 16 + r2, g1 * 16 + g2, b1 * 16 + b2)),
+        _ => None,
+    }
 }
 
 impl Editor {
@@ -179,6 +360,15 @@ impl Editor {
             font_size: (unit * 7.0).round(),
             filled: false,
             text_bg: false,
+            stamp: Stamp::Check,
+            stamp_size: (unit * 14.0).round(),
+            loupe_zoom: 2.0,
+            // ~5%: UI borders are often within 10% of the background they enclose.
+            fill_tolerance: 12.0,
+            blur_style: BlurStyle::Pixelate,
+            blur_strength: model::DEFAULT_BLUR_STRENGTH,
+            picker_hue: 0.0,
+            hex_edit: None,
             zoom: 1.0,
             fit: true,
             tiles: Vec::new(),
@@ -187,6 +377,7 @@ impl Editor {
             crop_drag: None,
             selected: None,
             moving: None,
+            menu_target: None,
             moved: false,
             editing_text: None,
             focus_text: false,
@@ -207,6 +398,15 @@ impl Editor {
             }
         let img = image::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
         Ok(Self::new(path, img.to_rgba8(), None, false))
+    }
+
+    /// For screenshot tests: pick a tool (by its shortcut letter) and a selected mark.
+    #[cfg(test)]
+    pub(crate) fn set_demo_state(&mut self, tool_key: Key, selected: Option<usize>) {
+        if let Some(t) = Tool::ALL.into_iter().find(|t| t.info().2 == tool_key) {
+            self.tool = t;
+        }
+        self.select(selected);
     }
 
     /// Finish any in-progress text edit (e.g. before a new capture hides the window).
@@ -310,6 +510,13 @@ impl Editor {
     fn set_tool(&mut self, tool: Tool) {
         self.commit_text();
         self.tool = tool;
+        // Picking another tool shows that tool's properties: drop a selection
+        // the new tool can't edit, so the panel's changes apply to what's drawn next.
+        if tool != Tool::Select
+            && self.selected.and_then(|i| self.anns.get(i)).is_some_and(|a| Tool::for_kind(&a.kind) != Some(tool))
+        {
+            self.selected = None;
+        }
     }
 
     fn commit_text(&mut self) {
@@ -328,6 +535,22 @@ impl Editor {
                     self.texture_dirty = true;
                 }
             }
+    }
+
+    /// Bake marks `..=upto` into the background pixels and remove them, so
+    /// pixel tools (blur, fill, magnifier, eyedropper) also work on what they
+    /// covered, such as a pasted picture. The canvas looks the same afterwards;
+    /// the parts of a mark outside the canvas are cut off.
+    fn merge_down(&mut self, upto: usize) {
+        if upto >= self.anns.len() {
+            return;
+        }
+        self.push_undo();
+        let merged: Vec<Annotation> = self.anns.drain(..=upto).collect();
+        self.base = Arc::new(render::render(&self.base, &merged, &Effects::default()));
+        self.base_changed = true;
+        self.selected = None;
+        self.texture_dirty = true;
     }
 
     fn crop(&mut self, a: P, b: P) {
@@ -407,6 +630,37 @@ impl Editor {
         self.fit = true;
     }
 
+    /// Right-click menu on the canvas.
+    fn canvas_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(200.0);
+        let target = self.menu_target.filter(|&i| i < self.anns.len());
+        if let Some(i) = target
+            && matches!(self.anns[i].kind, Kind::Image { .. })
+            && ui
+                .button("Flatten image")
+                .on_hover_text("Merge this picture, and the marks under it, into the screenshot so blur, fill and the other pixel tools work on it")
+                .clicked()
+        {
+            self.merge_down(i);
+            ui.close();
+        }
+        if ui
+            .add_enabled(!self.anns.is_empty(), egui::Button::new("Flatten all"))
+            .on_hover_text("Merge every mark into the screenshot")
+            .clicked()
+        {
+            self.merge_down(self.anns.len() - 1);
+            ui.close();
+        }
+        if target.is_some() {
+            ui.separator();
+            if ui.button(egui::RichText::new("Delete").color(crate::theme::DANGER)).clicked() {
+                self.delete_selected();
+                ui.close();
+            }
+        }
+    }
+
     fn hit_test(&self, p: P) -> Option<usize> {
         let tol = 4.0 / self.zoom;
         self.anns.iter().rposition(|a| a.hit(p, tol))
@@ -420,8 +674,9 @@ impl Editor {
             Tool::Ellipse => Kind::Ellipse { a: p, b: p },
             Tool::Pen => Kind::Pen { pts: vec![p] },
             Tool::Highlight => Kind::Highlight { pts: vec![p] },
-            Tool::Blur => Kind::Blur { a: p, b: p },
+            Tool::Blur => Kind::Blur { a: p, b: p, style: self.blur_style, strength: self.blur_strength },
             Tool::Spotlight => Kind::Spotlight { a: p, b: p },
+            Tool::Magnify => Kind::Magnify { a: p, b: p, zoom: self.loupe_zoom },
             _ => return None,
         };
         Some(Annotation {
@@ -434,15 +689,16 @@ impl Editor {
 
     fn drag_begin(&mut self, p: P) {
         self.commit_text();
+        // Resize handles work with any tool, e.g. right after placing a stamp.
+        if let Some((i, corners)) = self.resize_handles()
+            && let Some(k) = (0..4).find(|&k| corners[k].dist(p) <= HANDLE_GRAB / self.zoom)
+        {
+            self.push_undo();
+            self.resizing = Some((i, k));
+            return;
+        }
         match self.tool {
             Tool::Select => {
-                if let Some((i, corner)) = self.resize_handle()
-                    && corner.dist(p) <= 12.0 / self.zoom
-                {
-                    self.push_undo();
-                    self.resizing = Some(i);
-                    return;
-                }
                 self.select(self.hit_test(p));
                 if self.selected.is_some() {
                     self.moving = Some(p);
@@ -450,7 +706,8 @@ impl Editor {
                 }
             }
             Tool::Crop => self.crop_drag = Some((p, p)),
-            Tool::Text | Tool::Step => {}
+            Tool::Eraser => self.erase_at(p),
+            Tool::Text | Tool::Step | Tool::Stamp | Tool::Fill => {}
             _ => {
                 self.selected = None;
                 self.drawing = self.new_annotation(p);
@@ -459,15 +716,39 @@ impl Editor {
     }
 
     fn drag_update(&mut self, p: P, constrain: bool) {
-        if let Some(i) = self.resizing {
-            if let Some(Kind::Image { pos, w, h, img }) = self.anns.get_mut(i).map(|a| &mut a.kind) {
-                // Keep the aspect ratio; the top-left corner stays put.
-                let aspect = img.height() as f32 / img.width().max(1) as f32;
-                let new_w = (p.x - pos.x).max((p.y - pos.y) / aspect).max(8.0);
-                *w = new_w;
-                *h = new_w * aspect;
-                self.dirty = true;
+        if self.tool == Tool::Eraser {
+            self.erase_at(p);
+            return;
+        }
+        if let Some((i, k)) = self.resizing {
+            let large = self.base.width() as u64 * self.base.height() as u64 > LIVE_RASTER_PIXELS;
+            let Some(ann) = self.anns.get_mut(i) else { return };
+            // The opposite corner stays put; `left`/`top` say which way the dragged corner lies.
+            let (lo, hi) = ann.bounds();
+            let (left, top) = (k == 0 || k == 3, k < 2);
+            let anchor = P::new(if left { hi.x } else { lo.x }, if top { hi.y } else { lo.y });
+            let toward = |len: f32, left_or_top: bool| if left_or_top { -len } else { len };
+            match &mut ann.kind {
+                Kind::Image { pos, w, h, img } => {
+                    // Keep the aspect ratio.
+                    let aspect = img.height() as f32 / img.width().max(1) as f32;
+                    *w = (p.x - anchor.x).abs().max((p.y - anchor.y).abs() / aspect).max(8.0);
+                    *h = *w * aspect;
+                    *pos = P::new(anchor.x + toward(*w, left).min(0.0), anchor.y + toward(*h, top).min(0.0));
+                }
+                // Grows or shrinks around its centre.
+                Kind::Stamp { pos, size, .. } => *size = (2.0 * (p.x - pos.x).abs().max((p.y - pos.y).abs())).max(12.0),
+                Kind::Magnify { a, b, .. } => {
+                    let side = (p.x - anchor.x).abs().max((p.y - anchor.y).abs()).max(8.0);
+                    (*a, *b) = norm(anchor, P::new(anchor.x + toward(side, left), anchor.y + toward(side, top)));
+                    // Large canvases re-raster on release (see `drag_end`).
+                    if !large {
+                        self.texture_dirty = true;
+                    }
+                }
+                _ => return,
             }
+            self.dirty = true;
             return;
         }
         if let (Some(last), Some(i)) = (self.moving, self.selected) {
@@ -492,9 +773,11 @@ impl Editor {
         let Some(ann) = &mut self.drawing else { return };
         match &mut ann.kind {
             Kind::Arrow { a, b } | Kind::Line { a, b } => *b = if constrain { snap_45(*a, p) } else { p },
-            Kind::Rect { a, b } | Kind::Ellipse { a, b } | Kind::Blur { a, b } | Kind::Spotlight { a, b } => {
+            Kind::Rect { a, b } | Kind::Ellipse { a, b } | Kind::Blur { a, b, .. } | Kind::Spotlight { a, b } => {
                 *b = if constrain { square(*a, p) } else { p }
             }
+            // A loupe is always round.
+            Kind::Magnify { a, b, .. } => *b = square(*a, p),
             Kind::Pen { pts } | Kind::Highlight { pts } => {
                 if constrain {
                     // Straight stroke from the first point.
@@ -509,7 +792,7 @@ impl Editor {
     }
 
     fn drag_end(&mut self) {
-        let dragged = self.resizing.or(self.selected.filter(|_| self.moved && self.moving.is_some()));
+        let dragged = self.resizing.map(|(i, _)| i).or(self.selected.filter(|_| self.moved && self.moving.is_some()));
         if let Some(i) = dragged
             && self.anns.get(i).is_some_and(|a| a.is_raster())
         {
@@ -540,8 +823,41 @@ impl Editor {
             self.commit_text();
             return;
         }
+        let hit = self.hit_test(p);
+        // A click on an existing mark selects it and switches to Select & move.
+        // Click-to-place tools only do this for their own kind of mark, so new
+        // steps, stamps and fills can still go on top of other marks.
+        let same_kind = hit.is_some_and(|i| Tool::for_kind(&self.anns[i].kind) == Some(self.tool));
+        if hit.is_some() && (self.tool.draws_by_drag() || (matches!(self.tool, Tool::Step | Tool::Stamp | Tool::Fill) && same_kind)) {
+            self.select(hit);
+            self.set_tool(Tool::Select);
+            return;
+        }
         match self.tool {
-            Tool::Select => self.select(self.hit_test(p)),
+            Tool::Select => self.select(hit),
+            Tool::Eraser => self.erase_at(p),
+            Tool::Stamp => {
+                self.push_undo();
+                self.anns.push(Annotation {
+                    kind: Kind::Stamp { pos: p, size: self.stamp_size, stamp: self.stamp },
+                    color: from_c32(self.color),
+                    width: self.width,
+                    filled: true,
+                });
+                self.selected = Some(self.anns.len() - 1);
+            }
+            Tool::Fill => {
+                let Some(area) = self.fill_area(self.anns.len(), p, self.fill_tolerance) else { return };
+                self.push_undo();
+                self.anns.push(Annotation {
+                    kind: Kind::Fill { seed: p, tolerance: self.fill_tolerance, area },
+                    color: from_c32(self.color),
+                    width: self.width,
+                    filled: true,
+                });
+                self.texture_dirty = true;
+                self.selected = Some(self.anns.len() - 1);
+            }
             Tool::Text => {
                 if let Some(i) = self.hit_test(p).filter(|&i| matches!(self.anns[i].kind, Kind::Text { .. })) {
                     self.start_text_edit(i);
@@ -597,6 +913,27 @@ impl Editor {
         self.focus_text = true;
     }
 
+    /// Eraser: remove every mark under `p` (one undo step per gesture).
+    fn erase_at(&mut self, p: P) {
+        self.commit_text();
+        let r = self.width.max(2.0) * 1.5 + 4.0 / self.zoom;
+        while let Some(i) = self.anns.iter().rposition(|a| a.hit(p, r)) {
+            self.gesture_undo();
+            if self.anns.remove(i).is_raster() {
+                self.texture_dirty = true;
+            }
+            self.selected = None;
+        }
+    }
+
+    /// Bounds of the region a paint-bucket click at `seed` floods, as the image
+    /// looks under the first `upto` marks.
+    fn fill_area(&self, upto: usize, seed: P, tolerance: f32) -> Option<(P, P)> {
+        let img = render::apply_raster(&self.base, &self.anns[..upto.min(self.anns.len())]);
+        let (_, (x0, y0, x1, y1)) = render::flood_region(&img, seed, tolerance)?;
+        Some((P::new(x0 as f32, y0 as f32), P::new(x1 as f32, y1 as f32)))
+    }
+
     /// Select an existing element and show its style in the side panel, so the
     /// color swatch, sliders and switches reflect what is selected.
     fn select(&mut self, i: Option<usize>) {
@@ -613,7 +950,23 @@ impl Editor {
                 self.width = ann.width;
                 self.filled = ann.filled;
             }
-            Kind::Step { .. } => {}
+            Kind::Step { radius, .. } => self.font_size = (radius / 0.75).round(),
+            Kind::Stamp { size, stamp, .. } => {
+                self.stamp_size = *size;
+                self.stamp = *stamp;
+            }
+            Kind::Magnify { zoom, .. } => {
+                self.loupe_zoom = *zoom;
+                self.width = ann.width;
+            }
+            Kind::Fill { tolerance, .. } => self.fill_tolerance = *tolerance,
+            Kind::Blur { style, strength, .. } => {
+                self.blur_style = *style;
+                self.blur_strength = *strength;
+                return;
+            }
+            // No color or width of its own.
+            Kind::Spotlight { .. } => return,
             _ => self.width = ann.width,
         }
         self.color = to_c32(ann.color);
@@ -662,6 +1015,9 @@ impl Editor {
                 self.gesture_undo();
             }
             self.anns[i].color = from_c32(color);
+            if self.anns[i].is_raster() {
+                self.texture_dirty = true;
+            }
         }
     }
 
@@ -713,13 +1069,18 @@ impl Editor {
         }
     }
 
-    /// Bottom-right resize handle of a selected image layer (image coordinates).
-    fn resize_handle(&self) -> Option<(usize, P)> {
+    /// Corner resize handles of a selected image layer, stamp or magnifier, in
+    /// image coordinates, clockwise from top-left. They sit on the selection
+    /// outline, `SELECTION_PAD` screen points outside the mark.
+    fn resize_handles(&self) -> Option<(usize, [P; 4])> {
         let i = self.selected.filter(|&i| i < self.anns.len())?;
-        match &self.anns[i].kind {
-            Kind::Image { pos, w, h, .. } => Some((i, P::new(pos.x + w, pos.y + h))),
-            _ => None,
+        if !matches!(self.anns[i].kind, Kind::Image { .. } | Kind::Stamp { .. } | Kind::Magnify { .. }) {
+            return None;
         }
+        let (a, b) = self.anns[i].bounds();
+        let pad = SELECTION_PAD / self.zoom;
+        let (a, b) = (P::new(a.x - pad, a.y - pad), P::new(b.x + pad, b.y + pad));
+        Some((i, [a, P::new(b.x, a.y), b, P::new(a.x, b.y)]))
     }
 
     fn ensure_layer_textures(&mut self, ctx: &egui::Context) {
@@ -836,14 +1197,22 @@ impl Editor {
         action
     }
 
-    /// Right-hand panel: tools, then the style they use.
+    /// Right-hand panel: tools, then the properties of the selected mark, or of
+    /// the current tool when nothing is selected. Only what applies is shown.
     pub fn tools_panel(&mut self, ui: &mut egui::Ui) {
         use crate::theme;
         theme::section(ui, "Tools");
         egui::Grid::new("tool_grid").num_columns(4).spacing([8.0, 8.0]).show(ui, |ui| {
             for (n, tool) in Tool::ALL.into_iter().enumerate() {
                 let (glyph, tip, key) = tool.info();
-                if theme::tool_tile(ui, glyph, self.tool == tool, &format!("{tip}   {}", key.name())).clicked() {
+                let tip = format!("{tip}   {}", key.name());
+                let active = self.tool == tool;
+                let resp = if glyph.is_empty() {
+                    theme::tool_tile_painted(ui, active, &tip, |p, c, color| paint_tool_icon(tool, p, c, color))
+                } else {
+                    theme::tool_tile(ui, glyph, active, &tip)
+                };
+                if resp.clicked() {
                     self.set_tool(tool);
                 }
                 if n % 4 == 3 {
@@ -854,100 +1223,369 @@ impl Editor {
         ui.add_space(4.0);
         ui.label(egui::RichText::new(Tool::info(self.tool).1).font(theme::medium(13.0)).color(theme::TEXT_MUTED));
 
-        ui.add_space(14.0);
         let selected_idx = self.selected.filter(|&i| i < self.anns.len());
-        theme::section(ui, if selected_idx.is_some() { "Color · selection" } else { "Color" });
-        let mut color = self.color;
-        egui::Grid::new("palette").num_columns(4).spacing([16.0, 10.0]).show(ui, |ui| {
-            for (n, c) in PALETTE.into_iter().enumerate() {
-                let c = to_c32(c);
-                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
-                let active = c == color;
-                if active {
-                    ui.painter().circle_stroke(rect.center(), 14.5, Stroke::new(2.0, theme::ACCENT));
-                }
-                ui.painter().circle_filled(rect.center(), if active { 10.5 } else { 12.0 }, c);
-                if c == Color32::from_rgb(24, 24, 24) || c == Color32::WHITE {
-                    ui.painter().circle_stroke(rect.center(), if active { 10.5 } else { 12.0 }, Stroke::new(1.0, theme::BORDER_STRONG));
-                }
-                if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                    color = c;
-                }
-                if n % 4 == 3 {
-                    ui.end_row();
-                }
-            }
-        });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            egui::color_picker::color_edit_button_srgba(ui, &mut color, egui::color_picker::Alpha::Opaque);
-            let picking = self.picking.is_some();
-            let tip = if picking { "Cancel (Esc)" } else { "Pick a color from the image (I)" };
-            let resp = theme::icon_button_sized(ui, theme::icon::EYEDROPPER, tip, 30.0, true);
-            if picking {
-                ui.painter().rect_stroke(resp.rect, 8.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
-            }
-            if resp.clicked() {
-                self.toggle_picking();
-            }
-            ui.label(egui::RichText::new(format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b())).monospace().color(theme::TEXT_MUTED));
-        });
-        if self.picking.is_some() {
-            ui.label(egui::RichText::new("Click anywhere on the image to pick its color").small().color(theme::ACCENT));
+        let subject = match selected_idx {
+            Some(i) => Tool::for_kind(&self.anns[i].kind),
+            None => Some(self.tool),
+        };
+        let mut props = subject.map(Props::of).unwrap_or_default();
+        if props.blur {
+            props.hint = Some(match self.blur_style {
+                BlurStyle::Pixelate => "Drag over anything private to pixelate it.",
+                BlurStyle::Gaussian => "Drag over anything private to blur it.",
+            });
         }
-        if color != self.color {
-            self.set_color(color, false);
+        if props.color {
+            ui.add_space(14.0);
+            self.color_section(ui, selected_idx.is_some());
         }
 
         ui.add_space(14.0);
-        theme::section(ui, "Style");
-        let mut width = self.width;
-        let label = ui.label(egui::RichText::new("Line width").color(theme::TEXT_MUTED));
-        ui.add(egui::Slider::new(&mut width, 1.0..=40.0).max_decimals(0)).labelled_by(label.id);
-        if width != self.width {
-            self.width = width;
-            if let Some(i) = selected_idx {
-                self.gesture_undo();
-                self.anns[i].width = width;
-            }
+        let title = match (selected_idx, subject) {
+            (Some(_), Some(t)) => format!("{} · selection", t.info().1),
+            (Some(_), None) => "Image · selection".to_string(),
+            (None, Some(t)) => t.info().1.to_string(),
+            (None, None) => String::new(),
+        };
+        theme::section(ui, &title);
+        if let Some(hint) = props.hint {
+            ui.label(egui::RichText::new(hint).small().color(theme::TEXT_FAINT));
+            ui.add_space(4.0);
         }
-        let mut size = self.font_size;
-        let label = ui.label(egui::RichText::new("Text size").color(theme::TEXT_MUTED));
-        ui.add(egui::Slider::new(&mut size, 8.0..=300.0).logarithmic(true).max_decimals(0)).labelled_by(label.id);
-        if size != self.font_size {
-            self.font_size = size;
-            if let Some(i) = selected_idx.filter(|&i| matches!(self.anns[i].kind, Kind::Text { .. })) {
-                self.gesture_undo();
-                if let Kind::Text { size: s, .. } = &mut self.anns[i].kind {
-                    *s = size;
+        // A filled shape has no outline to size.
+        if let Some(label) = props.width.filter(|_| !(props.fill && self.filled)) {
+            let mut width = self.width;
+            let label = ui.label(egui::RichText::new(label).color(theme::TEXT_MUTED));
+            ui.add(egui::Slider::new(&mut width, 1.0..=40.0).max_decimals(0)).labelled_by(label.id);
+            if width != self.width {
+                self.width = width;
+                if let Some(i) = selected_idx {
+                    self.gesture_undo();
+                    self.anns[i].width = width;
                 }
             }
         }
-        ui.add_space(6.0);
-        let mut filled = self.filled;
-        if theme::switch(ui, &mut filled, "Fill shapes").changed() {
-            self.filled = filled;
-            if let Some(i) = selected_idx.filter(|&i| matches!(self.anns[i].kind, Kind::Rect { .. } | Kind::Ellipse { .. })) {
-                self.push_undo();
-                self.anns[i].filled = filled;
+        if props.fill {
+            let mut filled = self.filled;
+            if theme::switch(ui, &mut filled, "Fill shape").changed() {
+                self.filled = filled;
+                if let Some(i) = selected_idx {
+                    self.push_undo();
+                    self.anns[i].filled = filled;
+                }
             }
         }
-        let mut text_bg = self.text_bg;
-        if theme::switch(ui, &mut text_bg, "Callout box").on_hover_text("Text on a colored box").changed() {
-            self.text_bg = text_bg;
-            if let Some(i) = selected_idx.filter(|&i| matches!(self.anns[i].kind, Kind::Text { .. })) {
-                self.push_undo();
-                if let Kind::Text { background, .. } = &mut self.anns[i].kind {
-                    *background = text_bg;
+        if props.text {
+            let mut size = self.font_size;
+            let label = ui.label(egui::RichText::new("Text size").color(theme::TEXT_MUTED));
+            ui.add(egui::Slider::new(&mut size, 8.0..=300.0).logarithmic(true).max_decimals(0)).labelled_by(label.id);
+            if size != self.font_size {
+                self.font_size = size;
+                if let Some(i) = selected_idx {
+                    self.gesture_undo();
+                    if let Kind::Text { size: s, .. } = &mut self.anns[i].kind {
+                        *s = size;
+                    }
+                }
+            }
+            ui.add_space(6.0);
+            let mut text_bg = self.text_bg;
+            if theme::switch(ui, &mut text_bg, "Callout box").on_hover_text("Text on a colored box").changed() {
+                self.text_bg = text_bg;
+                if let Some(i) = selected_idx {
+                    self.push_undo();
+                    if let Kind::Text { background, .. } = &mut self.anns[i].kind {
+                        *background = text_bg;
+                    }
+                }
+            }
+        }
+        if props.step {
+            let mut size = self.font_size;
+            let label = ui.label(egui::RichText::new("Size").color(theme::TEXT_MUTED));
+            ui.add(egui::Slider::new(&mut size, 8.0..=300.0).logarithmic(true).max_decimals(0)).labelled_by(label.id);
+            if size != self.font_size {
+                self.font_size = size;
+                if let Some(i) = selected_idx {
+                    self.gesture_undo();
+                    if let Kind::Step { radius, .. } = &mut self.anns[i].kind {
+                        *radius = size * 0.75;
+                    }
+                }
+            }
+        }
+        if props.stamp {
+            let label = ui.label(egui::RichText::new("Symbol").color(theme::TEXT_MUTED));
+            let mut picked = None;
+            ui.horizontal_wrapped(|ui| {
+                // Six across fit the 220 pt panel.
+                ui.spacing_mut().item_spacing = Vec2::splat(4.0);
+                for stamp in Stamp::ALL {
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+                    if stamp == self.stamp {
+                        ui.painter().rect_stroke(rect, 9.0, Stroke::new(2.0, theme::ACCENT), StrokeKind::Inside);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(rect, 9.0, theme::SURFACE_3);
+                    }
+                    paint_stamp(ui.painter(), rect.center(), 22.0, stamp, self.color);
+                    if resp.on_hover_text(stamp.label()).clicked() {
+                        picked = Some(stamp);
+                    }
+                }
+            })
+            .response
+            .labelled_by(label.id);
+            if let Some(stamp) = picked {
+                self.stamp = stamp;
+                if let Some(i) = selected_idx {
+                    self.push_undo();
+                    if let Kind::Stamp { stamp: s, .. } = &mut self.anns[i].kind {
+                        *s = stamp;
+                    }
+                }
+            }
+            let mut size = self.stamp_size;
+            let label = ui.label(egui::RichText::new("Size").color(theme::TEXT_MUTED));
+            ui.add(egui::Slider::new(&mut size, 16.0..=600.0).logarithmic(true).max_decimals(0)).labelled_by(label.id);
+            if size != self.stamp_size {
+                self.stamp_size = size;
+                if let Some(i) = selected_idx {
+                    self.gesture_undo();
+                    if let Kind::Stamp { size: s, .. } = &mut self.anns[i].kind {
+                        *s = size;
+                    }
+                }
+            }
+        }
+        if props.zoom {
+            let mut zoom = self.loupe_zoom;
+            let label = ui.label(egui::RichText::new("Zoom").color(theme::TEXT_MUTED));
+            ui.add(egui::Slider::new(&mut zoom, 1.5..=4.0).step_by(0.5).max_decimals(1).suffix("×")).labelled_by(label.id);
+            if zoom != self.loupe_zoom {
+                self.loupe_zoom = zoom;
+                if let Some(i) = selected_idx {
+                    self.gesture_undo();
+                    if let Kind::Magnify { zoom: z, .. } = &mut self.anns[i].kind {
+                        *z = zoom;
+                    }
+                    self.texture_dirty = true;
+                }
+            }
+        }
+        if props.tolerance {
+            let mut pct = (self.fill_tolerance / 2.55).round();
+            let label = ui.label(egui::RichText::new("Tolerance").color(theme::TEXT_MUTED));
+            ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).max_decimals(0).suffix("%"))
+                .labelled_by(label.id)
+                .on_hover_text("How different a color can be and still get filled");
+            let tolerance = pct * 2.55;
+            if (tolerance - self.fill_tolerance).abs() > 0.5 {
+                self.fill_tolerance = tolerance;
+                if let Some(i) = selected_idx
+                    && let Kind::Fill { seed, .. } = self.anns[i].kind
+                {
+                    self.gesture_undo();
+                    let area = self.fill_area(i, seed, tolerance);
+                    if let Kind::Fill { tolerance: t, area: a, .. } = &mut self.anns[i].kind {
+                        *t = tolerance;
+                        if let Some(area) = area {
+                            *a = area;
+                        }
+                    }
+                    self.texture_dirty = true;
+                }
+            }
+        }
+        if props.blur {
+            let mut style = self.blur_style;
+            let options: Vec<(BlurStyle, &str)> = BlurStyle::ALL.iter().map(|s| (*s, s.label())).collect();
+            if theme::segmented(ui, &mut style, &options) {
+                self.blur_style = style;
+                if let Some(i) = selected_idx {
+                    self.push_undo();
+                    if let Kind::Blur { style: s, .. } = &mut self.anns[i].kind {
+                        *s = style;
+                    }
+                    self.texture_dirty = true;
+                }
+            }
+            ui.add_space(6.0);
+            let mut strength = self.blur_strength;
+            let label = ui.label(egui::RichText::new("Strength").color(theme::TEXT_MUTED));
+            ui.add(egui::Slider::new(&mut strength, 1.0..=100.0).max_decimals(0)).labelled_by(label.id);
+            if strength != self.blur_strength {
+                self.blur_strength = strength;
+                if let Some(i) = selected_idx {
+                    self.gesture_undo();
+                    if let Kind::Blur { strength: s, .. } = &mut self.anns[i].kind {
+                        *s = strength;
+                    }
+                    self.texture_dirty = true;
                 }
             }
         }
         if selected_idx.is_some() {
             ui.add_space(14.0);
-            theme::section(ui, "Selection");
             if theme::danger_button(ui, Some(theme::icon::DELETE), "Delete").on_hover_text("⌫").clicked() {
                 self.delete_selected();
             }
+        }
+    }
+
+    /// Palette, then a color chip (click: picker popup), hex field and
+    /// eyedropper. Applies to the selection, if any.
+    fn color_section(&mut self, ui: &mut egui::Ui, has_selection: bool) {
+        use crate::theme;
+        theme::section(ui, if has_selection { "Color · selection" } else { "Color" });
+        let width = ui.available_width();
+
+        // Palette: one row of small swatches.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for c in PALETTE.map(to_c32) {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(width / PALETTE.len() as f32, 24.0), Sense::click());
+                let center = rect.center();
+                if c == self.color {
+                    ui.painter().circle_stroke(center, 11.0, Stroke::new(2.0, theme::ACCENT));
+                }
+                ui.painter().circle_filled(center, 8.0, c);
+                if c == Color32::from_rgb(24, 24, 24) || c == Color32::WHITE {
+                    ui.painter().circle_stroke(center, 8.0, Stroke::new(1.0, theme::BORDER_STRONG));
+                }
+                if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    self.pick_color(c, true);
+                }
+            }
+        });
+        ui.add_space(4.0);
+
+        // Current color (click for the picker), hex field, eyedropper.
+        ui.horizontal(|ui| {
+            let (chip, chip_resp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+            let hovered = chip_resp.hovered();
+            ui.painter().rect_filled(chip, 7.0, self.color);
+            let ring = if hovered { theme::ACCENT } else { theme::BORDER_STRONG };
+            ui.painter().rect_stroke(chip, 7.0, Stroke::new(if hovered { 2.0 } else { 1.0 }, ring), StrokeKind::Inside);
+            chip_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Custom color"));
+            let chip_resp = chip_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Custom color");
+            // Stays open while dragging inside; closes on a click elsewhere.
+            egui::Popup::from_toggle_button_response(&chip_resp)
+                // To the left, over the canvas, so the panel's own settings stay visible.
+                .align(egui::RectAlign::LEFT_START)
+                .gap(10.0)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    ui.set_width(220.0);
+                    self.hsv_picker(ui, 220.0);
+                });
+            let c = self.color;
+            let shown = format!("#{:02X}{:02X}{:02X}", c.r(), c.g(), c.b());
+            let mut text = self.hex_edit.clone().unwrap_or(shown);
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut text)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(width - 30.0 - 30.0 - 2.0 * ui.spacing().item_spacing.x - 8.0)
+                    .char_limit(7),
+            );
+            if resp.has_focus() {
+                self.hex_edit = Some(text.clone());
+                if let Some(parsed) = parse_hex(&text) {
+                    self.pick_color(parsed, false);
+                }
+            } else {
+                self.hex_edit = None;
+            }
+            let picking = self.picking.is_some();
+            let tip = if picking { "Cancel (Esc)" } else { "Pick a color from the image (I)" };
+            let eyedropper = theme::icon_button_sized(ui, theme::icon::EYEDROPPER, tip, 30.0, true);
+            if picking {
+                ui.painter().rect_stroke(eyedropper.rect, 8.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+            }
+            if eyedropper.clicked() {
+                self.toggle_picking();
+            }
+        });
+        if self.picking.is_some() {
+            ui.label(egui::RichText::new("Click anywhere on the image to pick its color").small().color(theme::ACCENT));
+        }
+    }
+
+    /// Set the color from the panel, keeping the picker's hue in step.
+    fn pick_color(&mut self, color: Color32, discrete: bool) {
+        let hsv = egui::ecolor::HsvaGamma::from(color);
+        if hsv.s > 0.01 && hsv.v > 0.01 {
+            self.picker_hue = hsv.h;
+        }
+        if color != self.color {
+            self.set_color(color, discrete);
+        }
+    }
+
+    /// Saturation/brightness square over a hue strip, `width` wide.
+    fn hsv_picker(&mut self, ui: &mut egui::Ui, width: f32) {
+        use egui::ecolor::HsvaGamma;
+        let current = HsvaGamma::from(self.color);
+        if current.s > 0.01 && current.v > 0.01 {
+            self.picker_hue = current.h;
+        }
+        let hue = self.picker_hue;
+        let at = |h: f32, s: f32, v: f32| Color32::from(HsvaGamma { h, s, v, a: 1.0 });
+
+        // Square: x = saturation, y = brightness. A vertex grid fakes the 2D gradient.
+        let (square, sq) = ui.allocate_exact_size(Vec2::new(width, 130.0), Sense::click_and_drag());
+        let n = 16;
+        let mut mesh = egui::Mesh::default();
+        for j in 0..=n {
+            for i in 0..=n {
+                let (fx, fy) = (i as f32 / n as f32, j as f32 / n as f32);
+                mesh.colored_vertex(square.lerp_inside(Vec2::new(fx, fy)), at(hue, fx, 1.0 - fy));
+            }
+        }
+        for j in 0..n {
+            for i in 0..n {
+                let k = j * (n + 1) + i;
+                mesh.add_triangle(k, k + 1, k + n + 1);
+                mesh.add_triangle(k + 1, k + n + 2, k + n + 1);
+            }
+        }
+        let p = ui.painter();
+        p.add(Shape::mesh(mesh));
+        p.rect_stroke(square, 0.0, Stroke::new(1.0, crate::theme::BORDER_STRONG), StrokeKind::Inside);
+        let knob = square.lerp_inside(Vec2::new(current.s, 1.0 - current.v));
+        p.circle_stroke(knob, 6.0, Stroke::new(2.5, Color32::from_black_alpha(120)));
+        p.circle_stroke(knob, 6.0, Stroke::new(1.5, Color32::WHITE));
+        if let Some(pos) = sq.interact_pointer_pos().filter(|_| sq.is_pointer_button_down_on()) {
+            let s = ((pos.x - square.min.x) / square.width()).clamp(0.0, 1.0);
+            let v = 1.0 - ((pos.y - square.min.y) / square.height()).clamp(0.0, 1.0);
+            self.set_color(at(hue, s, v), false);
+        }
+
+        ui.add_space(6.0);
+        let (strip, st) = ui.allocate_exact_size(Vec2::new(width, 12.0), Sense::click_and_drag());
+        let segs = 36;
+        let mut mesh = egui::Mesh::default();
+        for i in 0..=segs {
+            let f = i as f32 / segs as f32;
+            let c = at(f, 1.0, 1.0);
+            mesh.colored_vertex(Pos2::new(strip.min.x + f * strip.width(), strip.min.y), c);
+            mesh.colored_vertex(Pos2::new(strip.min.x + f * strip.width(), strip.max.y), c);
+        }
+        for i in 0..segs as u32 {
+            mesh.add_triangle(2 * i, 2 * i + 1, 2 * i + 2);
+            mesh.add_triangle(2 * i + 1, 2 * i + 3, 2 * i + 2);
+        }
+        let p = ui.painter();
+        p.add(Shape::mesh(mesh));
+        let x = strip.min.x + hue * strip.width();
+        let marker = Rect::from_center_size(Pos2::new(x, strip.center().y), Vec2::new(5.0, strip.height() + 6.0));
+        p.rect_filled(marker, 2.0, Color32::WHITE);
+        p.rect_stroke(marker, 2.0, Stroke::new(1.0, Color32::from_black_alpha(140)), StrokeKind::Outside);
+        if let Some(pos) = st.interact_pointer_pos().filter(|_| st.is_pointer_button_down_on()) {
+            let h = ((pos.x - strip.min.x) / strip.width()).clamp(0.0, 0.999);
+            self.picker_hue = h;
+            // A grey keeps its brightness but takes on the hue.
+            let (s, v) = if current.s < 0.05 { (1.0, current.v.max(0.6)) } else { (current.s, current.v) };
+            self.set_color(at(h, s, v), false);
         }
     }
 
@@ -977,6 +1615,10 @@ impl Editor {
             Tool::Text => "Click to place text · Esc to finish",
             Tool::Step => "Click to drop the next number",
             Tool::Crop => "Drag over the area to keep",
+            Tool::Stamp => "Click to place a stamp",
+            Tool::Magnify => "Drag a circle over a detail to enlarge it",
+            Tool::Fill => "Click an area to fill it with the color",
+            Tool::Eraser => "Click or drag over marks to erase them",
             _ if cfg!(target_os = "macos") => "Drag to draw · hold ⇧ to constrain",
             _ => "Drag to draw · hold Shift to constrain",
         };
@@ -1063,14 +1705,24 @@ impl Editor {
                     && let Some(p) = resp.interact_pointer_pos() {
                         self.click(to_img(p));
                     }
+                if resp.secondary_clicked() {
+                    self.commit_text();
+                    self.menu_target = resp.interact_pointer_pos().and_then(|p| self.hit_test(to_img(p)));
+                    self.select(self.menu_target);
+                }
+                resp.context_menu(|ui| self.canvas_menu(ui));
             }
             if self.picking.is_none()
                 && let Some(hover) = resp.hover_pos()
             {
+                let over_mark = self.hit_test(to_img(hover)).is_some();
                 let icon = match self.tool {
-                    Tool::Select if self.hit_test(to_img(hover)).is_some() => CursorIcon::Move,
+                    Tool::Select if over_mark => CursorIcon::Move,
                     Tool::Select => CursorIcon::Default,
                     Tool::Text => CursorIcon::Text,
+                    // A click selects the mark (see `click`).
+                    t if t.draws_by_drag() && over_mark => CursorIcon::PointingHand,
+                    Tool::Eraser => CursorIcon::None,
                     _ => CursorIcon::Crosshair,
                 };
                 ui.ctx().set_cursor_icon(icon);
@@ -1097,13 +1749,12 @@ impl Editor {
                 let editing = self.editing_text == Some(i);
                 paint_annotation(&painter, ann, &to_screen, zoom, editing, &layer_tex);
             }
-            if let Some((_, corner)) = self.resize_handle() {
-                let c = to_screen(corner);
-                painter.circle_filled(c, 7.0, Color32::WHITE);
-                painter.circle_stroke(c, 7.0, Stroke::new(2.0, crate::theme::ACCENT));
-                if resp.hover_pos().is_some_and(|h| h.distance(c) <= 12.0) || self.resizing.is_some() {
-                    ui.ctx().set_cursor_icon(CursorIcon::ResizeNwSe);
-                }
+            if self.tool == Tool::Eraser
+                && let Some(h) = resp.hover_pos()
+            {
+                let r = (self.width.max(2.0) * 1.5) * zoom + 4.0;
+                painter.circle_stroke(h, r, Stroke::new(3.0, Color32::from_black_alpha(140)));
+                painter.circle_stroke(h, r, Stroke::new(1.5, Color32::WHITE));
             }
             if let Some(ann) = &self.drawing {
                 paint_annotation(&painter, ann, &to_screen, zoom, false, &layer_tex);
@@ -1114,7 +1765,18 @@ impl Editor {
             }
             if let Some(i) = self.selected.filter(|&i| i < self.anns.len()) {
                 let (a, b) = self.anns[i].bounds();
-                dashed_rect(&painter, Rect::from_two_pos(to_screen(a), to_screen(b)).expand(4.0));
+                dashed_rect(&painter, Rect::from_two_pos(to_screen(a), to_screen(b)).expand(SELECTION_PAD));
+            }
+            if let Some((_, corners)) = self.resize_handles() {
+                let hover = resp.hover_pos().filter(|_| self.resizing.is_none());
+                for (k, corner) in corners.into_iter().enumerate() {
+                    let c = to_screen(corner);
+                    let hot = self.resizing.is_some_and(|(_, r)| r == k) || hover.is_some_and(|h| h.distance(c) <= HANDLE_GRAB);
+                    paint_resize_handle(&painter, c, hot);
+                    if hot {
+                        ui.ctx().set_cursor_icon(if k % 2 == 0 { CursorIcon::ResizeNwSe } else { CursorIcon::ResizeNeSw });
+                    }
+                }
             }
             if let Some((a, b)) = self.crop_drag {
                 let keep = Rect::from_two_pos(to_screen(a), to_screen(b)).intersect(img_rect);
@@ -1599,7 +2261,12 @@ fn paint_annotation(
                 painter.image(tex, r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
             }
         }
-        Kind::Blur { .. } | Kind::Spotlight { .. } => {}
+        Kind::Magnify { a, b, .. } => {
+            // The ring; the enlarged pixels are in the canvas texture.
+            painter.add(Shape::closed_line(ellipse_points(*a, *b, 96).into_iter().map(to_screen).collect(), stroke));
+        }
+        Kind::Stamp { pos, size, stamp } => paint_stamp(painter, to_screen(*pos), size * zoom, *stamp, color),
+        Kind::Blur { .. } | Kind::Spotlight { .. } | Kind::Fill { .. } => {}
     }
 }
 
@@ -1720,6 +2387,131 @@ fn paint_stroke(painter: &egui::Painter, pts: &[P], to_screen: &dyn Fn(P) -> Pos
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_hex_colors() {
+        assert_eq!(parse_hex("#EB3B34"), Some(Color32::from_rgb(0xEB, 0x3B, 0x34)));
+        assert_eq!(parse_hex("eb3b34"), Some(Color32::from_rgb(0xEB, 0x3B, 0x34)));
+        assert_eq!(parse_hex("#f80"), Some(Color32::from_rgb(0xFF, 0x88, 0x00)));
+        assert_eq!(parse_hex("#EB3B3"), None);
+        assert_eq!(parse_hex("#GG0000"), None);
+    }
+
+    fn blank_editor() -> Editor {
+        Editor::new(PathBuf::from("unused.png"), RgbaImage::from_pixel(400, 300, image::Rgba([255, 255, 255, 255])), None, true)
+    }
+
+    #[test]
+    fn clicking_a_mark_with_a_drawing_tool_selects_it_for_moving() {
+        let mut ed = blank_editor();
+        ed.tool = Tool::Arrow;
+        ed.drag_begin(P::new(50.0, 50.0));
+        ed.drag_update(P::new(200.0, 50.0), false);
+        ed.drag_end();
+        ed.selected = None;
+        ed.tool = Tool::Rect;
+        ed.click(P::new(120.0, 50.0));
+        assert_eq!(ed.selected, Some(0));
+        assert_eq!(ed.tool, Tool::Select);
+        // A click on empty canvas with a drawing tool selects nothing.
+        ed.tool = Tool::Rect;
+        ed.click(P::new(300.0, 250.0));
+        assert_eq!(ed.tool, Tool::Rect);
+    }
+
+    #[test]
+    fn steps_and_stamps_still_land_on_other_marks() {
+        let mut ed = blank_editor();
+        ed.tool = Tool::Blur;
+        ed.drag_begin(P::new(20.0, 20.0));
+        ed.drag_update(P::new(200.0, 200.0), false);
+        ed.drag_end();
+        ed.tool = Tool::Stamp;
+        ed.click(P::new(100.0, 100.0));
+        assert_eq!(ed.anns.len(), 2, "stamp placed on top of the blur");
+        assert!(matches!(ed.anns[1].kind, Kind::Stamp { .. }));
+        // Clicking the stamp again with the stamp tool selects it instead.
+        ed.click(P::new(100.0, 100.0));
+        assert_eq!(ed.anns.len(), 2);
+        assert_eq!((ed.selected, ed.tool), (Some(1), Tool::Select));
+    }
+
+    #[test]
+    fn eraser_removes_marks_in_one_undo_step() {
+        let mut ed = blank_editor();
+        ed.tool = Tool::Stamp;
+        ed.click(P::new(60.0, 60.0));
+        ed.click(P::new(300.0, 60.0));
+        assert_eq!(ed.anns.len(), 2);
+        ed.tool = Tool::Eraser;
+        ed.drag_begin(P::new(60.0, 60.0));
+        ed.drag_update(P::new(300.0, 60.0), false);
+        ed.drag_end();
+        assert!(ed.anns.is_empty());
+        ed.undo();
+        assert_eq!(ed.anns.len(), 2, "one gesture, one undo");
+    }
+
+    #[test]
+    fn flattening_a_pasted_image_bakes_it_and_the_marks_under_it() {
+        let mut ed = blank_editor();
+        ed.tool = Tool::Stamp;
+        ed.click(P::new(60.0, 60.0));
+        let red = Arc::new(RgbaImage::from_pixel(40, 40, image::Rgba([255, 0, 0, 255])));
+        ed.anns.push(Annotation { kind: Kind::Image { pos: P::new(100.0, 100.0), w: 40.0, h: 40.0, img: red }, color: [0; 4], width: 0.0, filled: false });
+        ed.click(P::new(300.0, 60.0));
+        let before = ed.flatten();
+        ed.merge_down(1);
+        assert_eq!(ed.anns.len(), 1, "only the stamp above the image stays a mark");
+        assert_eq!(ed.base.get_pixel(120, 120).0, [255, 0, 0, 255], "the picture is now background pixels");
+        assert_eq!(ed.flatten(), before, "flattening doesn't change the look");
+        ed.undo();
+        assert_eq!(ed.anns.len(), 3);
+        assert_ne!(ed.base.get_pixel(120, 120).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn picking_another_tool_shows_its_properties() {
+        let mut ed = blank_editor();
+        ed.tool = Tool::Stamp;
+        ed.click(P::new(60.0, 60.0));
+        assert_eq!(ed.selected, Some(0), "a new stamp is selected");
+        ed.set_tool(Tool::Stamp);
+        assert_eq!(ed.selected, Some(0), "same tool keeps it");
+        ed.set_tool(Tool::Rect);
+        assert_eq!(ed.selected, None, "the panel now edits rectangles, not the stamp");
+    }
+
+    #[test]
+    fn images_resize_from_any_corner_keeping_the_opposite_one() {
+        let mut ed = blank_editor();
+        let img = Arc::new(RgbaImage::new(20, 10));
+        ed.anns.push(Annotation { kind: Kind::Image { pos: P::new(100.0, 100.0), w: 40.0, h: 20.0, img }, color: [0; 4], width: 0.0, filled: false });
+        ed.selected = Some(0);
+        let (_, corners) = ed.resize_handles().unwrap();
+        ed.drag_begin(corners[0]);
+        ed.drag_update(P::new(60.0, 80.0), false);
+        ed.drag_end();
+        // Dragged the top-left corner out to 80 wide; the bottom-right stays at (140, 120).
+        assert!(matches!(ed.anns[0].kind, Kind::Image { pos, w, h, .. } if w == 80.0 && h == 40.0 && pos == P::new(60.0, 80.0)));
+    }
+
+    #[test]
+    fn stamps_resize_from_their_corner() {
+        let mut ed = blank_editor();
+        ed.stamp_size = 40.0;
+        ed.tool = Tool::Stamp;
+        ed.click(P::new(100.0, 100.0));
+        // Still on the Stamp tool: the handle of the stamp just placed works.
+        let (i, corners) = ed.resize_handles().expect("stamp has resize handles");
+        let pad = SELECTION_PAD / ed.zoom;
+        assert_eq!(corners[2], P::new(120.0 + pad, 120.0 + pad));
+        ed.drag_begin(corners[2]);
+        assert_eq!(ed.resizing, Some((i, 2)));
+        ed.drag_update(P::new(150.0, 130.0), false);
+        ed.drag_end();
+        assert!(matches!(ed.anns[0].kind, Kind::Stamp { size, .. } if size == 100.0));
+    }
 
     #[test]
     fn exports_every_format() {

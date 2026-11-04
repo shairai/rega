@@ -54,20 +54,23 @@
 
 ### Annotate
 
-Twelve tools in the right-hand panel, each with a one-key shortcut:
+Sixteen tools in the right-hand panel, each with a one-key shortcut:
 
 | Tool | Key | | Tool | Key |
 |---|---|---|---|---|
 | Select & move | `V` | | Highlighter | `H` |
 | Arrow | `A` | | Text & callouts | `T` |
 | Line | `L` | | Step numbers | `N` |
-| Rectangle | `R` | | Blur (pixelate) | `B` |
+| Rectangle | `R` | | Blur (pixelate or blur) | `B` |
 | Ellipse | `E` | | Spotlight | `S` |
 | Pen | `P` | | Crop | `C` |
+| Stamp (24 symbols: ✓ ✗ ! ? 👍 ★ ♥ …) | `K` | | Magnifier | `M` |
+| Fill (paint bucket) | `F` | | Eraser | `X` |
 
-- **Every mark stays editable** — select it to move, recolor, resize or delete. A freshly drawn mark stays selected, so you can tweak its color right away.
+- **Every mark stays editable** — select it to move, recolor, resize or delete. A freshly drawn mark stays selected, so you can tweak its color right away. With any drawing tool, a click on an existing mark selects it for moving.
+- **The properties panel follows what you're doing**: it shows only what applies to the current tool or the selected mark — line width and *Fill shape* for rectangles and ellipses, size and callout box for text, the symbol and size for stamps, zoom for the magnifier, tolerance for the fill.
 - **Eyedropper** (`I`) picks any color straight from the image.
-- **Paste images onto the canvas** (`⌘V` / `Ctrl+V`) as movable, resizable layers.
+- **Paste images onto the canvas** (`⌘V` / `Ctrl+V`) as movable, resizable layers. Right-click one → **Flatten image** to merge it into the picture so blur, fill and the magnifier work on it too (**Flatten all** merges every mark).
 - Undo/redo, resize, zoom, `⇧` to snap lines to 45° and keep shapes square.
 
 ### Export & share
@@ -159,7 +162,7 @@ On first launch Rega shows a **Set up** popup listing each permission with its l
 `⌃⌥C` → click the broken window → `A` and drag an arrow to the problem → `T` and type what's wrong → `B` and drag over any personal data → `⌘C` and paste into your issue tracker.
 
 **Hide sensitive info**
-Open any capture → press `B` and drag over emails, names, tokens or faces → they're pixelated in the image and in every export. The blur stays a mark you can select, move or resize until you export, so you can fix a missed spot later.
+Open any capture → press `B` and drag over emails, names, tokens or faces → they're hidden in the image and in every export. Choose **Pixelate** or a smooth **Blur**, each with adjustable strength. To black out text completely, draw a rectangle with **Fill shape** instead. The blur stays a mark you can select, move or resize until you export, so you can fix a missed spot later.
 
 <p align="center">
   <img src="docs/images/example-blur.png" alt="A customer table before and after: names and email addresses pixelated with the Blur tool" width="100%">

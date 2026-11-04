@@ -1,4 +1,4 @@
-; Windows installer. Build with:  makensis /DVERSION=0.1.0 scripts/installer.nsi
+; Windows installer. Build with:  makensis /DVERSION=0.2.0 scripts/installer.nsi
 ; Expects ${EXE} (default target\release\rega.exe), dist\rega.ico and the
 ; dist\installer-*.bmp artwork (rega --write-branding dist) to exist.
 Unicode true

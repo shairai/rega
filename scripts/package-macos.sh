@@ -29,12 +29,13 @@ hdiutil create -volname "Rega" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$R
 ATTACH=$(hdiutil attach -readwrite -noverify -noautoopen "$RW")
 DEV=$(echo "$ATTACH" | grep -E '^/dev/' | head -1 | awk '{print $1}')
 MOUNT=$(echo "$ATTACH" | grep -o '/Volumes/.*' | head -1)
-VOL=$(basename "$MOUNT")
 
 # Window: 660x400 content (+ title bar). Icon positions match src/branding.rs.
 if ! osascript <<APPLESCRIPT
 tell application "Finder"
-  tell disk "$VOL"
+  -- By mount path: with another "Rega" volume mounted, this one is "Rega 1" on disk
+  -- but still named "Rega" in Finder.
+  tell item (POSIX file "$MOUNT" as alias)
     open
     set current view of container window to icon view
     set toolbar visible of container window to false
