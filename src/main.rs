@@ -2,6 +2,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod border;
 mod branding;
 mod capture;
 mod config;

@@ -5,6 +5,7 @@ use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2,
 };
 
+use crate::border;
 use crate::capture::Snapshot;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -44,6 +45,9 @@ pub struct Overlay {
     /// Poll the real cursor every frame. egui's own pointer is unknown until the
     /// first mouse move and unreliable right after the window appears.
     track_cursor: bool,
+    /// Turn the outline's gradient; off when the user asked the OS for
+    /// reduced motion.
+    animate: bool,
 }
 
 /// A color along the logo gradient (0 = top-left coral, 1 = bottom-right violet).
@@ -71,27 +75,6 @@ fn gradient_line(painter: &egui::Painter, a: Pos2, b: Pos2, area: Rect) {
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Selection outline in the logo's diagonal gradient, drawn just outside `r`.
-fn gradient_border(painter: &egui::Painter, r: Rect, width: f32) {
-    let outer = r.expand(width);
-    let color_at = |p: Pos2| {
-        let t = ((p.x - outer.min.x) / outer.width().max(1.0) + (p.y - outer.min.y) / outer.height().max(1.0)) / 2.0;
-        logo_color(t)
-    };
-    let mut mesh = egui::Mesh::default();
-    let corners = |q: Rect| [q.left_top(), q.right_top(), q.right_bottom(), q.left_bottom()];
-    for p in corners(outer).into_iter().chain(corners(r)) {
-        mesh.colored_vertex(p, color_at(p));
-    }
-    // Ring of four quads: outer corners 0..4, inner corners 4..8.
-    for i in 0..4u32 {
-        let j = (i + 1) % 4;
-        mesh.add_triangle(i, j, 4 + i);
-        mesh.add_triangle(j, 4 + j, 4 + i);
-    }
-    painter.add(egui::Shape::mesh(mesh));
-}
-
 impl Overlay {
     pub fn new(ctx: &egui::Context, snap: Snapshot, purpose: Purpose) -> Self {
         let img = &snap.image;
@@ -107,7 +90,14 @@ impl Overlay {
             drag_to: None,
             track_cursor: initial_pointer.is_some(),
             initial_pointer,
+            animate: !crate::platform::reduce_motion(),
         }
+    }
+
+    /// How far the outline's gradient has turned at egui time `time` (still
+    /// at 0 under reduced motion). The recording border carries on from here.
+    pub fn border_phase(&self, time: f64) -> f32 {
+        if self.animate { border::phase(time) } else { 0.0 }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Outcome {
@@ -187,7 +177,8 @@ impl Overlay {
                 ] {
                     painter.rect_filled(r, 0.0, shade);
                 }
-                gradient_border(&painter, f, 2.5);
+                let phase = self.border_phase(ctx.input(|i| i.time));
+                painter.add(border::ring(f, phase));
                 let label = match (dragging, hovered_window) {
                     (Some(d), _) => {
                         let s = self.snap.scale;
@@ -271,4 +262,120 @@ fn label_box(painter: &egui::Painter, at: Pos2, text: &str) {
     let rect = Rect::from_min_size(at, galley.size() + Vec2::new(12.0, 8.0));
     painter.rect_filled(rect, 4.0, Color32::from_black_alpha(200));
     painter.galley(at + Vec2::new(6.0, 4.0), galley, Color32::WHITE);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::WinRect;
+    use egui_kittest::Harness;
+
+    /// A made-up 800 × 500 desktop at 1×: a dim generated gradient with one window.
+    fn snapshot() -> Snapshot {
+        let image = image::RgbaImage::from_fn(800, 500, |x, y| image::Rgba([30 + (x / 16) as u8, 40 + (y / 12) as u8, 70, 255]));
+        let windows = vec![WinRect { x: 420.0, y: 120.0, w: 300.0, h: 220.0, label: "Notes".into() }];
+        Snapshot { image, origin: (0, 0), size: (800, 500), scale: 1.0, windows, cursor: (-1, -1) }
+    }
+
+    /// The selection being dragged in the tests.
+    const DRAG: Rect = Rect::from_min_max(Pos2::new(150.0, 100.0), Pos2::new(650.0, 400.0));
+
+    /// The overlay over `snapshot`, mid-drag across `DRAG`, its outline
+    /// turning or (`animate` false) still.
+    fn dragging(animate: bool) -> Harness<'static, Option<Overlay>> {
+        let mut snap = Some(snapshot());
+        let mut h = Harness::builder().with_size(Vec2::new(800.0, 500.0)).with_pixels_per_point(1.0).wgpu().build_ui_state(
+            move |ui, overlay: &mut Option<Overlay>| {
+                let overlay = overlay.get_or_insert_with(|| Overlay {
+                    animate,
+                    ..Overlay::new(ui.ctx(), snap.take().expect("one overlay"), Purpose::Video)
+                });
+                let _ = overlay.ui(ui);
+            },
+            None,
+        );
+        h.hover_at(DRAG.min);
+        h.step();
+        h.drag_at(DRAG.min);
+        for i in 1..=8 {
+            h.hover_at(DRAG.min + DRAG.size() * (i as f32 / 8.0));
+            h.step();
+        }
+        h
+    }
+
+    /// Pixels along the middle of the outline's four sides, clear of the size
+    /// label and the magnifier, with the point each one's centre is at.
+    fn outline(img: &image::RgbaImage) -> Vec<(Pos2, Color32)> {
+        let mid = border::WIDTH / 2.0;
+        (1..10)
+            .flat_map(|k| {
+                let t = k as f32 / 10.0;
+                let (x, y) = (DRAG.min.x + DRAG.width() * t, DRAG.min.y + DRAG.height() * t);
+                [
+                    Pos2::new(x, DRAG.min.y - mid),
+                    Pos2::new(DRAG.max.x + mid, y),
+                    Pos2::new(x, DRAG.max.y + mid),
+                    Pos2::new(DRAG.min.x - mid, y),
+                ]
+            })
+            .map(|p| {
+                let px = img.get_pixel(p.x as u32, p.y as u32);
+                (Pos2::new(p.x.floor() + 0.5, p.y.floor() + 0.5), Color32::from_rgb(px[0], px[1], px[2]))
+            })
+            .collect()
+    }
+
+    /// The outline shows the shared gradient around the selection and turns
+    /// clockwise with egui's clock; under reduced motion it holds still. Set
+    /// `BORDER_PREVIEW_DIR` to save the frames.
+    #[test]
+    fn the_outline_turns_unless_motion_is_reduced() {
+        let dir = std::env::var("BORDER_PREVIEW_DIR").ok();
+        for animate in [true, false] {
+            let mut h = dragging(animate);
+            let mut frames = Vec::new();
+            // A second apart, well after the drag (egui's clock only runs forward).
+            for secs in [10.0, 11.0, 12.0] {
+                h.input_mut().time = Some(secs);
+                h.step();
+                let img = h.render().expect("render");
+                let phase = h.state().as_ref().unwrap().border_phase(secs);
+                assert_eq!(phase, if animate { border::phase(secs) } else { 0.0 });
+                let samples = outline(&img);
+                for &(p, got) in &samples {
+                    let want = border::color_at(p, DRAG.center(), phase);
+                    let err = (0..3).map(|c| got.to_array()[c].abs_diff(want.to_array()[c])).max().unwrap();
+                    assert!(err <= 3, "{got:?} at {p:?}, not {want:?}, {secs} s in");
+                }
+                if let Some(dir) = &dir {
+                    let still = if animate { "" } else { "-still" };
+                    img.save(std::path::Path::new(dir).join(format!("overlay-{secs}s{still}.png"))).unwrap();
+                }
+                frames.push(samples);
+            }
+            let moved: Vec<bool> = frames.windows(2).map(|f| f[0] != f[1]).collect();
+            assert_eq!(moved, [animate, animate]);
+        }
+    }
+
+    /// Renders the hovered-window highlight, the same outline around a window;
+    /// writes a PNG only when `BORDER_PREVIEW_DIR` is set.
+    #[test]
+    fn window_highlight_renders() {
+        let Ok(dir) = std::env::var("BORDER_PREVIEW_DIR") else { return };
+        let mut snap = Some(snapshot());
+        let mut h = Harness::builder().with_size(Vec2::new(800.0, 500.0)).with_pixels_per_point(2.0).wgpu().build_ui_state(
+            move |ui, overlay: &mut Option<Overlay>| {
+                let overlay = overlay.get_or_insert_with(|| Overlay::new(ui.ctx(), snap.take().expect("one overlay"), Purpose::Image));
+                let _ = overlay.ui(ui);
+            },
+            None,
+        );
+        h.hover_at(Pos2::new(470.0, 160.0));
+        h.step();
+        h.input_mut().time = Some(10.5);
+        h.step();
+        h.render().unwrap().save(std::path::Path::new(&dir).join("overlay-window.png")).unwrap();
+    }
 }

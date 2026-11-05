@@ -733,7 +733,9 @@ impl RegaApp {
                     Ok(rec) => {
                         self.activity = Activity::Recording(rec);
                         let (x, y) = (snap.origin.0 as f32 + region.0 as f32, snap.origin.1 as f32 + region.1 as f32);
-                        platform::show_recording_frame((x, y, region.2 as f32, region.3 as f32));
+                        // The border's gradient carries on from the overlay's outline.
+                        let phase = overlay.border_phase(ctx.input(|i| i.time));
+                        platform::show_recording_frame((x, y, region.2 as f32, region.3 as f32), phase);
                         self.show_recording_bar(ctx, frame, snap.origin, snap.size, rect);
                     }
                     Err(e) => {

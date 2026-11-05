@@ -247,6 +247,7 @@ src/
 ├── app.rs             app shell: workspace, library tray, capture flows, menus, settings
 ├── theme.rs           colors, fonts, icons and shared widgets
 ├── overlay.rs         full-screen region / window selection
+├── border.rs          the moving gradient around a selection or recording
 ├── capture.rs         screenshots and window detection
 ├── editor/
 │   ├── mod.rs         editor UI and tools

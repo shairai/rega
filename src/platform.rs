@@ -264,14 +264,60 @@ pub fn set_window_frame(frame: &eframe::Frame, x: f32, y: f32, w: f32, h: f32) {
 #[cfg(not(target_os = "macos"))]
 pub fn set_window_frame(_frame: &eframe::Frame, _x: f32, _y: f32, _w: f32, _h: f32) {}
 
+/// Whether the user asked the OS for less motion on screen (macOS: Reduce
+/// Motion; Windows: animation effects off). Rega's moving borders then hold
+/// still. Read when an overlay opens or a recording starts, not every frame.
+#[cfg(target_os = "macos")]
+pub fn reduce_motion() -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+#[cfg(windows)]
+pub fn reduce_motion() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut animate = windows::core::BOOL(1);
+    // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL through the pointer,
+    // which points at `animate` for the whole call.
+    let read = unsafe {
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some((&raw mut animate).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0))
+    };
+    read.is_ok() && !animate.as_bool()
+}
+
+/// The recording border's four strips around `rect`, each (x, y, w, h) in
+/// global top-left points like `rect`: top and bottom span the corners and
+/// are `corner` tall, so rounded corners of that outer radius fit in them;
+/// left and right fit between. A `corner` of `border::WIDTH` gives square
+/// corners and strips just the band's width.
+fn border_strips((x, y, w, h): (f32, f32, f32, f32), corner: f32) -> [(f32, f32, f32, f32); 4] {
+    const T: f32 = crate::border::WIDTH;
+    let side = h + 2.0 * T - 2.0 * corner;
+    [
+        (x - T, y - T, w + 2.0 * T, corner),
+        (x - T, y - T + corner, T, side),
+        (x - T, y + h + T - corner, w + 2.0 * T, corner),
+        (x + w, y - T + corner, T, side),
+    ]
+}
+
+/// The outer corner radius of the recording border around `rect`.
+#[cfg(target_os = "macos")]
+fn border_corner((x, y, w, h): (f32, f32, f32, f32)) -> f32 {
+    crate::border::radii(eframe::egui::Rect::from_min_size(eframe::egui::Pos2::new(x, y), eframe::egui::vec2(w, h))).1
+}
+
 /// A border drawn just outside the region being recorded, so the user can see
 /// what is captured. Four thin click-through panels: outside the region (and
 /// excluded from screen capture), on every Space including full-screen apps.
-/// `rect` is (x, y, w, h) in global top-left logical points.
+/// `rect` is (x, y, w, h) in global top-left logical points. The border's
+/// gradient (see `crate::border`) starts turned by `phase`, carrying on from
+/// the selection overlay, and Core Animation turns it in the window server:
+/// Rega does no work for it while recording.
 #[cfg(target_os = "macos")]
-pub fn show_recording_frame(rect: (f32, f32, f32, f32)) {
+pub fn show_recording_frame(rect: (f32, f32, f32, f32), phase: f32) {
     use objc2::MainThreadOnly;
-    use objc2::rc::Retained;
     use objc2_app_kit::{
         NSBackingStoreType, NSColor, NSPanel, NSScreen, NSWindowCollectionBehavior as B, NSWindowSharingType, NSWindowStyleMask,
     };
@@ -281,19 +327,12 @@ pub fn show_recording_frame(rect: (f32, f32, f32, f32)) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let Some(primary) = NSScreen::screens(mtm).firstObject() else { return };
     let primary_h = primary.frame().size.height;
-    const T: f32 = 3.0;
-    let (x, y, w, h) = rect;
-    let (from, to) = (crate::icon::LOGO_FROM, crate::icon::LOGO_TO);
-    // Top and left in the logo's coral, bottom and right in its violet.
-    let strips = [
-        ((x - T, y - T, w + 2.0 * T, T), from),
-        ((x - T, y, T, h), from),
-        ((x - T, y + h, w + 2.0 * T, T), to),
-        ((x + w, y, T, h), to),
-    ];
-    let panels: Vec<Retained<NSPanel>> = strips
+    // One start for all four strips keeps their slices of the gradient in step.
+    let begin = (!reduce_motion()).then(|| objc2_quartz_core::CACurrentMediaTime());
+    let panels = border_strips(rect, border_corner(rect))
         .into_iter()
-        .map(|((sx, sy, sw, sh), c)| {
+        .map(|strip| {
+            let (sx, sy, sw, sh) = strip;
             let frame = NSRect::new(NSPoint::new(sx as f64, primary_h - (sy + sh) as f64), NSSize::new(sw as f64, sh as f64));
             let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
                 NSPanel::alloc(mtm),
@@ -304,30 +343,170 @@ pub fn show_recording_frame(rect: (f32, f32, f32, f32)) {
             );
             // SAFETY: we keep our own reference and never `close` it.
             unsafe { panel.setReleasedWhenClosed(false) };
-            let color = |v: u8| v as f64 / 255.0;
-            panel.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(color(c[0]), color(c[1]), color(c[2]), 1.0)));
+            // Clear around the band: its rounded corners leave the corners of
+            // the top and bottom strips empty.
+            panel.setOpaque(false);
+            panel.setBackgroundColor(Some(&NSColor::clearColor()));
+            panel.setHasShadow(false);
             panel.setIgnoresMouseEvents(true);
             panel.setHidesOnDeactivate(false);
             panel.setSharingType(NSWindowSharingType::None);
             panel.setCollectionBehavior(B::CanJoinAllSpaces | B::FullScreenAuxiliary | B::Stationary);
             panel.setLevel(1000);
+            let (root, gradient) = border_layer::strip(rect, strip, phase, begin, panel.backingScaleFactor());
+            if let Some(view) = panel.contentView() {
+                // Layer-hosting (layer first): the view shows `root` and leaves
+                // its sublayers to us.
+                view.setLayer(Some(&root));
+                view.setWantsLayer(true);
+            }
             panel.orderFrontRegardless();
-            panel
+            (panel, gradient)
         })
         .collect();
     RECORDING_FRAME.with(|f| *f.borrow_mut() = panels);
 }
 
+/// The recording border's layers on macOS. Each strip holds its slice of one
+/// conic gradient laid over the whole border, so Core Animation can turn it
+/// as one in the window server.
+#[cfg(target_os = "macos")]
+mod border_layer {
+    use std::f64::consts::TAU;
+
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_core_foundation::{CFRetained, CFType, CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{CGColor, CGMutablePath};
+    use objc2_foundation::{NSArray, NSNumber, ns_string};
+    use objc2_quartz_core::{
+        CABasicAnimation, CAFrameRateRange, CAGradientLayer, CALayer, CAMediaTiming, CAMediaTimingFunction, CAShapeLayer,
+        kCAFillRuleEvenOdd, kCAGradientLayerConic, kCAMediaTimingFunctionLinear,
+    };
+
+    use crate::border;
+
+    /// Colour stops once around; Core Animation blends straight between them.
+    const STOPS: usize = 24;
+
+    /// The layers for `strip` of the border around `rect` (both (x, y, w, h)
+    /// in global top-left points): a root layer the size of the strip and the
+    /// gradient it holds. The gradient starts turned by `phase` and, given a
+    /// `begin` time (`CACurrentMediaTime`), turns from then on. `scale` is the
+    /// screen's pixels per point.
+    pub fn strip(
+        rect: (f32, f32, f32, f32),
+        strip: (f32, f32, f32, f32),
+        phase: f32,
+        begin: Option<f64>,
+        scale: f64,
+    ) -> (Retained<CALayer>, Retained<CAGradientLayer>) {
+        let (x, y, w, h) = (rect.0 as f64, rect.1 as f64, rect.2 as f64, rect.3 as f64);
+        let (sx, sy, sw, sh) = (strip.0 as f64, strip.1 as f64, strip.2 as f64, strip.3 as f64);
+        let gradient = CAGradientLayer::new();
+        // SAFETY: reads a constant that Core Animation exports.
+        gradient.setType(unsafe { kCAGradientLayerConic });
+        // Core Animation's cone runs anticlockwise on screen and ours runs
+        // clockwise, so its stop at u turns is ours at -u.
+        let colors: Vec<CFRetained<CGColor>> = (0..=STOPS)
+            .map(|k| {
+                let [r, g, b] = border::palette(-(k as f32) / STOPS as f32);
+                CGColor::new_srgb(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0)
+            })
+            .collect();
+        let colors: Vec<&AnyObject> = colors
+            .iter()
+            .map(|c| {
+                let c: &CFType = c;
+                c.as_ref()
+            })
+            .collect();
+        // SAFETY: `colors` takes an array of CGColors.
+        unsafe { gradient.setColors(Some(&NSArray::from_slice(&colors))) };
+        let locations: Vec<_> = (0..=STOPS).map(|k| NSNumber::new_f64(k as f64 / STOPS as f64)).collect();
+        gradient.setLocations(Some(&NSArray::from_retained_slice(&locations)));
+        // Square, as Core Animation lays the cone out in the unit square and a
+        // longer side would squash it, and big enough to cover the border at
+        // any angle.
+        let t = border::WIDTH as f64;
+        let side = (w + 2.0 * t).hypot(h + 2.0 * t) + 2.0;
+        gradient.setBounds(CGRect::new(CGPoint::ZERO, CGSize::new(side, side)));
+        // Centred on the region, in the strip's points (origin bottom-left).
+        gradient.setPosition(CGPoint::new(x + w / 2.0 - sx, sy + sh - (y + h / 2.0)));
+        gradient.setStartPoint(CGPoint::new(0.5, 0.5));
+        // The end point is where the cone starts: `phase` clockwise from up.
+        let a = phase as f64 * TAU;
+        gradient.setEndPoint(CGPoint::new(0.5 + 0.5 * a.sin(), 0.5 + 0.5 * a.cos()));
+        gradient.setContentsScale(scale);
+        if let Some(begin) = begin {
+            let spin = CABasicAnimation::animationWithKeyPath(Some(ns_string!("transform.rotation.z")));
+            // Negative turns clockwise here, where y points up.
+            let (from, to) = (NSNumber::new_f64(0.0), NSNumber::new_f64(-TAU));
+            // SAFETY: a rotation takes numbers.
+            unsafe {
+                spin.setFromValue(Some(&from));
+                spin.setToValue(Some(&to));
+            }
+            spin.setDuration(border::TURN_SECS);
+            spin.setRepeatCount(f32::INFINITY);
+            // SAFETY: reads a constant that Core Animation exports.
+            spin.setTimingFunction(Some(&CAMediaTimingFunction::functionWithName(unsafe { kCAMediaTimingFunctionLinear })));
+            spin.setBeginTime(gradient.convertTime_fromLayer(begin, None));
+            // About 30 frames a second, as on Windows: plenty for a slow turn,
+            // and a ProMotion screen needn't run at 120 Hz for it.
+            spin.setPreferredFrameRateRange(CAFrameRateRange { minimum: 24.0, maximum: 60.0, preferred: 30.0 });
+            gradient.addAnimation_forKey(&spin, Some(ns_string!("spin")));
+        }
+        let root = CALayer::new();
+        root.setBounds(CGRect::new(CGPoint::ZERO, CGSize::new(sw, sh)));
+        root.setContentsScale(scale);
+        root.addSublayer(&gradient);
+        // Only the band shows, round at the corners; the rest is clear.
+        let mask = CAShapeLayer::new();
+        mask.setPath(Some(&band_path(rect, strip)));
+        // SAFETY: reads a constant that Core Animation exports.
+        mask.setFillRule(unsafe { kCAFillRuleEvenOdd });
+        mask.setContentsScale(scale);
+        // SAFETY: a mask mustn't have a superlayer, and this new one has none.
+        unsafe { root.setMask(Some(&mask)) };
+        (root, gradient)
+    }
+
+    /// The border's band around `rect`, in `strip`'s points (origin
+    /// bottom-left): the outer rounded rect with the inner one cut out.
+    fn band_path(rect: (f32, f32, f32, f32), strip: (f32, f32, f32, f32)) -> CFRetained<CGMutablePath> {
+        let (x, y, w, h) = rect;
+        let (inner, outer) = border::radii(eframe::egui::Rect::from_min_size(eframe::egui::pos2(x, y), eframe::egui::vec2(w, h)));
+        let (sx, sy, sh) = (strip.0 as f64, strip.1 as f64, strip.3 as f64);
+        let local = |gx: f32, gy: f32, gw: f32, gh: f32| {
+            let (gx, gy, gw, gh) = (gx as f64, gy as f64, gw as f64, gh as f64);
+            CGRect::new(CGPoint::new(gx - sx, sy + sh - (gy + gh)), CGSize::new(gw, gh))
+        };
+        let t = border::WIDTH;
+        let path = CGMutablePath::new();
+        // SAFETY: a null transform means none, and `radii` keeps each radius
+        // within half its rect's sides.
+        unsafe {
+            CGMutablePath::add_rounded_rect(Some(&path), std::ptr::null(), local(x - t, y - t, w + 2.0 * t, h + 2.0 * t), outer as f64, outer as f64);
+            CGMutablePath::add_rounded_rect(Some(&path), std::ptr::null(), local(x, y, w, h), inner as f64, inner as f64);
+        }
+        path
+    }
+}
+
 #[cfg(target_os = "macos")]
 thread_local! {
-    static RECORDING_FRAME: std::cell::RefCell<Vec<objc2::rc::Retained<objc2_app_kit::NSPanel>>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    /// The recording border's panels, each with the gradient it shows.
+    static RECORDING_FRAME: std::cell::RefCell<
+        Vec<(objc2::rc::Retained<objc2_app_kit::NSPanel>, objc2::rc::Retained<objc2_quartz_core::CAGradientLayer>)>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(target_os = "macos")]
 pub fn hide_recording_frame() {
     RECORDING_FRAME.with(|f| {
-        for panel in f.borrow_mut().drain(..) {
+        for (panel, gradient) in f.borrow_mut().drain(..) {
+            gradient.removeAllAnimations();
             panel.orderOut(None);
         }
     });
@@ -336,19 +515,52 @@ pub fn hide_recording_frame() {
 /// Windows: the same border, drawn by four borderless click-through egui
 /// viewports (see `paint_recording_frame`).
 #[cfg(not(target_os = "macos"))]
-pub fn show_recording_frame(rect: (f32, f32, f32, f32)) {
-    *RECORDING_RECT.lock().unwrap() = Some(rect);
+pub fn show_recording_frame(rect: (f32, f32, f32, f32), phase: f32) {
+    let animate = !reduce_motion();
+    *RECORDING_BORDER.lock().unwrap() = Some(RecordingBorder { rect, phase, since: std::time::Instant::now(), animate });
     // New windows, which have yet to be kept out of captures.
     FRAME_PROTECTED.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn hide_recording_frame() {
-    *RECORDING_RECT.lock().unwrap() = None;
+    *RECORDING_BORDER.lock().unwrap() = None;
+}
+
+/// Where the recording border is and how its gradient moves (Windows).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[derive(Clone, Copy)]
+struct RecordingBorder {
+    rect: (f32, f32, f32, f32),
+    /// The gradient's turn at `since`, carried on from the selection overlay.
+    phase: f32,
+    since: std::time::Instant,
+    /// Off when the user asked the OS for reduced motion.
+    animate: bool,
+}
+
+impl RecordingBorder {
+    /// The gradient's turn at `now`.
+    fn phase(&self, now: std::time::Instant) -> f32 {
+        if self.animate {
+            (self.phase + crate::border::phase(now.duration_since(self.since).as_secs_f64())).fract()
+        } else {
+            self.phase
+        }
+    }
+
+    /// How long from `now` until the strips' next frame. Frames fall on one
+    /// grid, about 30 a second from `since`, so the four strips repaint
+    /// together: in step, and with one wake-up for all of them.
+    fn until_next_frame(&self, now: std::time::Instant) -> std::time::Duration {
+        const FRAME: std::time::Duration = std::time::Duration::from_millis(33);
+        let into = now.duration_since(self.since).as_nanos() % FRAME.as_nanos();
+        FRAME - std::time::Duration::from_nanos(into as u64)
+    }
 }
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-static RECORDING_RECT: std::sync::Mutex<Option<(f32, f32, f32, f32)>> = std::sync::Mutex::new(None);
+static RECORDING_BORDER: std::sync::Mutex<Option<RecordingBorder>> = std::sync::Mutex::new(None);
 
 /// Which of the border's viewports were told to keep out of captures (bit
 /// `i` for strip `i`): told once each, as every viewport command also
@@ -358,22 +570,19 @@ static FRAME_PROTECTED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU
 
 /// Call every frame: keeps the recording border's windows alive while a
 /// recording runs (a viewport closes when it stops being shown). They are
-/// excluded from capture, so they never appear in the video.
+/// excluded from capture, so they never appear in the video. Each strip
+/// paints its slice of the gradient by where it sits on screen, and repaints
+/// itself about 30 times a second to turn it (never under reduced motion).
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn paint_recording_frame(ctx: &eframe::egui::Context) {
-    use eframe::egui::{self, Color32, Pos2, Vec2, ViewportBuilder, ViewportId};
+    use eframe::egui::{self, Pos2, Vec2, ViewportBuilder, ViewportId};
     use std::sync::atomic::Ordering;
-    let Some((x, y, w, h)) = *RECORDING_RECT.lock().unwrap() else { return };
-    const T: f32 = 3.0;
-    let (from, to) = (crate::icon::LOGO_FROM, crate::icon::LOGO_TO);
-    let strips = [
-        ((x - T, y - T, w + 2.0 * T, T), from),
-        ((x - T, y, T, h), from),
-        ((x - T, y + h, w + 2.0 * T, T), to),
-        ((x + w, y, T, h), to),
-    ];
-    for (i, ((sx, sy, sw, sh), c)) in strips.into_iter().enumerate() {
-        let color = Color32::from_rgb(c[0], c[1], c[2]);
+    use std::time::Instant;
+    let Some(border) = *RECORDING_BORDER.lock().unwrap() else { return };
+    let (x, y, w, h) = border.rect;
+    let center = Pos2::new(x + w / 2.0, y + h / 2.0);
+    // Square corners here: a strip window can't be partly see-through.
+    for (i, (sx, sy, sw, sh)) in border_strips(border.rect, crate::border::WIDTH).into_iter().enumerate() {
         ctx.show_viewport_deferred(
             ViewportId::from_hash_of(("recording-frame", i)),
             ViewportBuilder::default()
@@ -386,11 +595,17 @@ pub fn paint_recording_frame(ctx: &eframe::egui::Context) {
                 .with_mouse_passthrough(true)
                 .with_position(Pos2::new(sx, sy))
                 .with_inner_size(Vec2::new(sw, sh)),
-            move |ctx, _| {
+            move |ui, _| {
                 if FRAME_PROTECTED.fetch_or(1 << i, Ordering::Relaxed) & (1 << i) == 0 {
-                    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::ContentProtected(true));
+                    ui.send_viewport_cmd(egui::ViewportCommand::ContentProtected(true));
                 }
-                egui::CentralPanel::default().frame(egui::Frame::new().fill(color)).show(ctx, |_| {});
+                let now = Instant::now();
+                let mesh = crate::border::strip(ui.max_rect(), Pos2::new(sx, sy), center, border.phase(now));
+                ui.painter().add(egui::Shape::mesh(mesh));
+                if border.animate {
+                    // Smooth enough for a slow turn; only the strips repaint.
+                    ui.request_repaint_after(border.until_next_frame(now));
+                }
             },
         );
     }
@@ -753,24 +968,357 @@ pub const SHIFT: &str = if cfg!(target_os = "macos") { "⇧" } else { "Shift+" }
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
-    use eframe::egui::{self, ViewportCommand};
+    use crate::border;
+    use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Vec2, ViewportCommand, ViewportId};
+
+    /// The recording border's state is global, so the tests using it take turns.
+    static BORDER_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn recording(animate: bool) -> RecordingBorder {
+        RecordingBorder { rect: (100.0, 100.0, 400.0, 300.0), phase: 0.25, since: Instant::now(), animate }
+    }
+
+    /// Run `frames` frames of the border's windows (embedded, as a plain
+    /// context has no real viewports) and return what each frame asked for.
+    fn paint_frames(border: RecordingBorder, frames: usize) -> Vec<egui::FullOutput> {
+        let ctx = egui::Context::default();
+        *RECORDING_BORDER.lock().unwrap() = Some(border);
+        FRAME_PROTECTED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let outputs = (0..frames)
+            .map(|_| {
+                let mut out = ctx.run_ui(egui::RawInput::default(), |ui| paint_recording_frame(ui.ctx()));
+                out.textures_delta.clear();
+                out
+            })
+            .collect();
+        *RECORDING_BORDER.lock().unwrap() = None;
+        outputs
+    }
 
     /// The border's windows are told once each to keep out of captures: the
     /// command repaints its window, so repeating it would redraw them nonstop.
     #[test]
     fn the_recording_border_is_protected_once_per_window() {
-        let ctx = egui::Context::default();
-        *RECORDING_RECT.lock().unwrap() = Some((100.0, 100.0, 400.0, 300.0));
-        FRAME_PROTECTED.store(0, std::sync::atomic::Ordering::Relaxed);
-        let mut sent = Vec::new();
-        for _ in 0..4 {
-            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| paint_recording_frame(ui.ctx()));
-            out.textures_delta.clear();
-            let commands = out.viewport_output.values().flat_map(|v| &v.commands);
-            sent.push(commands.filter(|c| matches!(c, ViewportCommand::ContentProtected(true))).count());
-        }
-        *RECORDING_RECT.lock().unwrap() = None;
+        let _turn = BORDER_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let sent: Vec<usize> = paint_frames(recording(true), 4)
+            .iter()
+            .map(|out| {
+                let commands = out.viewport_output.values().flat_map(|v| &v.commands);
+                commands.filter(|c| matches!(c, ViewportCommand::ContentProtected(true))).count()
+            })
+            .collect();
         assert_eq!(sent, [4, 0, 0, 0]);
+    }
+
+    /// The strips repaint themselves about 30 times a second to turn the
+    /// gradient, never back to back; under reduced motion they never repaint
+    /// and the gradient holds still.
+    #[test]
+    fn the_recording_border_turns_at_30_fps_unless_motion_is_reduced() {
+        let _turn = BORDER_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let next_repaint = |animate| {
+            let outputs = paint_frames(recording(animate), 30);
+            outputs.last().unwrap().viewport_output[&ViewportId::ROOT].repaint_delay
+        };
+        let turning = next_repaint(true);
+        assert!(turning > Duration::ZERO && turning <= Duration::from_millis(33), "{turning:?}");
+        assert_eq!(next_repaint(false), Duration::MAX);
+
+        let start = Instant::now();
+        let (turning, still) = (RecordingBorder { since: start, ..recording(true) }, recording(false));
+        let half_a_turn = Duration::from_secs_f64(border::TURN_SECS / 2.0);
+        assert!((turning.phase(start + half_a_turn) - 0.75).abs() < 1e-3);
+        assert_eq!(still.phase(start + half_a_turn), 0.25);
+        // Frames fall on one grid: however far into a frame a strip paints,
+        // it asks for the same next one as the others.
+        let ms = Duration::from_millis;
+        assert_eq!(turning.until_next_frame(start), ms(33));
+        for into in [0, 1, 12, 32] {
+            let now = start + ms(5 * 33 + into);
+            assert_eq!(now + turning.until_next_frame(now), start + ms(6 * 33));
+        }
+    }
+
+    /// With real windows, as eframe gives them on Windows: each strip paints
+    /// in its own pass and asks only for its own next frame, so the main
+    /// window is never woken by the border. Past the two quick frames egui
+    /// gives every new window, each strip asks once per frame, within 33 ms;
+    /// under reduced motion none asks at all.
+    #[test]
+    fn only_the_border_windows_repaint_while_recording() {
+        let _turn = BORDER_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        for animate in [true, false] {
+            let ctx = egui::Context::default();
+            ctx.set_embed_viewports(false);
+            // A main window that has settled before the recording starts.
+            for _ in 0..2 {
+                ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+            }
+            // What eframe listens to when it schedules each window's repaint.
+            let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let log = asked.clone();
+            ctx.set_request_repaint_callback(move |info| log.lock().unwrap().push((info.viewport_id, info.delay)));
+            *RECORDING_BORDER.lock().unwrap() = Some(recording(animate));
+            FRAME_PROTECTED.store(0, std::sync::atomic::Ordering::Relaxed);
+            for round in 0..5 {
+                asked.lock().unwrap().clear();
+                // The main window's frame, which keeps the strips open, then each strip's.
+                let mut out = ctx.run_ui(egui::RawInput::default(), |ui| paint_recording_frame(ui.ctx()));
+                out.textures_delta.clear();
+                let strips: Vec<_> = out.viewport_output.iter().filter_map(|(id, v)| Some((*id, v.viewport_ui_cb.clone()?))).collect();
+                assert_eq!(strips.len(), 4);
+                for (id, paint) in &strips {
+                    let mut input = egui::RawInput { viewport_id: *id, ..Default::default() };
+                    input.viewports.insert(*id, Default::default());
+                    let mut out = ctx.run_ui(input, |ui| paint(ui));
+                    out.textures_delta.clear();
+                    let protect = out.viewport_output[id].commands.iter().filter(|c| matches!(c, ViewportCommand::ContentProtected(true)));
+                    assert_eq!(protect.count(), usize::from(round == 0), "round {round}");
+                }
+                let asked = asked.lock().unwrap();
+                assert!(asked.iter().all(|(id, _)| strips.iter().any(|(strip, _)| strip == id)), "round {round}: {asked:?}");
+                if round >= 2 {
+                    let next_frames = asked.iter().filter(|(_, delay)| *delay > Duration::ZERO && *delay <= Duration::from_millis(33));
+                    assert_eq!((asked.len(), next_frames.count()), if animate { (4, 4) } else { (0, 0) }, "round {round}: {asked:?}");
+                }
+            }
+            *RECORDING_BORDER.lock().unwrap() = None;
+        }
+    }
+
+    /// The mesh's colour at `p`, blended from the triangle it falls in.
+    fn sample(mesh: &Mesh, p: Pos2) -> Option<[f32; 3]> {
+        let cross = |u: Vec2, v: Vec2| u.x * v.y - u.y * v.x;
+        mesh.indices.chunks(3).find_map(|t| {
+            let [a, b, c] = [0, 1, 2].map(|i| &mesh.vertices[t[i] as usize]);
+            let area = cross(b.pos - a.pos, c.pos - a.pos);
+            let wb = cross(p - a.pos, c.pos - a.pos) / area;
+            let wc = cross(b.pos - a.pos, p - a.pos) / area;
+            let wa = 1.0 - wb - wc;
+            (wa >= -1e-4 && wb >= -1e-4 && wc >= -1e-4).then(|| {
+                let channel = |f: fn(&Color32) -> u8| wa * f(&a.color) as f32 + wb * f(&b.color) as f32 + wc * f(&c.color) as f32;
+                [channel(Color32::r), channel(Color32::g), channel(Color32::b)]
+            })
+        })
+    }
+
+    /// Each strip window paints its slice by where it sits on screen, so the
+    /// colours run on across the joins, and the strips cover the ring around
+    /// the region exactly.
+    #[test]
+    fn the_recording_border_strips_line_up() {
+        let rect = (100.0, 80.0, 640.0, 360.0);
+        let (x, y, w, h) = rect;
+        let center = Pos2::new(x + w / 2.0, y + h / 2.0);
+        let phase = 0.37;
+        let strips: Vec<(Rect, Mesh)> = border_strips(rect, border::WIDTH)
+            .into_iter()
+            .map(|(sx, sy, sw, sh)| {
+                let local = Rect::from_min_size(Pos2::ZERO, Vec2::new(sw, sh));
+                (local.translate(Vec2::new(sx, sy)), border::strip(local, Pos2::new(sx, sy), center, phase))
+            })
+            .collect();
+        let region = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h));
+        let total: f32 = strips.iter().map(|(r, _)| r.area()).sum();
+        assert_eq!(total, region.expand(border::WIDTH).area() - region.area());
+        let mut joins = 0;
+        for (i, (a, mesh)) in strips.iter().enumerate() {
+            for v in &mesh.vertices {
+                assert_eq!(v.color, border::color_at(a.min + v.pos.to_vec2(), center, phase));
+            }
+            for (b, other) in &strips[i + 1..] {
+                let join = a.intersect(*b);
+                assert!(join.area() <= 0.0, "{a:?} and {b:?} overlap");
+                if join.width() < 0.0 || join.height() < 0.0 {
+                    continue; // they don't touch
+                }
+                joins += 1;
+                for k in 0..=6 {
+                    let p = join.min.lerp(join.max, k as f32 / 6.0);
+                    let here = sample(mesh, p - a.min.to_vec2()).expect("on the strip");
+                    let there = sample(other, p - b.min.to_vec2()).expect("on the strip");
+                    let gap = (0..3).map(|c| (here[c] - there[c]).abs()).fold(0.0, f32::max);
+                    assert!(gap <= 2.0, "{gap} levels apart at {p:?}");
+                }
+            }
+        }
+        assert_eq!(joins, 4, "one join per corner");
+    }
+
+    /// Run `f`, which builds layers, in turn with the other layer tests, and
+    /// commit its layer changes before handing over: Core Animation holds a
+    /// thread's changed layers until a commit (the app's run loop makes one
+    /// every turn), and a commit can reach layers another thread is still
+    /// building.
+    #[cfg(target_os = "macos")]
+    fn with_layers<R>(f: impl FnOnce() -> R) -> R {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let result = objc2::rc::autoreleasepool(|_| f());
+        objc2_quartz_core::CATransaction::flush();
+        result
+    }
+
+    /// `root` drawn off-screen into an sRGB bitmap the size of `strip` at
+    /// `scale` pixels per point, with Core Animation's premultiplied colours
+    /// made plain.
+    #[cfg(target_os = "macos")]
+    fn render_layer(root: &objc2_quartz_core::CALayer, (_, _, sw, sh): (f32, f32, f32, f32), scale: f64) -> image::RgbaImage {
+        use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, kCGColorSpaceSRGB};
+        let (pw, ph) = ((sw as f64 * scale).round() as u32, (sh as f64 * scale).round() as u32);
+        let mut img = image::RgbaImage::new(pw, ph);
+        // SAFETY: reads a constant that Core Graphics exports.
+        let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).expect("sRGB");
+        // SAFETY: `img` holds `ph` rows of `pw` RGBA pixels, top row first as
+        // Core Graphics lays them out, and outlives the context.
+        let ctx = unsafe {
+            CGBitmapContextCreate(
+                img.as_mut_ptr().cast(),
+                pw as usize,
+                ph as usize,
+                8,
+                pw as usize * 4,
+                Some(&space),
+                CGImageAlphaInfo::PremultipliedLast.0,
+            )
+        }
+        .expect("bitmap context");
+        CGContext::scale_ctm(Some(&ctx), scale, scale);
+        root.renderInContext(&ctx);
+        drop(ctx);
+        for px in img.pixels_mut() {
+            if px[3] > 0 {
+                let a = px[3] as f32;
+                for c in 0..3 {
+                    px[c] = (px[c] as f32 * 255.0 / a).round() as u8;
+                }
+            }
+        }
+        img
+    }
+
+    /// The border's layers, drawn off-screen strip by strip at Retina scale:
+    /// every pixel shows the shared gradient at its spot on screen, so the
+    /// strips meet seamlessly at the corners, both at the start and after the
+    /// animation's own quarter (and more) of a turn, which moves it clockwise
+    /// as on Windows and in the overlay. Set `BORDER_PREVIEW_DIR` to save the
+    /// assembled border.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_recording_border_layers_show_the_shared_gradient() {
+        use objc2_core_foundation::CGAffineTransform;
+        use objc2_foundation::{NSNumber, ns_string};
+        use objc2_quartz_core::CABasicAnimation;
+
+        let rect = (130.0, 90.0, 320.0, 180.0);
+        let (x, y, w, h) = rect;
+        let center = Pos2::new(x + w / 2.0, y + h / 2.0);
+        let (phase, scale, t) = (0.1, 2.0, border::WIDTH);
+        let region = Rect::from_min_size(Pos2::new(x, y), egui::vec2(w, h));
+        let (inner, outer) = border::radii(region);
+        for turned in [0.0, 0.25, 0.6] {
+            // The whole border, put together from its strips.
+            let size = |len: f32| ((len + 2.0 * t) * scale as f32) as u32;
+            let mut frame = image::RgbaImage::new(size(w), size(h));
+            let mut worst = 0;
+            for strip in border_strips(rect, border_corner(rect)) {
+                let img = with_layers(|| {
+                    let (root, gradient) = border_layer::strip(rect, strip, phase, Some(0.0), scale);
+                    // SAFETY: "spin" is the CABasicAnimation `border_layer` adds.
+                    let spin = unsafe { gradient.animationForKey(ns_string!("spin")) }.expect("turning");
+                    let spin = spin.downcast::<CABasicAnimation>().unwrap();
+                    let per_turn = spin.toValue().unwrap().downcast::<NSNumber>().unwrap().as_f64();
+                    // Held where the animation has it `turned` turns on.
+                    gradient.removeAllAnimations();
+                    let a = per_turn * turned as f64;
+                    gradient.setAffineTransform(CGAffineTransform { a: a.cos(), b: a.sin(), c: -a.sin(), d: a.cos(), tx: 0.0, ty: 0.0 });
+                    render_layer(&root, strip, scale)
+                });
+                for (i, j, px) in img.enumerate_pixels() {
+                    let p = Pos2::new(strip.0 + (i as f32 + 0.5) / scale as f32, strip.1 + (j as f32 + 0.5) / scale as f32);
+                    // Clear outside the band, solid inside it; its smoothed
+                    // edges (round the corners too) are in between.
+                    let (beyond, within) = (border::rounded_distance(p, region.expand(t), outer), border::rounded_distance(p, region, inner));
+                    if beyond > 0.5 || within < -0.5 {
+                        assert!(px[3] <= 2, "showing at {p:?}, outside the band");
+                        continue;
+                    }
+                    if beyond > -0.5 || within < 0.5 {
+                        continue;
+                    }
+                    // Core Animation draws a cone at 254 of 255: opaque enough.
+                    assert!(px[3] >= 254, "a hole at {p:?}");
+                    let want = border::color_at(p, center, phase + turned);
+                    let err = (0..3).map(|c| px[c].abs_diff([want.r(), want.g(), want.b()][c])).max().unwrap();
+                    worst = worst.max(err);
+                    let at = |v: f32, from: f32| ((v - from + t) * scale as f32) as u32;
+                    frame.put_pixel(at(p.x, x), at(p.y, y), image::Rgba([px[0], px[1], px[2], 255]));
+                }
+            }
+            assert!(worst <= 3, "{worst} levels off the gradient after {turned} of a turn");
+            // No seams: neighbouring pixels anywhere on the border are alike.
+            for (i, j, px) in frame.enumerate_pixels().filter(|(_, _, px)| px[3] > 0) {
+                for (ni, nj) in [(i + 1, j), (i, j + 1)] {
+                    if let Some(n) = frame.get_pixel_checked(ni, nj).filter(|n| n[3] > 0) {
+                        let step = (0..3).map(|c| px[c].abs_diff(n[c])).max().unwrap();
+                        assert!(step <= 3, "a seam of {step} levels at ({i}, {j})");
+                    }
+                }
+            }
+            if let Ok(dir) = std::env::var("BORDER_PREVIEW_DIR") {
+                frame.save(std::path::Path::new(&dir).join(format!("recording-border-{turned}.png"))).unwrap();
+            }
+        }
+    }
+
+    /// Under reduced motion a strip's gradient holds still: no animation.
+    /// Otherwise it turns clockwise, evenly and forever, a turn every
+    /// `TURN_SECS` from the shared start.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_recording_border_layers_turn_unless_motion_is_reduced() {
+        use objc2::rc::Retained;
+        use objc2::runtime::AnyObject;
+        use objc2_foundation::{NSNumber, ns_string};
+        use objc2_quartz_core::{CABasicAnimation, CAMediaTiming, CAMediaTimingFunction, kCAMediaTimingFunctionLinear};
+
+        with_layers(|| {
+            let rect = (0.0, 0.0, 200.0, 100.0);
+            let strip = border_strips(rect, border_corner(rect))[2];
+            let (_, still) = border_layer::strip(rect, strip, 0.3, None, 2.0);
+            assert!(still.animationKeys().is_none_or(|keys| keys.is_empty()));
+
+            let (_, turning) = border_layer::strip(rect, strip, 0.3, Some(42.0), 2.0);
+            assert_eq!(turning.animationKeys().map(|keys| keys.len()), Some(1));
+            // SAFETY: "spin" is the CABasicAnimation `border_layer` adds.
+            let spin = unsafe { turning.animationForKey(ns_string!("spin")) }.unwrap().downcast::<CABasicAnimation>().unwrap();
+            let number = |v: Option<Retained<AnyObject>>| v.unwrap().downcast::<NSNumber>().unwrap().as_f64();
+            assert_eq!(spin.keyPath().unwrap().to_string(), "transform.rotation.z");
+            assert_eq!((number(spin.fromValue()), number(spin.toValue())), (0.0, -std::f64::consts::TAU));
+            assert_eq!(spin.duration(), border::TURN_SECS);
+            assert_eq!(spin.repeatCount(), f32::INFINITY);
+            assert_eq!(spin.beginTime(), 42.0);
+            assert_eq!(spin.preferredFrameRateRange().preferred, 30.0);
+            // SAFETY: reads a constant that Core Animation exports.
+            let linear = CAMediaTimingFunction::functionWithName(unsafe { kCAMediaTimingFunctionLinear });
+            assert_eq!(spin.timingFunction(), Some(linear));
+        });
+    }
+
+    /// Nothing keeps a strip's layers alive once Rega lets go of them, not
+    /// even their endless animation.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_recording_border_layers_are_released() {
+        use objc2::rc::Weak;
+        let rect = (10.0, 10.0, 300.0, 200.0);
+        let (root, gradient) = with_layers(|| {
+            let (root, gradient) = border_layer::strip(rect, border_strips(rect, border_corner(rect))[1], 0.0, Some(0.0), 2.0);
+            (Weak::from_retained(&root), Weak::from_retained(&gradient))
+        });
+        assert!(root.load().is_none() && gradient.load().is_none());
     }
 }
