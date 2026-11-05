@@ -535,7 +535,7 @@ mod tests {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1400.0, 800.0))),
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| {
+            let mut out = ctx.run_ui(input, |ui| {
                 egui::Panel::top("bar").show(ui, |ui| {
                     toolbar_row(ui, |ui| {
                         let mut found = vec![];
@@ -558,6 +558,7 @@ mod tests {
                     });
                 });
             });
+            out.textures_delta.clear();
         }
         let docks = &rects[1..];
         for r in docks {

@@ -111,12 +111,13 @@ Rega also lives in the **menu bar** (macOS) or **system tray** (Windows), so cap
 
 ### Requirements
 
-- macOS 12.3 or later (Apple Silicon or Intel), or Windows 10 / 11 (64-bit)
+- macOS 12.3 or later (Apple Silicon or Intel), or Windows 10 / 11 (64-bit; on N editions, MP4 video needs Microsoft's free Media Feature Pack)
 - [Rust](https://rustup.rs) 1.88 or later
 - macOS: Xcode Command Line Tools (`xcode-select --install`)
-- Windows: Visual Studio Build Tools (C++ workload)
+- Windows: Visual Studio Build Tools (C++ workload), and LLVM for the [`minimp4-sys`](https://crates.io/crates/minimp4-sys) bindings: `winget install LLVM.LLVM`, or the "C++ Clang tools for Windows" component
+- For the universal macOS build: `rustup target add aarch64-apple-darwin x86_64-apple-darwin`
 
-No other system libraries are needed — the H.264 encoder is compiled from source.
+MP4 video uses the H.264 codec built into the operating system (VideoToolbox on macOS, Media Foundation on Windows), so Rega ships no H.264 encoder of its own.
 
 ### Build the app
 
@@ -234,7 +235,7 @@ Rega is a single native binary built on [egui](https://github.com/emilk/egui) (G
 | UI & design system | `eframe`/`egui` with a custom theme (`src/theme.rs`) |
 | Screen & window capture | [`xcap`](https://crates.io/crates/xcap) |
 | Annotation export | [`tiny-skia`](https://crates.io/crates/tiny-skia) + [`ab_glyph`](https://crates.io/crates/ab_glyph) — exported text matches the editor exactly |
-| Video | OpenH264 (MP4) and the [`gif`](https://crates.io/crates/gif) crate, encoded on a background thread |
+| Video | H.264 through the system codec (VideoToolbox on macOS, Media Foundation on Windows), written to MP4 with [minimp4](https://github.com/lieff/minimp4) (through [`minimp4-sys`](https://crates.io/crates/minimp4-sys)); GIF with the [`gif`](https://crates.io/crates/gif) crate; frames scaled with SIMD by [`pic-scale`](https://crates.io/crates/pic-scale); encoded on a background thread |
 | OCR | Apple Vision via [`objc2-vision`](https://crates.io/crates/objc2-vision) |
 | Global shortcuts & menu bar | [`global-hotkey`](https://crates.io/crates/global-hotkey), [`tray-icon`](https://crates.io/crates/tray-icon) |
 
@@ -252,6 +253,9 @@ src/
 │   ├── model.rs       annotation data model (serializable)
 │   └── render.rs      flattening annotations into the final image
 ├── recorder.rs        video capture and MP4 / GIF encoding
+├── h264/              H.264 through the system codec (VideoToolbox / Media Foundation)
+├── resize.rs          frame scaling for recordings and GIFs
+├── player.rs          video player, trimming and Save as GIF
 ├── scroll.rs          scrolling capture and frame stitching
 ├── ocr.rs             text recognition
 ├── shortcuts.rs       customizable global shortcuts
@@ -266,6 +270,8 @@ cargo test --release          # unit tests: rendering, export formats, OCR, stit
 cargo clippy --release
 ```
 
+Video goes through the OS codec, so the H.264 tests exercise whichever platform they run on. The Windows backend can be cross-compiled from a Mac (`scripts/package-windows-cross.sh`) but only runs on Windows: before a release, run `cargo test --release -- h264 recorder player` on a Windows 10/11 PC.
+
 The screenshots in this README are rendered **off-screen** from the real UI with made-up demo content, using [`egui_kittest`](https://crates.io/crates/egui_kittest). To regenerate them after a UI change:
 
 ```sh
@@ -279,7 +285,7 @@ They are written to `docs/images/`.
 - [x] Windows build
 - [ ] Audio in recordings
 - [ ] Capturing across several displays at once
-- [ ] Load Cisco's prebuilt OpenH264 at runtime (H.264 patent licensing)
+- [x] H.264 through the operating system's codec instead of a bundled encoder (patent licensing)
 - [ ] Share links / cloud upload
 
 ## Credits

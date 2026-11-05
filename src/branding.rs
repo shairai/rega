@@ -49,20 +49,21 @@ pub fn write_ico(path: &Path) -> Result<()> {
 }
 
 fn logo_gradient(from: (f32, f32), to: (f32, f32)) -> Paint<'static> {
-    let mut paint = Paint::default();
-    paint.anti_alias = true;
-    paint.shader = LinearGradient::new(
-        Point::from_xy(from.0, from.1),
-        Point::from_xy(to.0, to.1),
-        vec![
-            GradientStop::new(0.0, Color::from_rgba8(LOGO_FROM[0], LOGO_FROM[1], LOGO_FROM[2], 255)),
-            GradientStop::new(1.0, Color::from_rgba8(LOGO_TO[0], LOGO_TO[1], LOGO_TO[2], 255)),
-        ],
-        SpreadMode::Pad,
-        Transform::identity(),
-    )
-    .expect("gradient");
-    paint
+    Paint {
+        anti_alias: true,
+        shader: LinearGradient::new(
+            Point::from_xy(from.0, from.1),
+            Point::from_xy(to.0, to.1),
+            vec![
+                GradientStop::new(0.0, Color::from_rgba8(LOGO_FROM[0], LOGO_FROM[1], LOGO_FROM[2], 255)),
+                GradientStop::new(1.0, Color::from_rgba8(LOGO_TO[0], LOGO_TO[1], LOGO_TO[2], 255)),
+            ],
+            SpreadMode::Pad,
+            Transform::identity(),
+        )
+        .expect("gradient"),
+        ..Paint::default()
+    }
 }
 
 fn fill(pm: &mut Pixmap, paint: &Paint) {
@@ -92,18 +93,20 @@ fn overlay_icon(img: &mut RgbaImage, size: u32, x: f32, y: f32) {
 fn dmg_background(k: u32) -> RgbaImage {
     let s = k as f32;
     let mut pm = Pixmap::new(DMG_W * k, DMG_H * k).expect("dmg size");
-    let mut bg = Paint::default();
-    bg.shader = LinearGradient::new(
-        Point::from_xy(0.0, 0.0),
-        Point::from_xy(0.0, DMG_H as f32 * s),
-        vec![
-            GradientStop::new(0.0, Color::from_rgba8(252, 251, 255, 255)),
-            GradientStop::new(1.0, Color::from_rgba8(240, 236, 252, 255)),
-        ],
-        SpreadMode::Pad,
-        Transform::identity(),
-    )
-    .expect("gradient");
+    let bg = Paint {
+        shader: LinearGradient::new(
+            Point::from_xy(0.0, 0.0),
+            Point::from_xy(0.0, DMG_H as f32 * s),
+            vec![
+                GradientStop::new(0.0, Color::from_rgba8(252, 251, 255, 255)),
+                GradientStop::new(1.0, Color::from_rgba8(240, 236, 252, 255)),
+            ],
+            SpreadMode::Pad,
+            Transform::identity(),
+        )
+        .expect("gradient"),
+        ..Paint::default()
+    };
     fill(&mut pm, &bg);
 
     // Arrow between the two icons (icons are 128 pt wide, centered on their x).

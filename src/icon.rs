@@ -48,19 +48,21 @@ pub const LOGO_TO: [u8; 3] = [124, 77, 255];
 pub fn app_icon(size: u32) -> (Vec<u8>, u32, u32) {
     let mut pixmap = Pixmap::new(size, size).expect("icon size");
     let s = size as f32;
-    let mut bg = Paint::default();
-    bg.anti_alias = true;
-    bg.shader = tiny_skia::LinearGradient::new(
-        tiny_skia::Point::from_xy(0.0, 0.0),
-        tiny_skia::Point::from_xy(s, s),
-        vec![
-            tiny_skia::GradientStop::new(0.0, tiny_skia::Color::from_rgba8(LOGO_FROM[0], LOGO_FROM[1], LOGO_FROM[2], 255)),
-            tiny_skia::GradientStop::new(1.0, tiny_skia::Color::from_rgba8(LOGO_TO[0], LOGO_TO[1], LOGO_TO[2], 255)),
-        ],
-        tiny_skia::SpreadMode::Pad,
-        Transform::identity(),
-    )
-    .expect("gradient");
+    let bg = Paint {
+        anti_alias: true,
+        shader: tiny_skia::LinearGradient::new(
+            tiny_skia::Point::from_xy(0.0, 0.0),
+            tiny_skia::Point::from_xy(s, s),
+            vec![
+                tiny_skia::GradientStop::new(0.0, tiny_skia::Color::from_rgba8(LOGO_FROM[0], LOGO_FROM[1], LOGO_FROM[2], 255)),
+                tiny_skia::GradientStop::new(1.0, tiny_skia::Color::from_rgba8(LOGO_TO[0], LOGO_TO[1], LOGO_TO[2], 255)),
+            ],
+            tiny_skia::SpreadMode::Pad,
+            Transform::identity(),
+        )
+        .expect("gradient"),
+        ..Paint::default()
+    };
     if let Some(rect) = Rect::from_xywh(s * 0.04, s * 0.04, s * 0.92, s * 0.92) {
         let r = s * 0.22;
         let path = rounded_rect(rect, r);

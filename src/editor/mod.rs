@@ -233,6 +233,9 @@ fn paint_resize_handle(painter: &egui::Painter, c: Pos2, hot: bool) {
 /// Above this many pixels, moving a blur/spotlight re-rasters on release only.
 const LIVE_RASTER_PIXELS: u64 = 8_000_000;
 
+/// The largest image Resize makes (width, height).
+const MAX_RESIZE: (u32, u32) = (16_000, 40_000);
+
 /// What `render::apply_raster` depends on, to tell whether the canvas texture is stale.
 fn raster_key(anns: &[Annotation]) -> String {
     let raster: Vec<&Annotation> = anns.iter().filter(|a| a.is_raster()).collect();
@@ -614,12 +617,17 @@ impl Editor {
         }
     }
 
-    fn resize(&mut self, factor: f32) {
+    /// The image's size scaled by `factor`, or `None` past [`MAX_RESIZE`].
+    fn scaled_size(&self, factor: f32) -> Option<(u32, u32)> {
         let w = ((self.base.width() as f32 * factor).round() as u32).max(1);
         let h = ((self.base.height() as f32 * factor).round() as u32).max(1);
-        if w > 16_000 || h > 40_000 {
-            return;
-        }
+        (w <= MAX_RESIZE.0 && h <= MAX_RESIZE.1).then_some((w, h))
+    }
+
+    /// Scale the image and its marks by `factor`; returns the new size, or
+    /// `None` (and leaves the image alone) when that would be too large.
+    fn resize(&mut self, factor: f32) -> Option<(u32, u32)> {
+        let (w, h) = self.scaled_size(factor)?;
         self.push_undo();
         self.base = Arc::new(image::imageops::resize(&*self.base, w, h, image::imageops::FilterType::Lanczos3));
         self.base_changed = true;
@@ -628,6 +636,7 @@ impl Editor {
         }
         self.texture_dirty = true;
         self.fit = true;
+        Some((w, h))
     }
 
     /// Right-click menu on the canvas.
@@ -1155,12 +1164,22 @@ impl Editor {
             {
                 action = EditorAction::Ocr(self.flatten());
             }
-            let resize = theme::toolbar_item(ui, icon::RESIZE, "Resize", ItemStyle::Normal, true).on_hover_text("Scale the image");
+            let resize = theme::toolbar_item(ui, icon::RESIZE, "Resize", ItemStyle::Normal, true)
+                .on_hover_text("Change the image's size in pixels, and so what Copy, Save and Export produce");
             egui::Popup::menu(&resize).show(|ui| {
-                ui.set_min_width(150.0);
+                let (w, h) = self.size();
+                theme::section(ui, "Resize image");
+                ui.label(egui::RichText::new(format!("Now {w} × {h} px")).color(theme::TEXT_MUTED));
                 for (label, f) in [("50%", 0.5), ("75%", 0.75), ("150%", 1.5), ("200%", 2.0)] {
-                    if ui.button(label).clicked() {
-                        self.resize(f);
+                    let size = self.scaled_size(f);
+                    let hint = match size {
+                        Some((w, h)) => format!("{w} × {h} px"),
+                        None => format!("Too large: at most {} × {} px", MAX_RESIZE.0, MAX_RESIZE.1),
+                    };
+                    if menu_row(ui, label, &hint, size.is_some()).clicked()
+                        && let Some((w, h)) = self.resize(f)
+                    {
+                        action = EditorAction::Toast(format!("Resized to {w} × {h} px"));
                         ui.close();
                     }
                 }
@@ -1175,7 +1194,7 @@ impl Editor {
                 theme::section(ui, "Export as");
                 for fmt in ExportFormat::ALL {
                     let (name, hint) = fmt.describe();
-                    if export_row(ui, name, hint).clicked() {
+                    if menu_row(ui, name, hint, true).clicked() {
                         ui.close();
                         action = self.export_as(fmt);
                     }
@@ -2092,15 +2111,21 @@ fn pdf_with_image(img: &RgbaImage) -> Result<Vec<u8>> {
 }
 
 /// A row in the Export menu: format name with a hint underneath.
-fn export_row(ui: &mut egui::Ui, name: &str, hint: &str) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(250.0, 42.0), Sense::click());
+/// A two-line menu row: `name`, with `hint` under it. A disabled row is drawn
+/// faint and can't be clicked.
+fn menu_row(ui: &mut egui::Ui, name: &str, hint: &str, enabled: bool) -> egui::Response {
+    use crate::theme::{SURFACE_3, TEXT, TEXT_FAINT, TEXT_MUTED};
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(250.0, 42.0), sense);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, format!("{name}, {hint}")));
     let p = ui.painter();
-    if resp.hovered() {
-        p.rect_filled(rect, 8.0, crate::theme::SURFACE_3);
+    if enabled && resp.hovered() {
+        p.rect_filled(rect, 8.0, SURFACE_3);
     }
-    p.text(rect.left_top() + Vec2::new(12.0, 7.0), Align2::LEFT_TOP, name, crate::theme::medium(13.5), crate::theme::TEXT);
-    p.text(rect.left_bottom() + Vec2::new(12.0, -7.0), Align2::LEFT_BOTTOM, hint, FontId::proportional(11.5), crate::theme::TEXT_MUTED);
-    resp.on_hover_cursor(CursorIcon::PointingHand)
+    let (name_color, hint_color) = if enabled { (TEXT, TEXT_MUTED) } else { (TEXT_FAINT, TEXT_FAINT) };
+    p.text(rect.left_top() + Vec2::new(12.0, 7.0), Align2::LEFT_TOP, name, crate::theme::medium(13.5), name_color);
+    p.text(rect.left_bottom() + Vec2::new(12.0, -7.0), Align2::LEFT_BOTTOM, hint, FontId::proportional(11.5), hint_color);
+    if enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp }
 }
 
 fn snap_45(a: P, p: P) -> P {
@@ -2302,6 +2327,7 @@ fn rtl_arrow_keys(ui: &egui::Ui, id: egui::Id, text: &str) {
 /// uses (egui's own layout only reorders Hebrew per word). `range` = selection
 /// start, end and caret as logical char indices; the caret and selection are
 /// placed by logical position.
+#[allow(clippy::too_many_arguments)]
 fn paint_visual_text(
     painter: &egui::Painter,
     origin: Pos2,
@@ -2550,7 +2576,7 @@ mod tests {
             .with_size(Vec2::new(520.0, 160.0))
             .with_pixels_per_point(2.0)
             .with_accessibility_check(false)
-            .with_context_setup(|ctx| crate::theme::install(ctx))
+            .with_context_setup(crate::theme::install)
             .wgpu()
             .build_ui(move |ui| {
                 ed.canvas(ui);
@@ -2592,14 +2618,55 @@ mod tests {
         let pasted = egui::ColorImage::new([20, 10], vec![Color32::RED; 200]);
         let mut input = egui::RawInput::default();
         input.events.push(egui::Event::PasteImage(Arc::new(pasted)));
-        let _ = ctx.run_ui(input, |ui| {
+        let mut out = ctx.run_ui(input, |ui| {
             ed.end_frame(ui.ctx());
         });
+        out.textures_delta.clear();
         assert_eq!(ed.anns.len(), 1);
         let Kind::Image { w, h, img, .. } = &ed.anns[0].kind else { panic!("expected an image layer") };
         assert_eq!((img.width(), img.height()), (20, 10));
         assert_eq!((*w, *h), (20.0, 10.0)); // small pastes stay 1:1
         assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
         assert_eq!(ed.selected, Some(0));
+    }
+
+    /// Resize says what it does: the menu shows the image's size and what
+    /// each choice makes of it, a choice is confirmed with the new size, and
+    /// one that would be too large can't be picked.
+    #[test]
+    fn resize_shows_and_reports_sizes() {
+        use egui_kittest::kittest::Queryable;
+        struct State {
+            ed: Editor,
+            toast: Option<String>,
+        }
+        let resize_menu = |width: u32, height: u32| {
+            let ed = Editor::new(PathBuf::from("unused.png"), RgbaImage::new(width, height), None, true);
+            let mut h = egui_kittest::Harness::builder().with_size(Vec2::new(1000.0, 600.0)).with_context_setup(crate::theme::install).build_ui_state(
+                |ui, s: &mut State| {
+                    if let EditorAction::Toast(msg) = s.ed.top_actions(ui) {
+                        s.toast = Some(msg);
+                    }
+                },
+                State { ed, toast: None },
+            );
+            h.get_by_label("Resize").click();
+            h.run();
+            h
+        };
+
+        let mut h = resize_menu(400, 300);
+        h.get_by_label("Now 400 × 300 px");
+        h.get_by_label("200%, 800 × 600 px");
+        h.get_by_label("50%, 200 × 150 px").click();
+        h.run();
+        assert_eq!(h.state().ed.size(), (200, 150));
+        assert_eq!(h.state().toast.as_deref(), Some("Resized to 200 × 150 px"));
+
+        let mut h = resize_menu(12_000, 100);
+        h.get_by_label("150%, Too large: at most 16000 × 40000 px").click();
+        h.run();
+        assert_eq!(h.state().ed.size(), (12_000, 100), "a choice past the limit does nothing");
+        assert_eq!(h.state().toast, None);
     }
 }

@@ -87,9 +87,7 @@ pub fn visual_chars(line: &str) -> Vec<VisualChar> {
     // Byte offset -> char index.
     let mut char_at = vec![0; line.len() + 1];
     for (ci, (bi, c)) in line.char_indices().enumerate() {
-        for b in bi..bi + c.len_utf8() {
-            char_at[b] = ci;
-        }
+        char_at[bi..bi + c.len_utf8()].fill(ci);
     }
     let info = unicode_bidi::BidiInfo::new(line, None);
     let mut out = Vec::new();
@@ -170,7 +168,7 @@ pub fn measure_text(text: &str, size: f32) -> (f32, f32) {
 
 fn to_pixmap(img: &RgbaImage) -> Pixmap {
     let mut pm = Pixmap::new(img.width(), img.height()).expect("pixmap size");
-    for (dst, src) in pm.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(img.as_raw().chunks_exact(4)) {
+    for (dst, src) in pm.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(img.as_raw().as_chunks::<4>().0) {
         let a = src[3] as u32;
         dst[0] = (src[0] as u32 * a / 255) as u8;
         dst[1] = (src[1] as u32 * a / 255) as u8;
@@ -696,7 +694,7 @@ mod tests {
         let base = RgbaImage::from_pixel(200, 100, Px([255, 255, 255, 255]));
         let pasted = std::sync::Arc::new(RgbaImage::from_pixel(10, 10, Px([0, 0, 255, 255])));
         let layer = ann(Kind::Image { pos: P::new(50.0, 20.0), w: 40.0, h: 40.0, img: pasted });
-        let out = render(&base, &[layer.clone()], &Effects::default());
+        let out = render(&base, std::slice::from_ref(&layer), &Effects::default());
         assert_eq!(out.get_pixel(70, 40).0, [0, 0, 255, 255]); // inside the scaled layer
         assert_eq!(out.get_pixel(10, 10).0, [255, 255, 255, 255]); // untouched canvas
         // Layers survive a save/load round trip.

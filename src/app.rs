@@ -22,8 +22,8 @@ use crate::library::{self, Item, ItemKind};
 use crate::ocr;
 use crate::overlay::{Outcome, Overlay, Purpose};
 use crate::platform;
-use crate::player::{Player, PlayerAction};
-use crate::recorder::{RecordConfig, Recorder};
+use crate::player::{BackgroundSaves, Player, PlayerAction};
+use crate::recorder::{Finished, RecordConfig, Recorder};
 use crate::scroll::{self, ScrollMsg};
 use crate::shortcuts::{self, Action};
 
@@ -96,6 +96,9 @@ pub struct RegaApp {
     _menu_bar: Option<tray_icon::menu::Menu>,
 
     toast: Option<(String, Instant)>,
+    /// Copies still being saved by players that have closed: they finish
+    /// here, and are reported (see `report_background_saves`).
+    saves: BackgroundSaves,
     ocr_rx: Option<Receiver<anyhow::Result<String>>>,
     ocr_text: Option<String>,
     show_settings: bool,
@@ -150,6 +153,15 @@ impl RegaApp {
             app.settings.save();
             std::thread::spawn(capture::probe_screen_access);
         }
+        // Partial copies left by a save that a crash or a forced quit cut
+        // short. Off the UI thread: the folder may be large, or on a network.
+        let dir = app.settings.save_dir.clone();
+        std::thread::spawn(move || {
+            let removed = library::remove_stale_parts(&dir);
+            if removed > 0 {
+                log::info!("removed {removed} unfinished copies from {}", dir.display());
+            }
+        });
         let failed = app.apply_hotkeys();
         if !failed.is_empty() && app.toast.is_none() {
             app.toast(format!("Shortcut unavailable: {}", failed.join(", ")));
@@ -208,6 +220,7 @@ impl RegaApp {
             tray,
             _menu_bar: menu_bar,
             toast: hotkey_error.map(|e| (e, Instant::now())),
+            saves: BackgroundSaves::default(),
             ocr_rx: None,
             ocr_text: None,
             show_settings: false,
@@ -495,17 +508,27 @@ impl RegaApp {
             AppEvent::CloseItem => self.close_current(ctx),
             AppEvent::DeleteItem => self.delete_current(),
             AppEvent::Quit => {
-                self.autosave_editor();
-                if let Activity::Recording(rec) | Activity::Finishing(rec) = &mut self.activity {
-                    // Exiting mid-write would leave an unplayable video with no index.
-                    if rec.finish_blocking(Duration::from_secs(30)).is_none() {
-                        log::warn!("quit before the recording finished saving");
-                    }
-                }
+                self.prepare_to_quit();
                 ctx.send_viewport_cmd(ViewportCommand::Close);
                 std::process::exit(0);
             }
         }
+    }
+
+    /// Leave nothing half-written on quitting: save the open image, finish a
+    /// recording, and stop the copies still being saved.
+    fn prepare_to_quit(&mut self) {
+        self.autosave_editor();
+        if let Activity::Recording(rec) | Activity::Finishing(rec) = &mut self.activity {
+            // Exiting mid-write would leave an unplayable video with no index.
+            if rec.finish_blocking(Duration::from_secs(30)).is_none() {
+                log::warn!("quit before the recording finished saving");
+            }
+        }
+        // A copy could take minutes to finish; cancelled, it removes its
+        // partial file. Closing the player hands its save over with the rest.
+        self.mode = Mode::Home;
+        crate::player::cancel_background_saves(&self.saves, Duration::from_secs(5));
     }
 
     fn start_capture(&mut self, ctx: &egui::Context, purpose: Purpose, full: bool) {
@@ -586,6 +609,11 @@ impl RegaApp {
                         self.finish_image(ctx, frame, snap.image);
                     }
                     Ok(snap) => {
+                        if purpose == Purpose::Video && self.settings.video_format == VideoFormat::Mp4 {
+                            // The codec starts up while the user picks the region,
+                            // not on the recording's first frames.
+                            crate::h264::warm_up();
+                        }
                         let (origin, size) = (snap.origin, snap.size);
                         self.activity = Activity::Selecting(Box::new(Overlay::new(ctx, snap, purpose)));
                         self.show_overlay(ctx, frame, origin, size);
@@ -593,6 +621,13 @@ impl RegaApp {
                 }
             }
             Activity::Recording(rec) => {
+                if rec.has_ended() {
+                    // It stopped by itself (no codec, a full disk, the screen
+                    // gone): end it as Stop would and say how it went now.
+                    self.stop_recording(ctx);
+                    self.advance_activity(ctx, frame);
+                    return;
+                }
                 let secs = rec.elapsed().as_secs();
                 let title = format!("● {}:{:02}", secs / 60, secs % 60);
                 self.set_tray_title(Some(&title));
@@ -604,7 +639,7 @@ impl RegaApp {
                     self.activity = Activity::Idle;
                     self.set_tray_title(None);
                     match result {
-                        Ok(path) => {
+                        Ok(Finished::Saved { path, stopped_early }) => {
                             self.refresh_library();
                             if self.settings.focus_after_capture {
                                 // Open Rega on the new video.
@@ -612,11 +647,20 @@ impl RegaApp {
                                 self.open_video(path.clone());
                             }
                             self.after_capture(ctx, frame);
-                            self.toast(format!("Video saved: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                            self.toast(match stopped_early {
+                                Some(reason) => format!("Video saved, but the recording stopped early: {reason}"),
+                                None => format!("Video saved: {}", path.file_name().unwrap_or_default().to_string_lossy()),
+                            });
+                        }
+                        Ok(Finished::Discarded) => {
+                            self.return_to_rest(ctx, frame);
+                            self.toast("Recording discarded");
                         }
                         Err(e) => {
-                            self.return_to_rest(ctx, frame);
-                            self.toast(format!("{e:#}"));
+                            // Shown even when it was started from a shortcut or
+                            // the tray: nothing else would say the video is lost.
+                            self.show_normal(ctx, frame);
+                            self.toast(format!("Recording failed: {e:#}"));
                         }
                     }
                 }
@@ -646,7 +690,7 @@ impl RegaApp {
         }
     }
 
-    fn on_selection(&mut self, ctx: &egui::Context, frame: &eframe::Frame, overlay: Box<Overlay>, rect: Rect) {
+    fn on_selection(&mut self, ctx: &egui::Context, frame: &eframe::Frame, overlay: &Overlay, rect: Rect) {
         let snap = &overlay.snap;
         match overlay.purpose {
             Purpose::Image => {
@@ -794,10 +838,29 @@ impl RegaApp {
     fn open_video(&mut self, path: PathBuf) {
         self.autosave_editor();
         match Player::open(&self.ctx, path.clone()) {
-            Ok(player) => self.mode = Mode::Video(Box::new(player)),
+            Ok(mut player) => {
+                // A save still running when it closes goes on; the app reports it.
+                player.hand_saves_to(self.saves.clone());
+                self.mode = Mode::Video(Box::new(player));
+            }
             Err(e) => {
                 log::warn!("in-app preview failed: {e:#}");
                 platform::open_path(&path);
+            }
+        }
+    }
+
+    /// Say how the saves that outlived their player went. A new copy is
+    /// listed but not opened: the user has moved on.
+    fn report_background_saves(&mut self) {
+        for action in crate::player::poll_background_saves(&self.saves) {
+            match action {
+                PlayerAction::None => {}
+                PlayerAction::Saved(path) => {
+                    self.refresh_library();
+                    self.toast(format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                }
+                PlayerAction::Failed(msg) => self.toast(msg),
             }
         }
     }
@@ -1945,12 +2008,13 @@ impl RegaApp {
                 });
                 ui.add_space(12.0);
                 theme::section(ui, "Built with");
+                // The video libraries on a line of their own: one line won't fit.
                 ui.label(
-                    egui::RichText::new("Rust · egui · xcap · tiny-skia · ab_glyph · OpenH264 · gif")
+                    egui::RichText::new("Rust · egui · xcap · tiny-skia · ab_glyph\nminimp4 · gif · pic-scale")
                         .color(theme::TEXT_MUTED),
                 );
                 ui.label(
-                    egui::RichText::new("OpenH264 Video Codec provided by Cisco Systems, Inc.").small().color(theme::TEXT_FAINT),
+                    egui::RichText::new("MP4 video uses the H.264 codec built into macOS and Windows.").small().color(theme::TEXT_FAINT),
                 );
                 ui.add_space(8.0);
                 theme::section(ui, "Credits");
@@ -2036,7 +2100,7 @@ impl RegaApp {
             return;
         }
         let alpha = (age / 0.15).min(1.0).min((3.5 - age) / 0.3);
-        let failed = msg.contains("fail") || msg.contains("Failed") || msg.contains("Cannot");
+        let failed = msg.contains("fail") || msg.contains("Failed") || msg.contains("Cannot") || msg.contains("stopped early");
         egui::Area::new(egui::Id::unique("toast"))
             .anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -186.0 + (1.0 - alpha) * 10.0))
             .order(egui::Order::Tooltip)
@@ -2210,6 +2274,7 @@ impl eframe::App for RegaApp {
             let tex = ctx.load_texture(path.to_string_lossy(), img, egui::TextureOptions::LINEAR);
             self.thumbs.insert(path, (modified, tex));
         }
+        self.report_background_saves();
         self.advance_activity(ctx, frame);
         self.sync_capture_zoom(ctx);
 
@@ -2260,7 +2325,7 @@ impl eframe::App for RegaApp {
                 }
                 Outcome::Selected(rect) => {
                     if let Activity::Selecting(overlay) = std::mem::replace(&mut self.activity, Activity::Idle) {
-                        self.on_selection(&ctx, frame, overlay, rect);
+                        self.on_selection(&ctx, frame, &overlay, rect);
                     }
                 }
             }
@@ -2288,6 +2353,12 @@ impl eframe::App for RegaApp {
         self.about_window(&ctx);
         self.ocr_window(&ctx);
         self.toast_ui(&ctx);
+    }
+
+    /// Quitting some other way than Rega's own Quit: from the Dock, or by
+    /// logging out or shutting down.
+    fn on_exit(&mut self) {
+        self.prepare_to_quit();
     }
 }
 
@@ -2461,8 +2532,8 @@ fn spawn_thumbnailer(ctx: egui::Context) -> (Sender<(PathBuf, SystemTime)>, Rece
     let (res_tx, res_rx) = mpsc::channel();
     std::thread::spawn(move || {
         for (path, modified) in job_rx {
-            let is_mp4 = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4"));
-            let img = if is_mp4 {
+            let is_video = library::kind_of(&path) == Some(ItemKind::Video);
+            let img = if is_video {
                 match crate::player::first_frame(&path) {
                     Ok(frame) => image::DynamicImage::ImageRgba8(frame),
                     Err(_) => continue,
@@ -2488,7 +2559,15 @@ mod readme_shots;
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
     use eframe::egui;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::{Activity, RegaApp, Win};
+    use crate::recorder::{Finished, Recorder};
 
     /// Which hover check works for a card inside the bottom tray's scroll area?
     #[test]
@@ -2502,7 +2581,7 @@ mod tests {
                 ..Default::default()
             };
             input.events.push(egui::Event::PointerMoved(egui::pos2(60.0, 520.0)));
-            let _ = ctx.run_ui(input, |ui| {
+            let mut out = ctx.run_ui(input, |ui| {
                 egui::Panel::bottom("tray").exact_size(200.0).show(ui, |ui| {
                     egui::ScrollArea::horizontal().show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -2516,7 +2595,241 @@ mod tests {
                 });
                 egui::CentralPanel::default().show(ui, |_| {});
             });
+            out.textures_delta.clear();
         }
         assert!(results.1, "response hover check should see the pointer");
+    }
+
+    /// The app on its recording bar, with `rec` recording. `from_outside`: it
+    /// was started from a shortcut or the tray, so ending it goes back to the
+    /// app the user was in, unless there's something to show.
+    fn recording(name: &str, rec: Recorder, from_outside: bool) -> Harness<'static, RegaApp> {
+        let lib = std::env::temp_dir().join(format!("rega-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&lib).unwrap();
+        Harness::builder()
+            .with_size(super::BAR_SIZE)
+            .with_max_steps(400)
+            .with_accessibility_check(false)
+            .wgpu()
+            .build_eframe(move |cc| {
+                let mut app = RegaApp::demo(&cc.egui_ctx, lib);
+                // Opening the video would start the system player in a test.
+                app.settings.focus_after_capture = false;
+                app.activity = Activity::Recording(rec);
+                app.win = Win::Bar;
+                app.hidden_by_user = from_outside;
+                app
+            })
+    }
+
+    /// Step until the recording is over (its stand-in thread ends at once).
+    fn until_idle(h: &mut Harness<'_, RegaApp>) {
+        for _ in 0..200 {
+            h.step();
+            if matches!(h.state().activity, Activity::Idle) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the recording should have ended");
+    }
+
+    fn toast(h: &Harness<'_, RegaApp>) -> Option<String> {
+        h.state().toast.as_ref().map(|(msg, _)| msg.clone())
+    }
+
+    fn video(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rega-{name}-videos-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Rega 2026-11-04 at 10.00.00.mp4");
+        crate::recorder::write_test_video(&path, 10, 10, (96, 64));
+        path
+    }
+
+    /// A recording that stops by itself (the screen gone) leaves the bar at
+    /// once and says why, rather than counting on until Stop.
+    #[test]
+    fn a_recording_that_stops_by_itself_ends_at_once() {
+        let path = video("early");
+        let saved = path.clone();
+        let rec = Recorder::fake(path.clone(), move |_| {
+            Ok(Finished::Saved { path: saved, stopped_early: Some("the screen could no longer be captured".into()) })
+        });
+        let mut h = recording("early", rec, false);
+        until_idle(&mut h);
+        assert_eq!(toast(&h).as_deref(), Some("Video saved, but the recording stopped early: the screen could no longer be captured"));
+        assert!(h.state().win != Win::Bar, "the bar is gone");
+        assert!(path.exists());
+    }
+
+    /// Discard pressed as the recording stopped by itself wins: no video.
+    #[test]
+    fn discard_wins_over_a_recording_that_stopped_by_itself() {
+        let path = video("discard");
+        let saved = path.clone();
+        let rec = Recorder::fake(path.clone(), move |_| {
+            Ok(Finished::Saved { path: saved, stopped_early: Some("the screen could no longer be captured".into()) })
+        });
+        while !rec.has_ended() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        rec.discard();
+        let mut h = recording("discard", rec, false);
+        until_idle(&mut h);
+        assert_eq!(toast(&h).as_deref(), Some("Recording discarded"));
+        assert!(!path.exists());
+    }
+
+    /// A failed recording says so on screen, also one started from a
+    /// shortcut or the tray, whose window would otherwise stay hidden.
+    #[test]
+    fn a_failed_recording_says_so() {
+        for from_outside in [false, true] {
+            let rec = Recorder::fake(PathBuf::new(), |_| Err(anyhow::anyhow!("no frames were captured")));
+            let mut h = recording(&format!("failed-{from_outside}"), rec, from_outside);
+            until_idle(&mut h);
+            h.step();
+            assert_eq!(toast(&h).as_deref(), Some("Recording failed: no frames were captured"));
+            assert!(
+                h.query_by_label("Recording failed: no frames were captured").is_some(),
+                "the failure is drawn (started from outside: {from_outside})"
+            );
+        }
+    }
+
+    const WINDOW: egui::Vec2 = egui::vec2(1360.0, 840.0);
+
+    /// Rega's main window on the library folder `lib`.
+    fn main_window(lib: PathBuf) -> Harness<'static, RegaApp> {
+        Harness::builder()
+            .with_size(WINDOW)
+            .with_max_steps(400)
+            .with_accessibility_check(false)
+            .wgpu()
+            .build_eframe(move |cc| RegaApp::demo(&cc.egui_ctx, lib))
+    }
+
+    /// An empty library folder for the test `name`.
+    fn library_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rega-{name}-library-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The names of the files in `dir`, hidden ones included, sorted.
+    fn files(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    /// Start saving a trimmed copy of the open video as the user would: I
+    /// sets the In point, then a click on "Save trimmed copy", the rightmost
+    /// button of the player's bar, level with its clock. Its thread is
+    /// started on the last pass.
+    fn start_saving(h: &mut Harness<'_, RegaApp>) {
+        h.key_press(egui::Key::I);
+        h.step();
+        let clock = h.get_by_label_contains(" / ").rect();
+        let save = egui::pos2(h.ctx.content_rect().max.x - 40.0, clock.center().y);
+        h.hover_at(save);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: save, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        }
+        h.step();
+    }
+
+    /// A copy still being saved when its player closes (here, for another
+    /// video) is finished, listed and announced, but not opened: the user
+    /// has moved on.
+    #[test]
+    fn a_save_outlives_its_player() {
+        let lib = library_dir("save-on");
+        let (first, second) = (lib.join("Rega 2026-11-04 at 10.00.00.mp4"), lib.join("Rega 2026-11-04 at 11.00.00.mp4"));
+        crate::recorder::write_test_video(&first, 10, 10, (96, 64));
+        std::fs::copy(&first, &second).unwrap();
+        let mut h = main_window(lib.clone());
+        h.state_mut().open_video(first);
+        h.step();
+        start_saving(&mut h);
+        h.state_mut().open_video(second.clone());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while h.query_by_label_contains("Saved ").is_none() {
+            assert!(std::time::Instant::now() < deadline, "the copy is never reported; folder: {:?}", files(&lib));
+            std::thread::sleep(Duration::from_millis(10));
+            h.step();
+        }
+        let msg = toast(&h).unwrap();
+        let copy = lib.join(msg.strip_prefix("Saved ").unwrap());
+        assert!(h.state().library.iter().any(|i| i.path == copy), "{} is listed", copy.display());
+        assert_eq!(h.state().current_path(), Some(&second), "the copy isn't opened");
+        drop(h);
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
+    /// Quitting while a copy is being written stops it and waits for it to
+    /// clean up: neither the copy nor its partial file is left behind.
+    #[test]
+    fn quitting_cancels_a_save() {
+        let lib = library_dir("quit");
+        let name = "Rega 2026-11-04 at 10.00.00.mp4";
+        crate::recorder::write_test_video(&lib.join(name), 300, 30, (96, 64));
+        let mut h = main_window(lib.clone());
+        h.state_mut().open_video(lib.join(name));
+        h.step();
+        start_saving(&mut h);
+        // Quit once the copy's partial file is on disk.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !files(&lib).iter().any(|n| n.ends_with(".part")) {
+            assert!(std::time::Instant::now() < deadline, "the copy was never seen being written; folder: {:?}", files(&lib));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        h.state_mut().prepare_to_quit();
+        assert_eq!(files(&lib), [name]);
+        drop(h);
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
+    /// Every library video gets a thumbnail from its first frame: MOV as
+    /// well as MP4, whatever the extension's case.
+    #[test]
+    fn videos_get_thumbnails() {
+        let dir = std::env::temp_dir().join(format!("rega-thumbs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let videos = ["a.mp4", "b.mov", "C.MOV"].map(|name| dir.join(name));
+        crate::recorder::write_test_video(&videos[0], 3, 10, (96, 64));
+        for copy in &videos[1..] {
+            std::fs::copy(&videos[0], copy).unwrap();
+        }
+        let (jobs, results) = super::spawn_thumbnailer(egui::Context::default());
+        for path in &videos {
+            jobs.send((path.clone(), std::time::SystemTime::UNIX_EPOCH)).unwrap();
+        }
+        // With no jobs to come, the thumbnailer stops once these are done.
+        drop(jobs);
+        let thumbnailed: Vec<PathBuf> = results.iter().map(|(path, _, _)| path).collect();
+        assert_eq!(thumbnailed, videos);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The bar only shows whole seconds and a slow pulse: it must not
+    /// compete with the capture thread by redrawing more than 10 times a second.
+    #[test]
+    fn the_recording_bar_repaints_at_most_ten_times_a_second() {
+        let rec = Recorder::fake(PathBuf::new(), |stop| {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(Finished::Discarded)
+        });
+        let mut h = recording("repaint", rec, false);
+        for _ in 0..4 {
+            h.step();
+            let delay = h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+            assert!(delay >= Duration::from_millis(100), "repaints after {delay:?}");
+        }
+        let Activity::Recording(rec) = &h.state().activity else { panic!("still recording") };
+        rec.stop();
     }
 }

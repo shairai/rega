@@ -31,7 +31,7 @@ fn render_ui(size: Vec2, mut draw: impl FnMut(&mut egui::Ui)) -> RgbaImage {
     let mut harness = Harness::builder()
         .with_size(size)
         .with_pixels_per_point(PPP)
-        .with_context_setup(|ctx| theme::install(ctx))
+        .with_context_setup(theme::install)
         .wgpu()
         .build_ui(move |ui| draw(ui));
     for _ in 0..4 {
@@ -798,7 +798,8 @@ fn library_selection_renders() {
     }
 }
 
-/// The About window shows the name and version; saved when `ABOUT_PREVIEW_DIR` is set.
+/// The About window shows the name, version and what Rega is built with;
+/// saved when `ABOUT_PREVIEW_DIR` is set.
 #[test]
 fn about_window_renders() {
     let lib = std::env::temp_dir().join(format!("rega-about-{}", std::process::id()));
@@ -812,6 +813,8 @@ fn about_window_renders() {
         h.step();
     }
     h.get_by_label(&format!("Version {}", env!("CARGO_PKG_VERSION")));
+    // Every recorded frame is scaled with it.
+    h.get_by_label_contains("pic-scale");
     if let Ok(d) = std::env::var("ABOUT_PREVIEW_DIR") {
         h.render().unwrap().save(Path::new(&d).join("about.png")).unwrap();
     }

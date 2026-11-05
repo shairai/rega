@@ -338,6 +338,8 @@ pub fn hide_recording_frame() {
 #[cfg(not(target_os = "macos"))]
 pub fn show_recording_frame(rect: (f32, f32, f32, f32)) {
     *RECORDING_RECT.lock().unwrap() = Some(rect);
+    // New windows, which have yet to be kept out of captures.
+    FRAME_PROTECTED.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -348,12 +350,19 @@ pub fn hide_recording_frame() {
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 static RECORDING_RECT: std::sync::Mutex<Option<(f32, f32, f32, f32)>> = std::sync::Mutex::new(None);
 
+/// Which of the border's viewports were told to keep out of captures (bit
+/// `i` for strip `i`): told once each, as every viewport command also
+/// repaints its viewport, so telling it on every paint redraws it nonstop.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+static FRAME_PROTECTED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 /// Call every frame: keeps the recording border's windows alive while a
 /// recording runs (a viewport closes when it stops being shown). They are
 /// excluded from capture, so they never appear in the video.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn paint_recording_frame(ctx: &eframe::egui::Context) {
     use eframe::egui::{self, Color32, Pos2, Vec2, ViewportBuilder, ViewportId};
+    use std::sync::atomic::Ordering;
     let Some((x, y, w, h)) = *RECORDING_RECT.lock().unwrap() else { return };
     const T: f32 = 3.0;
     let (from, to) = (crate::icon::LOGO_FROM, crate::icon::LOGO_TO);
@@ -378,10 +387,80 @@ pub fn paint_recording_frame(ctx: &eframe::egui::Context) {
                 .with_position(Pos2::new(sx, sy))
                 .with_inner_size(Vec2::new(sw, sh)),
             move |ctx, _| {
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::ContentProtected(true));
+                if FRAME_PROTECTED.fetch_or(1 << i, Ordering::Relaxed) & (1 << i) == 0 {
+                    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::ContentProtected(true));
+                }
                 egui::CentralPanel::default().frame(egui::Frame::new().fill(color)).show(ctx, |_| {});
             },
         );
+    }
+}
+
+/// Run the calling thread as user-interactive work, which macOS keeps on the
+/// performance cores with its timers tight: the capture thread has frame
+/// deadlines to keep.
+#[cfg(target_os = "macos")]
+pub fn make_thread_interactive() {
+    // QOS_CLASS_USER_INTERACTIVE, from <sys/qos.h>.
+    const USER_INTERACTIVE: u32 = 0x21;
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: std::ffi::c_int) -> std::ffi::c_int;
+    }
+    // SAFETY: a plain call that changes only the calling thread's QoS class.
+    let status = unsafe { pthread_set_qos_class_self_np(USER_INTERACTIVE, 0) };
+    if status != 0 {
+        log::debug!("couldn't make the thread interactive (error {status})");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn make_thread_interactive() {}
+
+/// While alive, Windows runs Rega at full speed even when it judges it to be
+/// background work (EcoQoS: efficiency cores, low clocks), which it may well
+/// while Rega's only window is the small recording bar.
+pub struct FullSpeed(());
+
+pub fn full_speed() -> FullSpeed {
+    #[cfg(windows)]
+    set_speed_throttling(false);
+    FullSpeed(())
+}
+
+impl Drop for FullSpeed {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        set_speed_throttling(true);
+    }
+}
+
+/// Opt the process out of execution speed throttling, or (`allow`) hand the
+/// choice back to Windows.
+#[cfg(windows)]
+fn set_speed_throttling(allow: bool) {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        // A policy bit with its state bit clear turns throttling off; no
+        // policy bits leave it to the system.
+        ControlMask: if allow { 0 } else { PROCESS_POWER_THROTTLING_EXECUTION_SPEED },
+        StateMask: 0,
+    };
+    // SAFETY: `state` is a PROCESS_POWER_THROTTLING_STATE of the size given,
+    // alive for the call; the current-process pseudo handle needs no closing.
+    let result = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            (&raw const state).cast(),
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
+    if let Err(e) = result {
+        log::debug!("couldn't change power throttling: {e}");
     }
 }
 
@@ -671,3 +750,27 @@ pub fn copy_text(text: &str) -> anyhow::Result<()> {
 pub const CMD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
 /// Shift as shown in tooltips.
 pub const SHIFT: &str = if cfg!(target_os = "macos") { "⇧" } else { "Shift+" };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{self, ViewportCommand};
+
+    /// The border's windows are told once each to keep out of captures: the
+    /// command repaints its window, so repeating it would redraw them nonstop.
+    #[test]
+    fn the_recording_border_is_protected_once_per_window() {
+        let ctx = egui::Context::default();
+        *RECORDING_RECT.lock().unwrap() = Some((100.0, 100.0, 400.0, 300.0));
+        FRAME_PROTECTED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut sent = Vec::new();
+        for _ in 0..4 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| paint_recording_frame(ui.ctx()));
+            out.textures_delta.clear();
+            let commands = out.viewport_output.values().flat_map(|v| &v.commands);
+            sent.push(commands.filter(|c| matches!(c, ViewportCommand::ContentProtected(true))).count());
+        }
+        *RECORDING_RECT.lock().unwrap() = None;
+        assert_eq!(sent, [4, 0, 0, 0]);
+    }
+}

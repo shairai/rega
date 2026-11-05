@@ -13,7 +13,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      # The app is a universal binary: both Mac architectures.
       - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
       - run: ./scripts/package-macos.sh
       - uses: actions/upload-artifact@v4
         with: { name: macos, path: dist/*.dmg }
@@ -23,11 +25,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # The x86 SIMD paths Windows runs (frame scaling, the NV12 conversion) on
+      # real x86 hardware: pure CPU work, so these block the release.
+      - name: Scaling and NV12 tests
+        run: 'cargo test --release -- resize:: nv12::'
+      # The H.264 backend uses Media Foundation, which Windows Server only has
+      # as an optional feature: run its tests where it's available, without
+      # blocking the release (also run them on a Windows 10/11 PC before tagging).
+      - name: Media Foundation tests (informational)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Install-WindowsFeature Server-Media-Foundation
+          cargo test --release -- h264 recorder player
       - shell: bash
         run: |
           cargo build --release
           mkdir -p dist
           target/release/rega.exe --write-icon dist/rega.ico 256
+          target/release/rega.exe --write-branding dist
           choco install nsis -y --no-progress
           VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
           "/c/Program Files (x86)/NSIS/makensis.exe" -DVERSION="$VERSION" scripts/installer.nsi

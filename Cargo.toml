@@ -1,6 +1,6 @@
 [package]
 name = "rega"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 
@@ -17,12 +17,17 @@ enigo = "0.6.1"
 env_logger = "0.11.11"
 gif = "0.14.2"
 global-hotkey = "0.9.0"
-image = "0.25.10"
-imageproc = "0.27.0"
+# Only the formats Rega reads (library, paste) and writes (export, icon): the
+# defaults add AVIF's AV1 encoder, OpenEXR and more, about 5 MB of code.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff", "ico"] }
+# Only the blur; its defaults would turn on every image format again.
+imageproc = { version = "0.27.0", default-features = false }
 log = "0.4.35"
-minimp4 = "0.1.2"
+minimp4-sys = "0.1.1"
 mp4 = "0.14.0"
-openh264 = "0.9.9"
+# SIMD resizing of video frames; x86 paths are picked at run time. No
+# "threading": frames are resized on the capture thread.
+pic-scale = { version = "=0.7.12", default-features = false, features = ["neon", "rdm", "sse", "avx"] }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -37,20 +42,42 @@ embed-resource = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
 objc2-foundation = "0.3.2"
+objc2-video-toolbox = "0.3.2"
 objc2-vision = "0.3.2"
 raw-window-handle = "0.6"
 winit = "0.30"
 
-# Image processing and H.264 encoding are far too slow unoptimized.
+# H.264 through Media Foundation (see src/h264); Threading opts out of
+# power throttling while recording (see src/platform.rs).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+] }
+
+# Image processing and colour conversion are far too slow unoptimized.
 [profile.dev]
 opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
 
+# Optimised as one unit and stripped of symbol names: about half the size of a
+# thin-LTO build, as fast, for a minute or two more per release build. Panics
+# must still unwind: the player catches them.
 [profile.release]
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+strip = true
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot", "eframe"] }
