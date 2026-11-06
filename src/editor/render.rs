@@ -453,9 +453,16 @@ fn draw_vector(pm: &mut Pixmap, ann: &Annotation) {
         }
         Kind::Highlight { pts } => {
             let c = [color[0], color[1], color[2], HIGHLIGHT_ALPHA];
-            if let Some(path) = polyline(pts, false) {
-                let mut s = stroke(ann.width * HIGHLIGHT_WIDTH_FACTOR);
-                s.line_cap = LineCap::Square;
+            let width = ann.width * HIGHLIGHT_WIDTH_FACTOR;
+            // As on the canvas: flat ends exactly where the drag began and
+            // ended, however thick, and a round dab for a click.
+            if let [dab] = pts.as_slice() {
+                if let Some(circle) = PathBuilder::from_circle(dab.x, dab.y, width / 2.0) {
+                    pm.fill_path(&circle, &paint(c), FillRule::Winding, t, None);
+                }
+            } else if let Some(path) = polyline(pts, false) {
+                let mut s = stroke(width);
+                s.line_cap = LineCap::Butt;
                 pm.stroke_path(&path, &paint(c), &s, t, None);
             }
         }

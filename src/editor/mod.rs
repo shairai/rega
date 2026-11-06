@@ -253,6 +253,9 @@ const PALETTE: [Rgba; 8] = [
     [255, 255, 255, 255],
 ];
 
+/// The highlighter's colour until another is picked for it: the palette's yellow.
+const HIGHLIGHT_COLOR: Rgba = PALETTE[2];
+
 #[derive(Clone)]
 struct State {
     base: Arc<RgbaImage>,
@@ -279,6 +282,10 @@ pub struct Editor {
 
     tool: Tool,
     color: Color32,
+    /// The highlighter keeps a colour of its own (yellow to start), apart
+    /// from the one the other tools share. This holds whichever of the two
+    /// isn't current; `change_tool` swaps them.
+    parked_color: Color32,
     width: f32,
     font_size: f32,
     filled: bool,
@@ -359,6 +366,7 @@ impl Editor {
             redo: Vec::new(),
             tool: Tool::Arrow,
             color: to_c32(PALETTE[0]),
+            parked_color: to_c32(HIGHLIGHT_COLOR),
             width: unit,
             font_size: (unit * 7.0).round(),
             filled: false,
@@ -407,7 +415,7 @@ impl Editor {
     #[cfg(test)]
     pub(crate) fn set_demo_state(&mut self, tool_key: Key, selected: Option<usize>) {
         if let Some(t) = Tool::ALL.into_iter().find(|t| t.info().2 == tool_key) {
-            self.tool = t;
+            self.change_tool(t);
         }
         self.select(selected);
     }
@@ -510,9 +518,18 @@ impl Editor {
         }
     }
 
+    /// Make `tool` current. Moving onto the highlighter brings back its own
+    /// colour, and moving off it the other tools' colour.
+    fn change_tool(&mut self, tool: Tool) {
+        if (self.tool == Tool::Highlight) != (tool == Tool::Highlight) {
+            std::mem::swap(&mut self.color, &mut self.parked_color);
+        }
+        self.tool = tool;
+    }
+
     fn set_tool(&mut self, tool: Tool) {
         self.commit_text();
-        self.tool = tool;
+        self.change_tool(tool);
         // Picking another tool shows that tool's properties: drop a selection
         // the new tool can't edit, so the panel's changes apply to what's drawn next.
         if tool != Tool::Select
@@ -815,8 +832,12 @@ impl Editor {
         if let Some((a, b)) = self.crop_drag.take() {
             self.crop(a, b);
         }
-        if let Some(ann) = self.drawing.take()
+        if let Some(mut ann) = self.drawing.take()
             && !ann.is_degenerate() {
+                let band = ann.width * render::HIGHLIGHT_WIDTH_FACTOR;
+                if let Kind::Highlight { pts } = &mut ann.kind {
+                    *pts = model::straighten_highlight(pts, band);
+                }
                 self.push_undo();
                 if ann.is_raster() {
                     self.texture_dirty = true;
@@ -1065,7 +1086,7 @@ impl Editor {
             filled: false,
         });
         self.selected = Some(self.anns.len() - 1);
-        self.tool = Tool::Select;
+        self.change_tool(Tool::Select);
     }
 
     fn paste_from_clipboard(&mut self) -> EditorAction {
@@ -2251,7 +2272,15 @@ fn paint_annotation(
                 painter.add(Shape::closed_line(pts, stroke));
             }
         }
-        Kind::Pen { pts } => paint_stroke(painter, pts, to_screen, stroke),
+        Kind::Pen { pts } => {
+            paint_stroke(painter, pts, to_screen, stroke);
+            // Round ends, as copies and exports draw them.
+            if let [first, .., last] = pts.as_slice() {
+                for p in [first, last] {
+                    painter.circle_filled(to_screen(*p), stroke.width / 2.0, stroke.color);
+                }
+            }
+        }
         Kind::Highlight { pts } => {
             let c = Color32::from_rgba_unmultiplied(ann.color[0], ann.color[1], ann.color[2], render::HIGHLIGHT_ALPHA);
             paint_stroke(painter, pts, to_screen, Stroke::new(w * render::HIGHLIGHT_WIDTH_FACTOR, c));
@@ -2421,6 +2450,95 @@ mod tests {
         assert_eq!(parse_hex("#f80"), Some(Color32::from_rgb(0xFF, 0x88, 0x00)));
         assert_eq!(parse_hex("#EB3B3"), None);
         assert_eq!(parse_hex("#GG0000"), None);
+    }
+
+    /// A highlighter drag across text gives one straight, level band, however
+    /// the hand wobbled, so a thick band has no steps in its edges; curves and
+    /// slants drawn on purpose keep their shape.
+    #[test]
+    fn highlighter_strokes_come_out_straight() {
+        let highlight = |path: &[P]| {
+            let mut ed = blank_editor();
+            ed.set_tool(Tool::Highlight);
+            ed.width = 20.0;
+            ed.drag_begin(path[0]);
+            for &p in &path[1..] {
+                ed.drag_update(p, false);
+            }
+            ed.drag_end();
+            let Some(Kind::Highlight { pts }) = ed.anns.last().map(|a| a.kind.clone()) else { panic!("no highlight") };
+            pts
+        };
+        // Across a line of text: a few pixels of wobble and a small step.
+        let wobbly: Vec<P> = (0..=70).map(|k| {
+            let x = 100.0 + k as f32 * 5.0;
+            P::new(x, 150.0 + [0.0, 2.0, -1.5, 3.0][k % 4] - if x > 300.0 { 5.0 } else { 0.0 })
+        }).collect();
+        let pts = highlight(&wobbly);
+        assert_eq!(pts.len(), 2, "{pts:?}");
+        assert_eq!((pts[0].x, pts[1].x), (100.0, 450.0));
+        assert_eq!(pts[0].y, pts[1].y, "level");
+        // A curve drawn on purpose, round something, keeps its shape.
+        let arc: Vec<P> = (0..=40).map(|k| {
+            let a = std::f32::consts::PI * k as f32 / 40.0;
+            P::new(200.0 - 90.0 * a.cos(), 150.0 + 90.0 * a.sin())
+        }).collect();
+        let kept = highlight(&arc);
+        assert!(kept.len() > 4, "{kept:?}");
+        for p in &arc {
+            let off = kept.windows(2).map(|s| model::seg_distance(*p, s[0], s[1])).fold(f32::MAX, f32::min);
+            assert!(off <= 10.0 + 1e-3, "{p:?} is {off} from the kept curve");
+        }
+        // A deliberate slant stays slanted.
+        let slant: Vec<P> = (0..=30).map(|k| P::new(100.0 + k as f32 * 6.0, 100.0 + k as f32 * 3.0)).collect();
+        let pts = highlight(&slant);
+        assert_eq!(pts.len(), 2);
+        assert!(pts[1].y - pts[0].y > 80.0);
+    }
+
+    /// The highlighter starts yellow and keeps a colour of its own: picking
+    /// one for it leaves the other tools' colour alone, and both are back
+    /// when their tools are.
+    #[test]
+    fn the_highlighter_keeps_its_own_colour() {
+        let mut ed = blank_editor();
+        let (blue, green) = (to_c32(PALETTE[4]), to_c32(PALETTE[3]));
+        ed.set_tool(Tool::Arrow);
+        ed.set_color(blue, true);
+        ed.set_tool(Tool::Highlight);
+        assert_eq!(ed.color, to_c32(HIGHLIGHT_COLOR), "the highlighter starts yellow");
+        assert_eq!(ed.new_annotation(P::new(10.0, 10.0)).map(|a| a.color), Some(HIGHLIGHT_COLOR));
+        ed.set_color(green, true);
+        ed.set_tool(Tool::Rect);
+        assert_eq!(ed.color, blue, "the other tools keep their colour");
+        ed.set_tool(Tool::Highlight);
+        assert_eq!(ed.color, green, "the highlighter remembers its own");
+    }
+
+    /// A thick highlight behaves as the band you see: copies and exports end
+    /// it where it was drawn (as the canvas does), and it is selected, outlined
+    /// and erased across its whole thickness.
+    #[test]
+    fn thick_highlights_act_as_the_band_you_see() {
+        let (w, half) = (20.0, 20.0 * render::HIGHLIGHT_WIDTH_FACTOR / 2.0);
+        let mark = |pts: Vec<P>| Annotation { kind: Kind::Highlight { pts }, color: [235, 59, 52, 255], width: w, filled: false };
+        let band = mark(vec![P::new(100.0, 150.0), P::new(300.0, 150.0)]);
+        let base = RgbaImage::from_pixel(400, 300, image::Rgba([255, 255, 255, 255]));
+        let out = render::render(&base, std::slice::from_ref(&band), &Effects::default());
+        let tinted = |x: u32, y: u32| out.get_pixel(x, y).0 != [255, 255, 255, 255];
+        // Exported, it starts and stops where it was drawn, whatever its thickness.
+        assert!(tinted(102, 150) && tinted(298, 150) && tinted(200, 150 + half as u32 - 2));
+        assert!(!tinted(96, 150) && !tinted(304, 150), "the band runs on past its ends");
+        // Its outline and hit area are the band, not the line down its middle.
+        let (lo, hi) = band.bounds();
+        assert_eq!((lo.y, hi.y), (150.0 - half, 150.0 + half));
+        assert!(band.hit(P::new(200.0, 150.0 + half - 2.0), 0.0), "the band's edge can't be clicked");
+        assert!(!band.hit(P::new(200.0, 150.0 + half + 6.0), 4.0));
+        // A click leaves a round dab in exports, as on the canvas.
+        let dab = render::render(&base, &[mark(vec![P::new(200.0, 150.0)])], &Effects::default());
+        assert_ne!(dab.get_pixel(200, 150).0, [255, 255, 255, 255]);
+        let corner = (half * 0.85) as u32;
+        assert_eq!(dab.get_pixel(200 + corner, 150 + corner).0, [255, 255, 255, 255], "a square dab, not a round one");
     }
 
     fn blank_editor() -> Editor {

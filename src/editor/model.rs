@@ -407,11 +407,13 @@ impl Annotation {
             Kind::Stamp { pos, size, .. } => (P::new(pos.x - size / 2.0, pos.y - size / 2.0), P::new(pos.x + size / 2.0, pos.y + size / 2.0)),
             Kind::Fill { area, .. } => norm(area.0, area.1),
             Kind::Pen { pts } | Kind::Highlight { pts } => {
+                // The stroke's whole thickness, not just the line down its middle.
+                let r = self.stroke_reach();
                 let mut min = P::new(f32::MAX, f32::MAX);
                 let mut max = P::new(f32::MIN, f32::MIN);
                 for p in pts {
-                    min = P::new(min.x.min(p.x), min.y.min(p.y));
-                    max = P::new(max.x.max(p.x), max.y.max(p.y));
+                    min = P::new(min.x.min(p.x - r), min.y.min(p.y - r));
+                    max = P::new(max.x.max(p.x + r), max.y.max(p.y + r));
                 }
                 (min, max)
             }
@@ -428,12 +430,21 @@ impl Annotation {
         }
     }
 
+    /// How far a pen or highlighter stroke reaches from the line it follows:
+    /// half its drawn thickness.
+    fn stroke_reach(&self) -> f32 {
+        match self.kind {
+            Kind::Highlight { .. } => self.width * crate::editor::render::HIGHLIGHT_WIDTH_FACTOR / 2.0,
+            _ => self.width / 2.0,
+        }
+    }
+
     pub fn hit(&self, p: P, tol: f32) -> bool {
         let tol = tol + self.width / 2.0;
         match &self.kind {
             Kind::Arrow { a, b } | Kind::Line { a, b } => seg_dist(p, *a, *b) <= tol,
             Kind::Pen { pts } | Kind::Highlight { pts } => {
-                let tol = if matches!(self.kind, Kind::Highlight { .. }) { tol * 3.0 } else { tol };
+                let tol = tol - self.width / 2.0 + self.stroke_reach();
                 pts.windows(2).any(|w| seg_dist(p, w[0], w[1]) <= tol)
                     || pts.first().is_some_and(|q| q.dist(p) <= tol)
             }
@@ -556,6 +567,41 @@ fn seg_dist(p: P, a: P, b: P) -> f32 {
     }
     let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
     p.dist(P::new(a.x + t * dx, a.y + t * dy))
+}
+
+/// The distance from `p` to the segment `a`–`b`, for tests.
+#[cfg(test)]
+pub fn seg_distance(p: P, a: P, b: P) -> f32 {
+    seg_dist(p, a, b)
+}
+
+/// A highlighter stroke drawn `band` thick, as it was meant: the hand's
+/// wobbles (anything within an eighth of the band) are smoothed out, which a
+/// thick band would otherwise show as steps in its edges, and a straight
+/// stroke within a few degrees of level is made level. Curves kept on purpose
+/// keep their shape. (Ramer–Douglas–Peucker.)
+pub fn straighten_highlight(pts: &[P], band: f32) -> Vec<P> {
+    let Some(last) = pts.len().checked_sub(1) else { return Vec::new() };
+    let tolerance = (band / 8.0).max(1.5);
+    let mut keep = vec![false; pts.len()];
+    keep[0] = true;
+    keep[last] = true;
+    let mut spans = vec![(0, last)];
+    while let Some((a, b)) = spans.pop() {
+        let far = (a + 1..b).map(|i| (i, seg_dist(pts[i], pts[a], pts[b]))).max_by(|x, y| x.1.total_cmp(&y.1));
+        if let Some((i, _)) = far.filter(|&(_, d)| d > tolerance) {
+            keep[i] = true;
+            spans.extend([(a, i), (i, b)]);
+        }
+    }
+    let mut out: Vec<P> = pts.iter().zip(&keep).filter(|(_, k)| **k).map(|(p, _)| *p).collect();
+    if let [a, b] = out.as_mut_slice()
+        && (b.y - a.y).abs() <= (b.x - a.x).abs() * 0.045
+    {
+        let y = (a.y + b.y) / 2.0;
+        (a.y, b.y) = (y, y);
+    }
+    out
 }
 
 /// Arrow geometry shared by the on-screen view and the exporter:
