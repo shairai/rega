@@ -697,7 +697,7 @@ impl Permission {
     pub fn description(self) -> &'static str {
         match self {
             Permission::ScreenRecording => "Lets Rega see your screen to take screenshots and record video. macOS may also ask you to confirm direct screen access: choose Allow.",
-            Permission::Accessibility => "Lets Rega scroll a page for you during scrolling capture. Everything else works without it.",
+            Permission::Accessibility => "Lets Rega scroll a page for you during scrolling capture, and see your clicks and typing while it records a guide. Everything else works without it.",
         }
     }
 

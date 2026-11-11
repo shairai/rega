@@ -104,6 +104,8 @@ pub struct Settings {
     /// macOS's direct-screen-access confirmation has been triggered once.
     pub screen_access_probed: bool,
     pub shortcuts: crate::shortcuts::Shortcuts,
+    /// Settings › Guide: defaults for new guides, and what recording picks up.
+    pub guide: crate::guide::style::GuideSettings,
 }
 
 impl Default for Settings {
@@ -127,6 +129,7 @@ impl Default for Settings {
             permissions_prompt_shown: false,
             screen_access_probed: false,
             shortcuts: Default::default(),
+            guide: Default::default(),
         }
     }
 }

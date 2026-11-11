@@ -7,6 +7,7 @@ mod branding;
 mod capture;
 mod config;
 mod editor;
+mod guide;
 mod h264;
 mod icon;
 mod library;

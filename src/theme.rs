@@ -71,6 +71,14 @@ pub mod icon {
     pub const IMPORT: &str = "\u{e43e}";
     pub const INFO: &str = "\u{e88e}";
     pub const MAGNIFIER: &str = "\u{e8b6}";
+    pub const GUIDE: &str = "\u{e762}";
+    pub const MOVE_UP: &str = "\u{e5d8}";
+    pub const MOVE_DOWN: &str = "\u{e5db}";
+    pub const PREV: &str = "\u{e5cb}";
+    pub const NEXT: &str = "\u{e5cc}";
+    pub const KEYBOARD: &str = "\u{e312}";
+    pub const MOUSE: &str = "\u{e323}";
+    pub const OPEN_EXTERNAL: &str = "\u{e89e}";
 }
 
 pub const ICON_FONT: &str = "icons";

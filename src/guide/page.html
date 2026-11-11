@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="Rega">
+<title>{{TITLE}}</title>
+<style>
+:root {
+  --bg: #0e1014; --surface: #181b22; --surface-2: #232833; --text: #eceef3; --muted: #8b93a7;
+  --track: rgba(255, 255, 255, .2); --coral: #ff5e62; --violet: #7c4dff; --shadow: rgba(0, 0, 0, .45);
+  --chrome: 220px; --ar: 1.6;
+}
+/* Light: the viewer's choice unless the guide says dark; always when it says light. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) { --bg: #f3f4f7; --surface: #fff; --surface-2: #e7e9ef; --text: #15171c; --muted: #5d6476; --track: rgba(0, 0, 0, .12); --shadow: rgba(20, 24, 40, .18); }
+}
+:root[data-theme="light"] { --bg: #f3f4f7; --surface: #fff; --surface-2: #e7e9ef; --text: #15171c; --muted: #5d6476; --track: rgba(0, 0, 0, .12); --shadow: rgba(20, 24, 40, .18); }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  display: flex; flex-direction: column; background: var(--bg); color: var(--text);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, "Noto Sans", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; color: inherit; }
+.top { padding: 12px 16px 6px; }
+.stories { display: flex; gap: 4px; max-width: 1100px; margin: 0 auto; }
+.seg { position: relative; flex: 1; height: 4px; padding: 0; border: 0; border-radius: 2px; background: var(--track); cursor: pointer; overflow: visible; }
+.seg::before { content: ""; position: absolute; inset: -9px 0; }
+.seg i { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--coral), var(--violet)); }
+.seg.done i { width: 100%; }
+.seg:focus-visible { outline: 2px solid var(--violet); outline-offset: 4px; }
+.head { display: flex; align-items: center; gap: 10px; max-width: 1100px; margin: 10px auto 0; }
+.head h1 { flex: 1; min-width: 0; margin: 0; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.count { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.icon { display: inline-grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.icon:hover { background: var(--surface-2); }
+.icon svg { width: 20px; height: 20px; fill: currentColor; }
+main { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 8px 16px; }
+.frame {
+  position: relative; aspect-ratio: var(--ar); width: min(100%, calc((100vh - var(--chrome)) * var(--ar)));
+  border-radius: 12px; overflow: hidden; background: var(--surface); box-shadow: 0 12px 40px var(--shadow);
+  --mk: var(--coral); --s: 1; --m: calc(clamp(26px, 4.2vw, 46px) * var(--s));
+}
+.layers, .layers img { position: absolute; }
+.layers { inset: 0; }
+.layers img { display: block; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+.tap { position: absolute; top: 0; bottom: 0; width: 22%; border: 0; padding: 0; background: transparent; cursor: pointer; }
+.tap.back { left: 0; } .tap.next { right: 0; }
+.tap:focus { outline: none; }
+.marker { position: absolute; width: var(--m); height: var(--m); margin: calc(var(--m) / -2) 0 0 calc(var(--m) / -2); pointer-events: none; }
+.marker::before, .marker::after { position: absolute; inset: 0; border-radius: 50%; }
+.marker.ring::before, .marker.dot::before, .marker.number::before, .marker.spotlight::before { content: ""; }
+.marker.ring::after, .marker.dot::after, .marker.number::after { content: ""; border: 3px solid var(--mk); animation: ping 1.6s ease-out infinite; }
+.marker.ring::before { border: 3px solid #fff; box-shadow: 0 0 0 3px var(--mk), 0 4px 14px rgba(0, 0, 0, .45); background: color-mix(in srgb, var(--mk) 20%, transparent); }
+.marker.dot::before, .marker.dot::after { inset: 25%; }
+.marker.dot::before { background: var(--mk); border: 2.5px solid #fff; box-shadow: 0 2px 8px rgba(0, 0, 0, .45); }
+.marker.number { display: grid; place-items: center; color: #fff; font-weight: 700; font-size: calc(var(--m) * .5); font-variant-numeric: tabular-nums; }
+.marker.number::before { background: var(--mk); border: 2.5px solid #fff; box-shadow: 0 3px 10px rgba(0, 0, 0, .45); }
+.marker.number span { position: relative; }
+.marker.spotlight { --d: calc(var(--m) * 2.6); width: var(--d); height: var(--d); margin: calc(var(--d) / -2) 0 0 calc(var(--d) / -2); }
+.marker.spotlight::before { border: 3px solid var(--mk); }
+.marker svg { position: absolute; left: 50%; top: 50%; overflow: visible; filter: drop-shadow(0 3px 6px rgba(0, 0, 0, .45)); }
+.marker svg path { fill: var(--mk); stroke: #fff; paint-order: stroke; stroke-linejoin: round; }
+/* The pointer's tip and the hand's fingertip land on the spot. */
+.marker.pointer svg { width: calc(var(--m) * 1.25); transform: translate(-22.9%, -13.3%); }
+.marker.pointer svg path { stroke-width: 1.5; }
+.marker.hand svg { width: calc(var(--m) * 1.7); transform: translate(-34.6%, -20.3%); }
+.marker.hand svg path { stroke-width: 60; }
+.spot { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at var(--x) var(--y), transparent 0 calc(var(--m) * 1.3), rgba(8, 10, 14, .58) calc(var(--m) * 1.3 + 1px)); }
+.marker.pop { animation: pop .4s cubic-bezier(.2, 1.5, .4, 1); }
+@keyframes ping { from { transform: scale(1); opacity: .85; } to { transform: scale(2.3); opacity: 0; } }
+@keyframes pop { from { transform: scale(.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.bottom { display: flex; align-items: center; gap: 14px; width: 100%; max-width: 1000px; margin: 0 auto; padding: 6px 16px 10px; }
+.caption { flex: 1; min-width: 0; text-align: center; }
+.badge { display: inline-block; min-width: 26px; padding: 2px 8px; margin-bottom: 6px; border-radius: 13px; background: linear-gradient(135deg, var(--coral), var(--violet)); color: #fff; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.caption h2 { margin: 0; font-size: 19px; font-weight: 650; overflow-wrap: anywhere; }
+.caption p { margin: 4px 0 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.caption p:empty { display: none; }
+.nav { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 42px; padding: 0 16px; border: 0; border-radius: 21px; background: var(--surface-2); cursor: pointer; font-weight: 600; }
+.nav.primary { background: linear-gradient(135deg, var(--coral), var(--violet)); color: #fff; }
+.nav:disabled { opacity: .35; cursor: default; }
+.nav svg { width: 18px; height: 18px; fill: currentColor; }
+.brand { padding: 0 16px 12px; text-align: center; font-size: 11px; color: var(--muted); }
+@media (max-width: 640px) {
+  .nav span { display: none; }
+  .nav { width: 42px; padding: 0; justify-content: center; }
+  .caption h2 { font-size: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .marker::after { animation: none; opacity: 0; }
+  .marker.pop { animation: none; }
+}
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="stories" id="stories" role="tablist" aria-label="Steps"></div>
+  <div class="head">
+    <h1 id="title" dir="auto"></h1>
+    <span class="count" id="count"></span>
+    <button class="icon" id="play" type="button" aria-label="Pause"></button>
+  </div>
+</div>
+<main>
+  <div class="frame" id="frame">
+    <div class="layers" id="layers"></div>
+    <div class="spot" id="spot" hidden></div>
+    <div class="marker" id="marker" hidden></div>
+    <button class="tap back" id="tap-back" type="button" tabindex="-1" aria-label="Back"></button>
+    <button class="tap next" id="tap-next" type="button" tabindex="-1" aria-label="Next"></button>
+  </div>
+</main>
+<div class="bottom" id="bottom">
+  <button class="nav" id="back" type="button"><svg viewBox="0 0 24 24"><path d="M15.4 6.4 14 5l-7 7 7 7 1.4-1.4L9.8 12z"/></svg><span>Back</span></button>
+  <div class="caption" aria-live="polite">
+    <div class="badge" id="badge"></div>
+    <h2 id="step-title" dir="auto"></h2>
+    <p id="step-note" dir="auto"></p>
+  </div>
+  <button class="nav primary" id="next" type="button"><span>Next</span><svg viewBox="0 0 24 24"><path d="M8.6 17.6 10 19l7-7-7-7-1.4 1.4 5.6 5.6z"/></svg></button>
+</div>
+<div class="brand" id="brand">Made with Rega</div>
+<script type="application/json" id="guide-data">{{DATA}}</script>
+<script>
+(() => {
+  "use strict";
+  const D = JSON.parse(document.getElementById("guide-data").textContent);
+  const $ = (id) => document.getElementById(id);
+  const steps = D.steps, n = steps.length;
+  const ICONS = {
+    pause: '<svg viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zm6.5 0H17v14h-3.5z"/></svg>',
+    play: '<svg viewBox="0 0 24 24"><path d="M8 5.1v13.8L19 12z"/></svg>',
+    replay: '<svg viewBox="0 0 24 24"><path d="M12 5V2L7.5 6.5 12 11V7.5a5.5 5.5 0 1 1-5.5 5.5H4a8 8 0 1 0 8-8z"/></svg>',
+  };
+  const MARKERS = {
+    pointer: '<svg viewBox="0 0 24 24"><path d="M5.5 3.2v15.6c0 .5.6.8 1 .4l3.6-3.6 2.4 5.3c.2.5.8.7 1.3.5l1.6-.7c.5-.2.7-.8.5-1.3l-2.4-5.2h5.1c.6 0 .9-.7.5-1.1L6.4 2.8c-.4-.4-.9-.1-.9.4z"/></svg>',
+    hand: '<svg viewBox="0 -960 960 960"><path d="M411.6 -71.9Q379.7 -71.9 351.7 -85.6Q323.8 -99.2 304.4 -124.3L105.8 -377.2Q95.9 -388.8 97.5 -404.5Q99.1 -420.3 110.0 -430.2L110.9 -430.9Q133.3 -452.6 163.8 -456.4Q194.3 -460.1 220.7 -443.9L288.0 -403.5V-721.2Q288.0 -739.9 300.9 -752.7Q313.7 -765.5 332.4 -765.5Q351.0 -765.5 364.2 -752.7Q377.4 -739.9 377.4 -721.2V-326.7Q377.4 -300.3 354.3 -287.4Q331.2 -274.5 308.3 -287.9L271.3 -310.2L375.8 -177.6Q382.5 -169.7 391.7 -165.1Q400.8 -160.5 411.1 -160.5H643.8Q675.1 -160.5 697.3 -182.7Q719.5 -204.9 719.5 -236.2V-388.0Q719.5 -408.2 705.6 -422.0Q691.7 -435.9 671.6 -435.9H457.4Q457.4 -435.9 457.4 -435.9Q457.4 -435.9 457.4 -435.9V-524.5Q457.4 -524.5 457.4 -524.5Q457.4 -524.5 457.4 -524.5H671.6Q728.3 -524.5 768.2 -484.6Q808.1 -444.7 808.1 -388.0V-236.2Q808.1 -168.3 759.9 -120.1Q711.7 -71.9 643.8 -71.9ZM377.4 -524.5H457.4V-435.9H671.6Q691.7 -435.9 705.6 -422.0Q719.5 -408.2 719.5 -388.0V-236.2Q719.5 -204.8 697.3 -182.7Q675.2 -160.5 643.8 -160.5H411.1Q400.9 -160.5 391.7 -165.1Q382.5 -169.7 375.8 -177.6L271.3 -310.2L308.3 -287.9Q331.2 -274.5 354.3 -287.4Q377.4 -300.3 377.4 -326.7ZM474.9 -594.5Q456.3 -594.5 443.4 -607.3Q430.6 -620.1 430.6 -638.8Q430.6 -642 436.3 -661.0Q444.3 -675.0 448.3 -689.5Q452.3 -704.0 452.3 -721.0Q452.3 -771.0 417.3 -806.0Q382.3 -841.0 332.3 -841.0Q282.3 -841.0 247.3 -806.0Q212.3 -771.0 212.3 -721.0Q212.3 -704.0 216.3 -689.5Q220.3 -675.0 228.3 -661.0Q231.6 -655.5 232.8 -650.0Q234.1 -644.4 234.1 -638.9Q234.1 -620.1 221.6 -607.3Q209.2 -594.5 190.5 -594.5Q178.1 -594.5 167.7 -601.1Q157.4 -607.7 151.7 -617.9Q138.5 -640.8 131.1 -666.9Q123.7 -692.9 123.7 -721.0Q123.7 -807.5 184.8 -868.5Q245.8 -929.6 332.4 -929.6Q418.9 -929.6 479.9 -868.5Q541.0 -807.5 541.0 -720.9Q541.0 -692.8 533.6 -666.8Q526.2 -640.8 513 -617.9Q507.3 -607.7 497.3 -601.1Q487.4 -594.5 474.9 -594.5Z"/></svg>',
+  };
+  // Decoded once, cloned for every step that shows them.
+  const images = D.images.map((src) => { const im = new Image(); im.src = src; im.alt = ""; return im; });
+  const ready = images.map((im) => im.decode().catch(() => {}));
+
+  const S = D.style;
+  let index = 0, playing = S.autoplay && n > 1, elapsed = 0, lastTime = null, token = 0;
+  document.title = D.title || document.title;
+  $("title").textContent = D.title;
+  document.documentElement.dataset.theme = S.theme;
+  $("frame").style.setProperty("--mk", S.color);
+  $("frame").style.setProperty("--s", S.size);
+  if (!S.branding) $("brand").remove();
+  $("marker").className = "marker " + S.marker;
+  $("marker").innerHTML = MARKERS[S.marker] || "";
+
+  const segs = steps.map((s, k) => {
+    const b = document.createElement("button");
+    b.className = "seg"; b.type = "button"; b.setAttribute("role", "tab");
+    b.setAttribute("aria-label", `Step ${k + 1}: ${s.title}`);
+    b.appendChild(document.createElement("i"));
+    b.addEventListener("click", () => go(k));
+    $("stories").appendChild(b);
+    return b;
+  });
+
+  // Longer captions stay up longer, so there is time to read them.
+  const duration = (s) => Math.max(S.seconds * 1000, 1500 + 55 * (s.title.length + s.note.length));
+
+  function fitChrome() {
+    const brand = $("brand");
+    const chrome = document.querySelector(".top").offsetHeight + $("bottom").offsetHeight + (brand ? brand.offsetHeight : 0) + 24;
+    document.documentElement.style.setProperty("--chrome", chrome + "px");
+  }
+
+  function show(k) {
+    index = Math.max(0, Math.min(n - 1, k));
+    elapsed = 0;
+    const s = steps[index], mine = ++token;
+    $("frame").style.setProperty("--ar", s.w / s.h);
+    const box = document.createElement("div");
+    box.className = "layers";
+    for (const [b, x, y, w, h] of s.layers) {
+      const im = images[b].cloneNode();
+      im.style.left = (100 * x / s.w) + "%"; im.style.top = (100 * y / s.h) + "%";
+      im.style.width = (100 * w / s.w) + "%"; im.style.height = (100 * h / s.h) + "%";
+      box.appendChild(im);
+    }
+    // Swap only once every layer is decoded: no half-drawn frames.
+    Promise.all(s.layers.map(([b]) => ready[b])).then(() => {
+      if (mine !== token) return;
+      const old = $("layers");
+      box.id = "layers";
+      old.replaceWith(box);
+    });
+    const m = $("marker"), spot = $("spot");
+    m.hidden = !s.marker;
+    spot.hidden = !s.marker || S.marker !== "spotlight";
+    if (s.marker) {
+      const x = (100 * s.marker[0]) + "%", y = (100 * s.marker[1]) + "%";
+      m.style.left = x; m.style.top = y;
+      spot.style.setProperty("--x", x); spot.style.setProperty("--y", y);
+      if (S.marker === "number") m.innerHTML = `<span>${index + 1}</span>`;
+      m.classList.remove("pop"); void m.offsetWidth; m.classList.add("pop");
+    }
+    $("badge").textContent = `${index + 1}`;
+    $("step-title").textContent = s.title;
+    $("step-note").textContent = s.note;
+    $("count").textContent = `${index + 1} / ${n}`;
+    $("back").disabled = index === 0;
+    $("next").querySelector("span").textContent = index === n - 1 ? "Done" : "Next";
+    $("next").disabled = index === n - 1;
+    segs.forEach((seg, j) => {
+      seg.classList.toggle("done", j < index);
+      seg.setAttribute("aria-selected", j === index);
+      seg.firstChild.style.width = j < index ? "100%" : "0";
+    });
+    if (history.replaceState) history.replaceState(null, "", "#" + (index + 1));
+    fitChrome();
+  }
+
+  function setPlaying(on) {
+    playing = on;
+    const end = !on && index === n - 1 && elapsed >= duration(steps[index]);
+    $("play").innerHTML = on ? ICONS.pause : end ? ICONS.replay : ICONS.play;
+    $("play").setAttribute("aria-label", on ? "Pause" : end ? "Replay" : "Play");
+  }
+
+  function go(k) { show(k); setPlaying(playing); }
+
+  function frameTick(t) {
+    if (lastTime !== null && playing && !document.hidden) elapsed += t - lastTime;
+    lastTime = t;
+    const s = steps[index], d = duration(s);
+    if (playing) {
+      segs[index].firstChild.style.width = Math.min(100, 100 * elapsed / d) + "%";
+      if (elapsed >= d) {
+        if (index < n - 1) show(index + 1);
+        else if (S.loop && n > 1) show(0);
+        else { elapsed = d; setPlaying(false); }
+      }
+    }
+    requestAnimationFrame(frameTick);
+  }
+
+  $("play").addEventListener("click", () => {
+    if (!playing && index === n - 1 && elapsed >= duration(steps[index])) show(0);
+    setPlaying(!playing);
+  });
+  $("back").addEventListener("click", () => go(index - 1));
+  $("next").addEventListener("click", () => go(index + 1));
+  $("tap-back").addEventListener("click", () => go(index - 1));
+  $("tap-next").addEventListener("click", () => go(index + 1));
+  document.addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === "ArrowRight" || e.key === "PageDown") go(index + 1);
+    else if (e.key === "ArrowLeft" || e.key === "PageUp") go(index - 1);
+    else if (e.key === "Home") go(0);
+    else if (e.key === "End") go(n - 1);
+    else if (e.key === " " || e.key === "k") $("play").click();
+    else return;
+    e.preventDefault();
+  });
+  window.addEventListener("resize", fitChrome);
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) playing = false;
+
+  const start = parseInt(location.hash.slice(1), 10);
+  show(Number.isFinite(start) ? start - 1 : 0);
+  setPlaying(playing);
+  requestAnimationFrame(frameTick);
+})();
+</script>
+</body>
+</html>

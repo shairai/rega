@@ -256,6 +256,10 @@ const PALETTE: [Rgba; 8] = [
 /// The highlighter's colour until another is picked for it: the palette's yellow.
 const HIGHLIGHT_COLOR: Rgba = PALETTE[2];
 
+/// The last step number placed this session, and on which image: another
+/// image can carry on from it ("Continue at 4").
+static LAST_STEP: std::sync::Mutex<Option<(PathBuf, u32)>> = std::sync::Mutex::new(None);
+
 #[derive(Clone)]
 struct State {
     base: Arc<RgbaImage>,
@@ -494,6 +498,45 @@ impl Editor {
     }
 
     /// One undo step per continuous gesture (slider drag, color pick…).
+    /// The lowest step number on the image.
+    fn first_step(&self) -> Option<u32> {
+        self.anns.iter().filter_map(|a| if let Kind::Step { n, .. } = a.kind { Some(n) } else { None }).min()
+    }
+
+    /// Number the steps from `start`: numbers already placed move with it,
+    /// keeping their order and gaps, and the next click carries on after
+    /// them; with none placed yet, the next click drops `start`.
+    fn number_steps_from(&mut self, start: u32) {
+        let start = start.max(1);
+        let Some(first) = self.first_step() else {
+            self.next_step = start;
+            return;
+        };
+        let shift = |n: u32| (n as i64 + start as i64 - first as i64).max(1) as u32;
+        for ann in &mut self.anns {
+            if let Kind::Step { n, .. } = &mut ann.kind {
+                *n = shift(*n);
+            }
+        }
+        self.next_step = shift(self.next_step);
+        self.remember_last_step();
+    }
+
+    /// Note this image's last number, for the next image to carry on from.
+    fn remember_last_step(&self) {
+        if self.first_step().is_some()
+            && let Ok(mut last) = LAST_STEP.lock()
+        {
+            *last = Some((self.path.clone(), self.next_step - 1));
+        }
+    }
+
+    /// The number after the last one placed on another image this session.
+    fn continue_from_other_image(&self) -> Option<u32> {
+        let last = LAST_STEP.lock().ok()?.clone()?;
+        (last.0 != self.path).then_some(last.1 + 1)
+    }
+
     fn gesture_undo(&mut self) {
         if !self.gesture_open {
             self.push_undo();
@@ -923,6 +966,7 @@ impl Editor {
                 });
                 self.selected = Some(self.anns.len() - 1);
                 self.next_step += 1;
+                self.remember_last_step();
             }
             Tool::Pen | Tool::Highlight => {
                 // A click leaves a dot.
@@ -1353,6 +1397,28 @@ impl Editor {
                     }
                 }
             }
+            // Where the numbering starts, to carry on a flow from another image.
+            ui.add_space(6.0);
+            let first = self.first_step().unwrap_or(self.next_step);
+            let mut start = first;
+            ui.horizontal(|ui| {
+                let label = ui.label(egui::RichText::new("Start at").color(theme::TEXT_MUTED));
+                ui.add(egui::DragValue::new(&mut start).range(1..=999).speed(0.1))
+                    .labelled_by(label.id)
+                    .on_hover_text("The first number on this image. Numbers already placed move with it.");
+                if let Some(next) = self.continue_from_other_image().filter(|n| *n != first)
+                    && theme::ghost_button(ui, None, &format!("Continue at {next}"))
+                        .on_hover_text("Carry on after the last number you placed on another image")
+                        .clicked()
+                {
+                    start = next;
+                }
+            });
+            if start != first {
+                self.gesture_undo();
+                self.number_steps_from(start);
+            }
+            ui.label(egui::RichText::new(format!("Next click places {}", self.next_step)).color(theme::TEXT_FAINT).size(11.5));
         }
         if props.stamp {
             let label = ui.label(egui::RichText::new("Symbol").color(theme::TEXT_MUTED));
@@ -2539,6 +2605,32 @@ mod tests {
         assert_ne!(dab.get_pixel(200, 150).0, [255, 255, 255, 255]);
         let corner = (half * 0.85) as u32;
         assert_eq!(dab.get_pixel(200 + corner, 150 + corner).0, [255, 255, 255, 255], "a square dab, not a round one");
+    }
+
+    /// Numbering can start anywhere, to carry a flow on from another image:
+    /// numbers already placed move with the start, and the next follows them.
+    #[test]
+    fn steps_can_start_at_any_number() {
+        let mut ed = blank_editor();
+        ed.set_tool(Tool::Step);
+        ed.number_steps_from(4);
+        for x in [50.0, 150.0, 250.0] {
+            ed.click(P::new(x, 100.0));
+        }
+        let numbers = |ed: &Editor| ed.anns.iter().filter_map(|a| if let Kind::Step { n, .. } = a.kind { Some(n) } else { None }).collect::<Vec<_>>();
+        assert_eq!(numbers(&ed), [4, 5, 6]);
+        ed.number_steps_from(10);
+        assert_eq!(numbers(&ed), [10, 11, 12]);
+        assert_eq!(ed.next_step, 13);
+        ed.number_steps_from(0);
+        assert_eq!(numbers(&ed), [1, 2, 3], "never below 1");
+
+        // Another image offers to carry on after this one's last number.
+        let mut other = Editor::new(PathBuf::from("other.png"), RgbaImage::from_pixel(400, 300, image::Rgba([255, 255, 255, 255])), None, true);
+        assert_eq!(other.continue_from_other_image(), Some(4));
+        assert_eq!(ed.continue_from_other_image(), None, "not from itself");
+        other.number_steps_from(4);
+        assert_eq!(other.next_step, 4);
     }
 
     fn blank_editor() -> Editor {

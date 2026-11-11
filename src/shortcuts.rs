@@ -16,11 +16,12 @@ pub enum Action {
     FullScreen,
     Video,
     Scroll,
+    Guide,
     Text,
 }
 
 impl Action {
-    pub const ALL: [Action; 5] = [Action::Image, Action::FullScreen, Action::Video, Action::Scroll, Action::Text];
+    pub const ALL: [Action; 6] = [Action::Image, Action::FullScreen, Action::Video, Action::Scroll, Action::Guide, Action::Text];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -28,6 +29,7 @@ impl Action {
             Action::FullScreen => "Capture full screen",
             Action::Video => "Record video",
             Action::Scroll => "Scrolling capture",
+            Action::Guide => "Record guide",
             Action::Text => "Grab text",
         }
     }
@@ -38,6 +40,7 @@ impl Action {
             Action::FullScreen => AppEvent::FullScreen,
             Action::Video => AppEvent::Capture(Purpose::Video),
             Action::Scroll => AppEvent::Capture(Purpose::Scroll),
+            Action::Guide => AppEvent::Capture(Purpose::Guide),
             Action::Text => AppEvent::Capture(Purpose::Text),
         }
     }
@@ -48,6 +51,7 @@ impl Action {
             Action::FullScreen => "control+alt+KeyF",
             Action::Video => "control+alt+KeyR",
             Action::Scroll => "control+alt+KeyS",
+            Action::Guide => "control+alt+KeyG",
             Action::Text => "control+alt+KeyT",
         }
     }

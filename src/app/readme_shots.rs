@@ -700,6 +700,7 @@ fn readme_screenshots() {
     save(&h.render().unwrap(), "capture-overlay.png");
 
     let _ = std::fs::remove_dir_all(&library);
+    write_guide_shots();
 }
 
 /// Renders the permissions popup + banner; writes PNGs only when
@@ -913,4 +914,103 @@ fn video_player_renders() {
         h.step();
     }
     h.render().unwrap().save(Path::new(&dir).join("player-trim.png")).unwrap();
+}
+
+/// A recorded guide open in the editor: steps on the left, the screenshot
+/// with its marker, the caption on the right, and the guide in the library
+/// with its badge. Writes `guide-editor.png` when `GUIDE_PREVIEW_DIR` is set.
+#[test]
+fn guide_editor_renders() {
+    let (shot, _) = guide_editor_shot();
+    if let Ok(d) = std::env::var("GUIDE_PREVIEW_DIR") {
+        shot.save(Path::new(&d).join("guide-editor.png")).unwrap();
+    }
+}
+
+/// The README's guide pictures: `docs/images/guide-editor.png`, and the
+/// guide's page at `target/guide-readme.html`, for a browser to screenshot
+/// as `docs/images/guide-page.png` (see the Development section).
+#[test]
+#[ignore = "writes README screenshots; run with --ignored"]
+fn readme_guide_screenshots() {
+    write_guide_shots();
+}
+
+fn write_guide_shots() {
+    let (shot, page) = guide_editor_shot();
+    save(&window_chrome(&shot), "guide-editor.png");
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/guide-readme.html");
+    std::fs::copy(&page, &out).unwrap();
+    println!("wrote {}", out.display());
+}
+
+/// The demo guide open in the editor, rendered, and where its page was saved.
+fn guide_editor_shot() -> (RgbaImage, PathBuf) {
+    use crate::guide::{Action, Button, Guide, Shot, Step};
+    use crate::guide::editor::GuideEditor;
+    let (library, dashboard) = demo_library();
+    let code = render_ui(CODE, draw_code_editor);
+    let mut typed = dashboard.clone();
+    for (x, y) in (1500..1720).flat_map(|x| (60..84).map(move |y| (x, y))) {
+        typed.put_pixel(x, y, image::Rgba([30, 30, 30, 255]));
+    }
+    let step = |img: &RgbaImage, action: Action, marker: Option<[f32; 2]>, title: &str| Step {
+        shot: Shot::encode(&crate::guide::fit_capture(img.clone(), Some(1920))).unwrap(),
+        action,
+        marker,
+        marker_hidden: false,
+        title: title.into(),
+        note: String::new(),
+    };
+    let click = Action::Click { button: Button::Left, count: 1 };
+    let mut steps = vec![
+        step(&dashboard, click.clone(), Some([0.075, 0.21]), "Open Customers"),
+        step(&typed, Action::Type { text: "Jane".into(), then: Some("Enter".into()) }, Some([0.80, 0.105]), "Type “Jane” and press Enter"),
+        step(&code, click, Some([0.5, 0.4]), "Click here"),
+    ];
+    steps[0].note = "It's in the sidebar, under Overview.".into();
+    let path = library.join("Rega 2026-11-02 at 10.00.00.html");
+    let mut guide = Guide::new("Find a customer".into(), steps);
+    guide.style.seconds = 5.0;
+    // GUIDE_MARKER=hand (etc.) shows the other shapes.
+    if let Ok(m) = std::env::var("GUIDE_MARKER") {
+        guide.style.marker = serde_json::from_value(serde_json::Value::String(m)).unwrap();
+    }
+    let ctx = egui::Context::default();
+    GuideEditor::new(&ctx, path.clone(), guide.clone()).save_now().unwrap();
+    let page = path.clone();
+    let mut h = app_harness(APP_SIZE, move |ctx| {
+        let mut app = RegaApp::demo(ctx, library);
+        app.mode = Mode::Guide(Box::new(GuideEditor::open(ctx, path).unwrap()));
+        app
+    });
+    settle(&mut h);
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    h.get_by_label("Step 1 of 3");
+    assert_eq!(h.state().library.iter().filter(|i| i.kind == crate::library::ItemKind::Guide).count(), 1, "listed in the library");
+    (h.render().unwrap(), page)
+}
+
+/// Settings › Guide: defaults for new guides and what recording picks up.
+/// Writes `guide-settings.png` when `GUIDE_PREVIEW_DIR` is set.
+#[test]
+fn guide_settings_render() {
+    let lib = std::env::temp_dir().join(format!("rega-guide-settings-{}", std::process::id()));
+    std::fs::create_dir_all(&lib).unwrap();
+    let mut h = app_harness(Vec2::new(1360.0, 900.0), move |ctx| {
+        let mut app = RegaApp::demo(ctx, lib);
+        app.show_settings = true;
+        app.settings_tab = SettingsTab::Guide;
+        app
+    });
+    for _ in 0..8 {
+        h.step();
+    }
+    h.get_by_label("Guide");
+    if let Ok(d) = std::env::var("GUIDE_PREVIEW_DIR") {
+        h.render().unwrap().save(Path::new(&d).join("guide-settings.png")).unwrap();
+    }
 }

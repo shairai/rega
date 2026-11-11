@@ -13,6 +13,7 @@ pub enum Purpose {
     Image,
     Video,
     Scroll,
+    Guide,
     Text,
 }
 
@@ -22,6 +23,7 @@ impl Purpose {
             Purpose::Image => "Image capture",
             Purpose::Video => "Video recording",
             Purpose::Scroll => "Scrolling capture",
+            Purpose::Guide => "Guide",
             Purpose::Text => "Grab text",
         }
     }

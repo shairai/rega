@@ -10,6 +10,8 @@ use crate::config::APP_NAME;
 pub enum ItemKind {
     Image,
     Video,
+    /// A recorded guide: a shareable HTML page, editable through its sidecar.
+    Guide,
 }
 
 #[derive(Clone, Debug)]
@@ -25,6 +27,7 @@ pub fn kind_of(path: &Path) -> Option<ItemKind> {
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" => Some(ItemKind::Image),
         "mp4" | "mov" => Some(ItemKind::Video),
+        "html" => Some(ItemKind::Guide),
         _ => None,
     }
 }
@@ -38,6 +41,10 @@ pub fn scan(dir: &Path) -> Vec<Item> {
         .filter_map(|e| {
             let path = e.path();
             let kind = kind_of(&path)?;
+            // Only pages Rega recorded (and can edit), not every web page.
+            if kind == ItemKind::Guide && !crate::guide::is_guide(&path) {
+                return None;
+            }
             let meta = e.metadata().ok()?;
             if !meta.is_file() {
                 return None;
@@ -91,6 +98,7 @@ pub fn delete(path: &Path) -> std::io::Result<()> {
     let (json, orig) = project_paths(path);
     let _ = std::fs::remove_file(json);
     let _ = std::fs::remove_file(orig);
+    crate::guide::delete_sidecar(path);
     Ok(())
 }
 

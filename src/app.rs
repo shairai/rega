@@ -17,6 +17,8 @@ use image::RgbaImage;
 use crate::capture;
 use crate::config::{APP_NAME, GifQuality, ImageFormat, Settings, VideoFormat};
 use crate::editor::{Editor, EditorAction};
+use crate::guide::editor::{GuideAction, GuideEditor};
+use crate::guide::recorder::{GuideConfig, GuideRecorder};
 use crate::theme::{self, ItemStyle, icon};
 use crate::library::{self, Item, ItemKind};
 use crate::ocr;
@@ -44,6 +46,7 @@ enum Mode {
     Home,
     Editor(Box<Editor>),
     Video(Box<Player>),
+    Guide(Box<GuideEditor>),
 }
 
 enum Activity {
@@ -54,6 +57,10 @@ enum Activity {
     Recording(Recorder),
     Finishing(Recorder),
     Scrolling(Receiver<ScrollMsg>),
+    /// Recording a guide: clicks and typing become steps.
+    Guiding(Box<GuideRecorder>),
+    /// A guide recording ended: its steps, or `None` when it was discarded.
+    GuideFinished(Option<Vec<crate::guide::Step>>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -295,7 +302,7 @@ impl RegaApp {
     fn sync_capture_zoom(&mut self, ctx: &egui::Context) {
         let capturing = matches!(
             self.activity,
-            Activity::Pending { .. } | Activity::Selecting(_) | Activity::Recording(_) | Activity::Scrolling(_)
+            Activity::Pending { .. } | Activity::Selecting(_) | Activity::Recording(_) | Activity::Scrolling(_) | Activity::Guiding(_)
         );
         match (capturing, self.capture_zoom) {
             (true, None) => {
@@ -460,7 +467,9 @@ impl RegaApp {
         }
     }
 
-    fn show_recording_bar(&mut self, ctx: &egui::Context, frame: &eframe::Frame, snap_origin: (i32, i32), monitor: (u32, u32), region: Rect) {
+    /// Show the bar with the recording's controls next to `region`; returns
+    /// where it is, in global points.
+    fn show_recording_bar(&mut self, ctx: &egui::Context, frame: &eframe::Frame, snap_origin: (i32, i32), monitor: (u32, u32), region: Rect) -> Rect {
         let (mw, mh) = (monitor.0 as f32, monitor.1 as f32);
         let gap = 12.0;
         let y = if region.max.y + gap + BAR_SIZE.y <= mh {
@@ -484,6 +493,7 @@ impl RegaApp {
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         platform::set_overlay_level(ctx, frame, true);
         self.win = Win::Bar;
+        Rect::from_min_size(pos, BAR_SIZE)
     }
 
     // ---------- capture flows ----------
@@ -525,6 +535,21 @@ impl RegaApp {
                 log::warn!("quit before the recording finished saving");
             }
         }
+        // A guide being recorded is kept, as Stop would keep it.
+        let steps = match std::mem::replace(&mut self.activity, Activity::Idle) {
+            Activity::Guiding(rec) => Some(rec.finish()),
+            Activity::GuideFinished(steps) => steps,
+            other => {
+                self.activity = other;
+                None
+            }
+        };
+        if let Some(steps) = steps.filter(|s| !s.is_empty())
+            && let Some(mut ed) = self.new_guide(steps)
+            && let Err(e) = ed.save_now()
+        {
+            log::warn!("saving the guide on quit: {e:#}");
+        }
         // A copy could take minutes to finish; cancelled, it removes its
         // partial file. Closing the player hands its save over with the rest.
         self.mode = Mode::Home;
@@ -536,6 +561,10 @@ impl RegaApp {
             Activity::Idle => {}
             Activity::Recording(_) if purpose == Purpose::Video => {
                 self.stop_recording(ctx);
+                return;
+            }
+            Activity::Guiding(_) if purpose == Purpose::Guide => {
+                self.stop_guide(ctx, false);
                 return;
             }
             _ => return,
@@ -550,6 +579,19 @@ impl RegaApp {
             self.win = Win::Normal;
             self.hidden_by_user = false;
             self.toast("Rega needs Screen Recording permission to capture");
+            return;
+        }
+        if purpose == Purpose::Guide && !platform::is_granted(platform::Permission::Accessibility) {
+            // Without it the guide would never see a click.
+            platform::request(platform::Permission::Accessibility);
+            self.refresh_permissions(true);
+            self.show_permissions = true;
+            platform::set_dock_icon(true);
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+            self.win = Win::Normal;
+            self.hidden_by_user = false;
+            self.toast("Rega needs Accessibility permission to see your clicks and typing for a guide");
             return;
         }
         if let Mode::Editor(ed) = &mut self.mode {
@@ -686,6 +728,41 @@ impl RegaApp {
                     self.show_normal(ctx, frame);
                 }
             },
+            Activity::Guiding(rec) => {
+                let n = rec.step_count();
+                self.set_tray_title(Some(&format!("● {n}")));
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+            Activity::GuideFinished(_) => {
+                let Activity::GuideFinished(steps) = std::mem::replace(&mut self.activity, Activity::Idle) else { return };
+                self.set_tray_title(None);
+                match steps {
+                    None => {
+                        self.return_to_rest(ctx, frame);
+                        self.toast("Guide discarded");
+                    }
+                    Some(steps) if steps.is_empty() => {
+                        self.return_to_rest(ctx, frame);
+                        self.toast("No steps were recorded — click inside the region while recording a guide");
+                    }
+                    Some(steps) => {
+                        let n = steps.len();
+                        match self.new_guide(steps) {
+                            Some(mut ed) => {
+                                ed.save_in_background(ctx);
+                                self.autosave_editor();
+                                self.lib_filter = LibFilter::All;
+                                self.mode = Mode::Guide(Box::new(ed));
+                                // A guide always opens: it's made to be edited before it's shared.
+                                self.show_normal(ctx, frame);
+                                platform::activate_app();
+                                self.toast(format!("Guide recorded: {n} steps"));
+                            }
+                            None => self.show_normal(ctx, frame),
+                        }
+                    }
+                }
+            }
             Activity::Idle | Activity::Selecting(_) => {}
         }
     }
@@ -744,6 +821,37 @@ impl RegaApp {
                     }
                 }
             }
+            Purpose::Guide => {
+                let region = (
+                    rect.min.x.max(0.0) as u32,
+                    rect.min.y.max(0.0) as u32,
+                    (rect.width() as u32).max(16).min(snap.size.0),
+                    (rect.height() as u32).max(16).min(snap.size.1),
+                );
+                let cfg = GuideConfig {
+                    monitor_origin: snap.origin,
+                    region,
+                    ignore_shortcuts: Action::ALL.iter().map(|a| self.settings.shortcuts.get(*a).to_owned()).collect(),
+                    max_side: self.settings.guide.style.quality.max_side(),
+                    record_typing: self.settings.guide.record_typing,
+                    typed_text: self.settings.guide.typed_text_in_captions,
+                    record_keys: self.settings.guide.record_keys,
+                };
+                match GuideRecorder::start(cfg) {
+                    Ok(rec) => {
+                        let (x, y) = (snap.origin.0 as f32 + region.0 as f32, snap.origin.1 as f32 + region.1 as f32);
+                        let phase = overlay.border_phase(ctx.input(|i| i.time));
+                        platform::show_recording_frame((x, y, region.2 as f32, region.3 as f32), phase);
+                        let bar = self.show_recording_bar(ctx, frame, snap.origin, snap.size, rect);
+                        rec.set_exclude([bar.min.x, bar.min.y, bar.width(), bar.height()]);
+                        self.activity = Activity::Guiding(Box::new(rec));
+                    }
+                    Err(e) => {
+                        self.show_normal(ctx, frame);
+                        self.toast(format!("Couldn't record a guide: {e:#}"));
+                    }
+                }
+            }
             Purpose::Scroll => {
                 platform::set_overlay_level(ctx, frame, false);
                 self.hide_window(ctx);
@@ -777,6 +885,27 @@ impl RegaApp {
             self.toast("Saving video…");
             ctx.request_repaint();
         }
+    }
+
+    /// End a guide recording; `advance_activity` opens it (or says it was
+    /// discarded) once the window can be shown.
+    fn stop_guide(&mut self, ctx: &egui::Context, discard: bool) {
+        if let Activity::Guiding(rec) = std::mem::replace(&mut self.activity, Activity::Idle) {
+            platform::hide_recording_frame();
+            self.hide_window(ctx);
+            // Waits for the last screenshots to be compressed: a moment at most.
+            let steps = rec.finish();
+            self.activity = Activity::GuideFinished((!discard).then_some(steps));
+            ctx.request_repaint();
+        }
+    }
+
+    /// An editor for a newly recorded guide, saved under a new library name.
+    fn new_guide(&mut self, steps: Vec<crate::guide::Step>) -> Option<GuideEditor> {
+        let path = library::new_capture_path(&self.settings.save_dir, "html");
+        let mut guide = crate::guide::Guide::new("Untitled guide".to_owned(), steps);
+        guide.style = self.settings.guide.style;
+        Some(GuideEditor::new(&self.ctx, path, guide))
     }
 
     /// A new image capture: save it to the library, copy it, open the editor.
@@ -816,16 +945,34 @@ impl RegaApp {
     }
 
     fn autosave_editor(&mut self) {
-        if let Mode::Editor(ed) = &mut self.mode
-            && ed.is_dirty()
-                && let Err(e) = ed.save() {
+        match &mut self.mode {
+            Mode::Editor(ed) if ed.is_dirty() => {
+                if let Err(e) = ed.save() {
                     log::warn!("autosave failed: {e}");
                 }
+            }
+            Mode::Guide(ed) => {
+                if let Err(e) = ed.save_now() {
+                    log::warn!("saving the guide failed: {e:#}");
+                }
+            }
+            _ => {}
+        }
     }
 
     fn open_item(&mut self, item: &Item) {
         match item.kind {
             ItemKind::Video => self.open_video(item.path.clone()),
+            ItemKind::Guide => match GuideEditor::open(&self.ctx, item.path.clone()) {
+                Ok(ed) => {
+                    self.autosave_editor();
+                    self.mode = Mode::Guide(Box::new(ed));
+                }
+                Err(e) => {
+                    log::warn!("opening the guide: {e:#}");
+                    platform::open_path(&item.path);
+                }
+            },
             ItemKind::Image => match Editor::open(item.path.clone()) {
                 Ok(ed) => {
                     self.autosave_editor();
@@ -1005,6 +1152,7 @@ impl RegaApp {
     fn workspace_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let mut actions = Vec::new();
+        let mut guide_actions = Vec::new();
 
         egui::Panel::top("topbar")
             .frame(theme::panel_frame(theme::SURFACE, egui::Margin { left: 16, right: 14, top: 8, bottom: 8 }))
@@ -1019,6 +1167,7 @@ impl RegaApp {
                             (icon::FULLSCREEN, "Screen", Action::FullScreen, Purpose::Image, true),
                             (icon::VIDEO, "Video", Action::Video, Purpose::Video, false),
                             (icon::SCROLL, "Scrolling", Action::Scroll, Purpose::Scroll, false),
+                            (icon::GUIDE, "Guide", Action::Guide, Purpose::Guide, false),
                             (icon::OCR, "Text", Action::Text, Purpose::Text, false),
                         ] {
                             let style = if action == Action::Image { ItemStyle::Primary } else { ItemStyle::Normal };
@@ -1059,6 +1208,10 @@ impl RegaApp {
                         |ui| {
                             if let Mode::Editor(ed) = &mut self.mode {
                                 actions.push(ed.top_actions(ui));
+                                ui.add_space(6.0);
+                            }
+                            if let Mode::Guide(ed) = &mut self.mode {
+                                guide_actions.push(ed.top_actions(ui));
                                 ui.add_space(6.0);
                             }
                             theme::toolbar_group(ui, |ui| {
@@ -1117,6 +1270,34 @@ impl RegaApp {
                     .show(ui, |ui| ed.canvas(ui));
                 actions.push(ed.end_frame(&ctx));
             }
+            Mode::Guide(ed) => {
+                egui::Panel::left("guide-steps")
+                    .resizable(false)
+                    .exact_size(250.0)
+                    .frame(theme::panel_frame(theme::SURFACE, egui::Margin::same(12)))
+                    .show(ui, |ui| guide_actions.push(ed.steps_panel(ui)));
+                egui::Panel::right("guide-properties")
+                    .resizable(false)
+                    .exact_size(280.0)
+                    .frame(theme::panel_frame(theme::SURFACE, egui::Margin::same(18)))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| guide_actions.push(ed.properties_panel(ui)));
+                    });
+                egui::Panel::bottom("status")
+                    .frame(theme::panel_frame(theme::BG, egui::Margin::symmetric(12, 4)))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ed.status_bar(ui);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(egui::RichText::new(ed.file_name()).color(theme::TEXT_MUTED));
+                            });
+                        });
+                    });
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(theme::BG))
+                    .show(ui, |ui| ed.canvas(ui));
+                guide_actions.push(ed.end_frame(&ctx));
+            }
             Mode::Video(player) => {
                 egui::Panel::bottom("status")
                     .frame(theme::panel_frame(theme::BG, egui::Margin::symmetric(12, 4)))
@@ -1156,6 +1337,21 @@ impl RegaApp {
                     self.toast(msg);
                 }
                 EditorAction::Ocr(img) => self.start_ocr(&ctx, img),
+            }
+        }
+        for action in guide_actions {
+            match action {
+                GuideAction::None => {}
+                GuideAction::Saved => self.refresh_library(),
+                GuideAction::SetDefaultStyle(style) => {
+                    self.settings.guide.style = style;
+                    self.settings.save();
+                    self.toast("New guides will look like this one");
+                }
+                GuideAction::Toast(msg) => {
+                    self.refresh_library();
+                    self.toast(msg);
+                }
             }
         }
     }
@@ -1331,6 +1527,7 @@ impl RegaApp {
                     (icon::FULLSCREEN, "Full screen", self.keys(Action::FullScreen), Purpose::Image, true),
                     (icon::VIDEO, "Video", self.keys(Action::Video), Purpose::Video, false),
                     (icon::SCROLL, "Scrolling", self.keys(Action::Scroll), Purpose::Scroll, false),
+                    (icon::GUIDE, "Guide", self.keys(Action::Guide), Purpose::Guide, false),
                     (icon::OCR, "Grab text", self.keys(Action::Text), Purpose::Text, false),
                 ];
                 let tile = Vec2::new(104.0, 104.0);
@@ -1373,6 +1570,7 @@ impl RegaApp {
                 LibFilter::All => true,
                 LibFilter::Images => i.kind == ItemKind::Image,
                 LibFilter::Videos => i.kind == ItemKind::Video,
+                LibFilter::Guides => i.kind == ItemKind::Guide,
             })
             .filter(|i| needle.is_empty() || i.name.to_lowercase().contains(&needle))
             .cloned()
@@ -1383,13 +1581,18 @@ impl RegaApp {
 
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Library").font(theme::medium(14.0)).color(theme::TEXT));
-            let images = self.library.iter().filter(|i| i.kind == ItemKind::Image).count();
-            let videos = self.library.len() - images;
+            let count = |kind| self.library.iter().filter(|i| i.kind == kind).count();
+            let (images, videos, guides) = (count(ItemKind::Image), count(ItemKind::Video), count(ItemKind::Guide));
             ui.add_space(6.0);
             let all = format!("All {}", self.library.len());
             let imgs = format!("Images {images}");
             let vids = format!("Videos {videos}");
-            theme::segmented(ui, &mut self.lib_filter, &[(LibFilter::All, &all), (LibFilter::Images, &imgs), (LibFilter::Videos, &vids)]);
+            let gds = format!("Guides {guides}");
+            theme::segmented(
+                ui,
+                &mut self.lib_filter,
+                &[(LibFilter::All, &all), (LibFilter::Images, &imgs), (LibFilter::Videos, &vids), (LibFilter::Guides, &gds)],
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // While items are selected, the header offers actions on them.
                 if !self.lib_selection.is_empty() {
@@ -1468,7 +1671,11 @@ impl RegaApp {
                             open = Some(item.clone());
                             ui.close();
                         }
-                        if ui.button("Open with default app").clicked() {
+                        if item.kind == ItemKind::Guide && ui.button("Open in browser").clicked() {
+                            platform::open_path(&item.path);
+                            ui.close();
+                        }
+                        if item.kind != ItemKind::Guide && ui.button("Open with default app").clicked() {
                             platform::open_path(&item.path);
                             ui.close();
                         }
@@ -1513,6 +1720,7 @@ impl RegaApp {
         match &self.mode {
             Mode::Editor(ed) => Some(&ed.path),
             Mode::Video(player) => Some(&player.path),
+            Mode::Guide(ed) => Some(&ed.path),
             Mode::Home => None,
         }
     }
@@ -1623,7 +1831,7 @@ impl RegaApp {
 
         let fresh = self.thumbs.get(&item.path).filter(|(m, _)| *m == item.modified).map(|(_, t)| t.clone());
         match (&item.kind, fresh) {
-            (ItemKind::Image, Some(tex)) => {
+            (ItemKind::Image | ItemKind::Guide, Some(tex)) => {
                 // Cover-fit into the rounded frame.
                 let ts = tex.size_vec2();
                 let scale = (thumb.width() / ts.x).max(thumb.height() / ts.y);
@@ -1631,12 +1839,13 @@ impl RegaApp {
                 let uv = Rect::from_center_size(Pos2::new(0.5, 0.5), vis);
                 p.add(egui::epaint::RectShape::filled(thumb, 10, Color32::WHITE).with_texture(tex.id(), uv));
             }
-            (ItemKind::Image, None) => {
+            (ItemKind::Image | ItemKind::Guide, None) => {
                 let key = (item.path.clone(), item.modified);
                 if self.thumbs_requested.insert(key.clone()) {
                     let _ = self.thumb_jobs.send(key);
                 }
-                p.text(thumb.center(), Align2::CENTER_CENTER, icon::IMAGE, theme::icon_font(26.0), theme::TEXT_FAINT);
+                let glyph = if item.kind == ItemKind::Guide { icon::GUIDE } else { icon::IMAGE };
+                p.text(thumb.center(), Align2::CENTER_CENTER, glyph, theme::icon_font(26.0), theme::TEXT_FAINT);
             }
             (ItemKind::Video, fresh) => {
                 match fresh {
@@ -1662,6 +1871,12 @@ impl RegaApp {
                 p.rect_filled(badge, 5.0, Color32::from_black_alpha(150));
                 p.text(badge.center(), Align2::CENTER_CENTER, ext, theme::medium(10.0), Color32::WHITE);
             }
+        }
+        if item.kind == ItemKind::Guide {
+            let badge = Rect::from_min_size(thumb.left_top() + Vec2::new(8.0, 8.0), Vec2::new(58.0, 18.0));
+            theme::gradient_rect(p, badge, 5, Color32::WHITE);
+            p.text(badge.center() - Vec2::new(14.0, 0.0), Align2::CENTER_CENTER, icon::GUIDE, theme::icon_font(12.0), Color32::WHITE);
+            p.text(badge.center() + Vec2::new(8.0, 0.0), Align2::CENTER_CENTER, "GUIDE", theme::medium(10.0), Color32::WHITE);
         }
         if checked {
             p.rect_filled(thumb, 10.0, theme::ACCENT.gamma_multiply(0.18));
@@ -1752,6 +1967,43 @@ impl RegaApp {
         }
     }
 
+    /// The bar while a guide records: how many steps so far, Stop and Discard.
+    fn guide_bar_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let stop_tip = format!("Stop and edit the guide   {}", self.keys(Action::Guide));
+        let Activity::Guiding(rec) = &self.activity else { return };
+        let (steps, secs) = (rec.step_count(), rec.elapsed().as_secs());
+        let mut stop = None;
+        let frame = egui::Frame::new().fill(Color32::from_rgb(17, 19, 24)).inner_margin(egui::Margin::symmetric(14, 9));
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                let pulse = ((ctx.input(|i| i.time) * 3.0).sin() * 0.5 + 0.5) as f32;
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 6.0 + 3.0 * pulse, theme::CORAL.gamma_multiply(0.25));
+                ui.painter().circle_filled(r.center(), 6.0, theme::CORAL);
+                ui.label(egui::RichText::new(format!("{}:{:02}", secs / 60, secs % 60)).font(FontId::monospace(16.0)).color(theme::TEXT));
+                let label = match steps {
+                    0 => "Click to add steps".to_owned(),
+                    1 => "1 step".to_owned(),
+                    n => format!("{n} steps"),
+                };
+                ui.label(egui::RichText::new(label).color(theme::TEXT_MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(ui, icon::CLOSE, "Discard").clicked() {
+                        stop = Some(true);
+                    }
+                    if theme::icon_button(ui, icon::STOP, &stop_tip).clicked() {
+                        stop = Some(false);
+                    }
+                });
+            });
+        });
+        ctx.request_repaint_after(Duration::from_millis(200));
+        if let Some(discard) = stop {
+            self.stop_guide(&ctx, discard);
+        }
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             return;
@@ -1768,7 +2020,12 @@ impl RegaApp {
                 theme::segmented(
                     ui,
                     &mut self.settings_tab,
-                    &[(SettingsTab::General, "General"), (SettingsTab::Video, "Video"), (SettingsTab::Shortcuts, "Shortcuts")],
+                    &[
+                        (SettingsTab::General, "General"),
+                        (SettingsTab::Video, "Video"),
+                        (SettingsTab::Guide, "Guide"),
+                        (SettingsTab::Shortcuts, "Shortcuts"),
+                    ],
                 );
                 if self.settings_tab != SettingsTab::Shortcuts && self.recording_shortcut.take().is_some() {
                     self.apply_hotkeys();
@@ -1853,6 +2110,57 @@ impl RegaApp {
                             .small()
                             .color(theme::TEXT_FAINT),
                         );
+                    }
+                    SettingsTab::Guide => {
+                        use crate::guide::style;
+                        let g = &mut self.settings.guide;
+                        let hint = |ui: &mut egui::Ui, text: &str| {
+                            ui.label(egui::RichText::new(text).small().color(theme::TEXT_FAINT));
+                        };
+                        // The window takes its height from what's in it; give the
+                        // list a height of its own, as much as the screen allows.
+                        let height = (ui.ctx().content_rect().height() - 240.0).clamp(240.0, 560.0);
+                        egui::ScrollArea::vertical().max_height(height).min_scrolled_height(height).auto_shrink([false, true]).show(ui, |ui| {
+                            theme::section(ui, "New guides");
+                            hint(ui, "Each guide keeps its own look: these are what new guides start with.");
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label("Each step plays for");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    style::seconds_control(ui, &mut g.style.seconds);
+                                });
+                            });
+                            ui.add_space(6.0);
+                            ui.label("Marker");
+                            style::marker_controls(ui, &mut g.style);
+                            ui.add_space(8.0);
+                            theme::section(ui, "Shared page");
+                            style::page_controls(ui, &mut g.style);
+                            ui.add_space(8.0);
+                            theme::section(ui, "Screenshots");
+                            ui.label("Quality");
+                            style::quality_control(ui, &mut g.style.quality);
+                            ui.add_space(8.0);
+                            theme::section(ui, "Recording");
+                            theme::switch(ui, &mut g.record_typing, "Record typing");
+                            if g.record_typing {
+                                theme::switch(ui, &mut g.typed_text_in_captions, "Put typed text in captions");
+                                hint(
+                                    ui,
+                                    if cfg!(target_os = "macos") {
+                                        "Off: captions say “Type here” and what you type is never kept (screenshots still show the screen). Password fields are never seen."
+                                    } else {
+                                        "Off: captions say “Type here” and what you type is never kept (screenshots still show the screen)."
+                                    },
+                                );
+                            }
+                            theme::switch(ui, &mut g.record_keys, "Record shortcuts and key presses");
+                            hint(ui, &format!("{}C, Esc or Enter on its own becomes a step.", platform::CMD));
+                            ui.add_space(8.0);
+                            if *g != style::GuideSettings::default() && theme::ghost_button(ui, Some(icon::UNDO), "Reset to defaults").clicked() {
+                                *g = style::GuideSettings::default();
+                            }
+                        });
                     }
                     SettingsTab::Shortcuts => {
                         theme::section(ui, "Global shortcuts");
@@ -2131,6 +2439,7 @@ impl RegaApp {
 enum SettingsTab {
     General,
     Video,
+    Guide,
     Shortcuts,
 }
 
@@ -2169,6 +2478,7 @@ enum LibFilter {
     All,
     Images,
     Videos,
+    Guides,
 }
 
 /// Large capture-mode button for the welcome screen.
@@ -2338,6 +2648,11 @@ impl eframe::App for RegaApp {
             self.recording_bar_ui(ui);
             return;
         }
+        if matches!(self.activity, Activity::Guiding(_)) {
+            platform::paint_recording_frame(&ctx);
+            self.guide_bar_ui(ui);
+            return;
+        }
         if self.win != Win::Normal {
             return;
         }
@@ -2407,6 +2722,7 @@ fn menu_label(action: Action, shortcuts: &shortcuts::Shortcuts) -> String {
         Action::FullScreen => "Capture Full Screen",
         Action::Video => "Record Video",
         Action::Scroll => "Scrolling Capture",
+        Action::Guide => "Record Guide",
         Action::Text => "Grab Text",
     };
     let keys = shortcuts.display(action);
@@ -2534,10 +2850,15 @@ fn spawn_thumbnailer(ctx: egui::Context) -> (Sender<(PathBuf, SystemTime)>, Rece
     let (res_tx, res_rx) = mpsc::channel();
     std::thread::spawn(move || {
         for (path, modified) in job_rx {
-            let is_video = library::kind_of(&path) == Some(ItemKind::Video);
-            let img = if is_video {
+            let kind = library::kind_of(&path);
+            let img = if kind == Some(ItemKind::Video) {
                 match crate::player::first_frame(&path) {
                     Ok(frame) => image::DynamicImage::ImageRgba8(frame),
+                    Err(_) => continue,
+                }
+            } else if kind == Some(ItemKind::Guide) {
+                match crate::guide::first_shot(&path) {
+                    Ok(shot) => image::DynamicImage::ImageRgba8(shot),
                     Err(_) => continue,
                 }
             } else {

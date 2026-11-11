@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Capture anything on your screen, mark it up, and share it — in seconds.</b><br>
-  A fast, native screenshot, screen-recording and annotation tool written in Rust.
+  A fast, native screenshot, screen-recording, step-by-step guide and annotation tool written in Rust.
 </p>
 
 <p align="center">
@@ -44,6 +44,7 @@
 | **Region & window** | Drag a region on a frozen copy of the screen, or click a window to grab it. A live size label, crosshair and pixel magnifier (with the color's hex code) help you land exactly. |
 | **Full screen** | One shortcut, the whole display under your cursor. |
 | **Scrolling capture** | Rega scrolls the page for you and stitches the frames into one tall image — sticky headers and footers included. |
+| **Guide** | Do a task once and get a step-by-step how-to: every click becomes a step with a screenshot and a marker, shared as one small HTML page. See [Guides](#guides). |
 | **Video** | Record any region to **MP4** (H.264) or **GIF**, with pause/resume and an optional cursor highlight. The control bar stays out of the recording. In the built-in player, trim a recording or **Save as GIF** (the whole video or just the trimmed part). |
 | **Grab text (OCR)** | Select a region and get its text on the clipboard, using the built-in OCR engine of macOS (Vision) or Windows (Windows.Media.Ocr; install a language pack in Settings › Time & language if none is present). |
 | **Delay timer** | 3, 5 or 10 seconds to open a menu or hover state first. |
@@ -51,6 +52,40 @@
 <p align="center">
   <img src="docs/images/capture-overlay.png" alt="Selecting a region: live size label, dimmed surroundings and the pixel magnifier" width="100%">
 </p>
+
+### Guides
+
+Press **Guide** (`⌃⌥G`), pick the window or region, and do the task as usual. Rega turns it into steps as you go:
+
+- **Clicks** — each click inside the region becomes a step, with a screenshot taken the moment the button goes down (before anything changes) and a marker on what was clicked. A double-click is one step.
+- **Typing** — all the typing in one field is one step (“Type “Jane” and press Enter”), its screenshot retaken once you pause so it shows the text.
+- **Shortcuts** — `⌘C`, `Esc` or `Enter` on their own become steps; Rega's own shortcuts don't.
+
+Press `⌃⌥G` or **Stop** on the bar and the guide opens in its editor. Drag steps to reorder them, give each a title and description, click the screenshot to move the marker (or hide it), and pick the marker's look. Every change saves itself.
+
+<p align="center">
+  <img src="docs/images/guide-editor.png" alt="The guide editor: steps with thumbnails on the left, the selected step's screenshot with its marker in the middle, title, description and marker options on the right" width="100%">
+</p>
+
+**Share one file.** A guide is a single HTML page with every screenshot inside: mail it, upload it, or open it in any browser, offline. It plays like stories — a progress bar per step along the top, moving on by itself — with **Back** / **Next**, arrow keys, taps on either side of the picture, and a link to each step (`#3`). It works on phones and follows the viewer's light or dark mode.
+
+<p align="center">
+  <img src="docs/images/guide-page.png" alt="A shared guide in the browser: story-style progress bars, the step's screenshot with a marker, its caption, and Back / Next" width="100%">
+</p>
+
+**Small pages.** Screenshots are capped in size (1920 px by default), and a step that only changed part of the screen — typing, a menu opening — is stored as just the changed tiles over the step before. Each picture is kept as JPEG or PNG, whichever is smaller: five steps over four different screens come to about 800 KB.
+
+**Settings › Guide** sets what new guides start with, and what recording picks up:
+
+| | |
+|---|---|
+| **Marker** | Ring, dot, pointer, hand, spotlight (dims all but the spot) or the step's number; any colour; small, medium or large |
+| **Timing** | How long each step plays (2–12 s; long captions stay up longer) |
+| **Page** | Play automatically, start over at the end, light / dark / follow the viewer, “Made with Rega” |
+| **Quality** | Small (1440 px), Balanced (1920 px), Sharp (2560 px) or Lossless |
+| **Recording** | Record typing; put typed text in captions (off: “Type here”, and the text is never kept); record shortcuts and key presses |
+
+Each guide keeps its own look, so changing a default never changes a page already shared; **Page options** in the editor changes one guide, and **Use for new guides** makes it the default. On macOS, typing into password fields is never seen.
 
 ### Annotate
 
@@ -83,7 +118,7 @@ Sixteen tools in the right-hand panel, each with a one-key shortcut:
 
 ### Library
 
-Every capture is saved automatically and appears in the **library tray** along the bottom of the window. Filter by images or videos, search, open, reveal in Finder / Explorer, or delete with the button that appears on hover. Images remain fully re-editable later — the original pixels and your annotations are kept side by side.
+Every capture is saved automatically and appears in the **library tray** along the bottom of the window. Filter by images, videos or guides, search, open, reveal in Finder / Explorer, or delete with the button that appears on hover. Images remain fully re-editable later — the original pixels and your annotations are kept side by side.
 
 <p align="center">
   <img src="docs/images/welcome.png" alt="Welcome screen with capture modes and the library tray" width="100%">
@@ -122,7 +157,7 @@ MP4 video uses the H.264 codec built into the operating system (VideoToolbox on 
 ### Build the app
 
 ```sh
-git clone https://github.com/<you>/Rega.git
+git clone https://github.com/shair/Rega.git
 cd Rega
 ./scripts/bundle-macos.sh          # builds target/release/Rega.app
 open target/release/Rega.app
@@ -145,7 +180,7 @@ macOS asks once for each of these:
 | Permission | Needed for | Where to grant it |
 |---|---|---|
 | **Screen Recording** | All captures and video | System Settings › Privacy & Security › Screen Recording |
-| **Accessibility** | Scrolling capture only (it sends scroll events) | System Settings › Privacy & Security › Accessibility |
+| **Accessibility** | Scrolling capture (it sends scroll events) and guides (they see your clicks and typing) | System Settings › Privacy & Security › Accessibility |
 
 On first launch Rega shows a **Set up** popup listing each permission with its live status and an **Enable** button that opens the right System Settings pane (and adds Rega to the list). You can skip it; while anything is missing a banner stays at the top with **Review permissions** to reopen the popup. macOS applies Screen Recording only after a restart, so the popup offers **Restart Rega** once you've pressed Enable. Without Screen Recording, Rega won't save a blank capture: it opens the popup instead. Run the `.app` bundle (not the bare binary) so the permissions belong to Rega rather than your terminal.
 
@@ -170,7 +205,7 @@ Open any capture → press `B` and drag over emails, names, tokens or faces → 
 </p>
 
 **Walk someone through a UI**
-Capture the screen → press `N` and click each control in order to drop numbered steps **1, 2, 3** (the count goes up automatically) → add a `T` label beside each → export as **PDF** for a one-page guide. Combine with `B` to blur anything private first.
+Capture the screen → press `N` and click each control in order to drop numbered steps **1, 2, 3** (the count goes up automatically) → add a `T` label beside each → export as **PDF** for a one-page guide. Combine with `B` to blur anything private first. Flow carries on in another screenshot? Set **Start at** in the Step tool's panel (numbers already placed move with it), or press **Continue at 4** to pick up after the last number you placed on another image.
 
 <p align="center">
   <img src="docs/images/example-steps.png" alt="A dashboard with numbered steps 1 to 4 on the Customers menu, the search box and two stat cards, with a legend explaining each step" width="100%">
@@ -192,6 +227,9 @@ Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thin
 **Capture a whole web page**
 `⌃⌥S` → select the browser's content area → Rega scrolls to the end and stitches one tall image.
 
+**Write a how-to without writing**
+`⌃⌥G` → select the app's window → do the task → `⌃⌥G` again. Rega opens the steps: name the guide, adjust captions, then **Preview** or **Export** the HTML page and send it.
+
 **Build a before/after comparison**
 `⌘N` → *Full HD, white* → paste the first screenshot, drag it left → paste the second, drag it right → add labels with `T` → export. To blur or fill inside a pasted shot, right-click it → **Flatten image** first.
 
@@ -207,6 +245,7 @@ Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thin
 | `⌃⌥F` | Capture the full screen |
 | `⌃⌥R` | Start / stop a video recording |
 | `⌃⌥S` | Scrolling capture |
+| `⌃⌥G` | Start / stop recording a guide |
 | `⌃⌥T` | Grab text (OCR) |
 
 ### In the app
@@ -225,6 +264,18 @@ Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thin
 | `⌘D` | Delete the open capture, or the selected library items |
 | `⌘Q` | Quit Rega |
 | `⌘`-click / `⇧`-click | Select several library items, or a range, to delete them together |
+
+### In a guide
+
+| Shortcut | Action |
+|---|---|
+| `←` `→` / `↑` `↓` | Previous / next step |
+| `⌥↑` / `⌥↓` | Move the step up / down |
+| `⌫` | Delete the step |
+| `⌘Z` / `⌘⇧Z` | Undo / redo |
+| `⌘S` | Save now (changes also save by themselves) |
+
+On the shared page: `←` `→` move between steps, `Space` pauses, `Home` / `End` jump to the first / last step.
 
 ## How it works
 
@@ -258,6 +309,14 @@ src/
 ├── resize.rs          frame scaling for recordings and GIFs
 ├── player.rs          video player, trimming and Save as GIF
 ├── scroll.rs          scrolling capture and frame stitching
+├── guide/
+│   ├── mod.rs         guide model and its editable sidecar
+│   ├── input.rs       seeing clicks and keys (event tap / low-level hooks)
+│   ├── recorder.rs    turning clicks and typing into steps with screenshots
+│   ├── export.rs      the shared HTML page, with changed-tile patches
+│   ├── page.html      the page's template and player
+│   ├── style.rs       marker, timing, page and quality options (Settings › Guide)
+│   └── editor.rs      guide editor UI
 ├── ocr.rs             text recognition
 ├── shortcuts.rs       customizable global shortcuts
 ├── library.rs         capture library on disk
@@ -271,7 +330,7 @@ cargo test --release          # unit tests: rendering, export formats, OCR, stit
 cargo clippy --release
 ```
 
-Video goes through the OS codec, so the H.264 tests exercise whichever platform they run on. The Windows backend can be cross-compiled from a Mac (`scripts/package-windows-cross.sh`) but only runs on Windows: before a release, run `cargo test --release -- h264 recorder player` on a Windows 10/11 PC.
+Video goes through the OS codec, so the H.264 tests exercise whichever platform they run on. The Windows backend can be cross-compiled from a Mac (`scripts/package-windows-cross.sh`) but only runs on Windows: before a release, run `cargo test --release -- h264 recorder player` on a Windows 10/11 PC, and record a guide there (clicks, typing with AltGr characters, a shortcut): its mouse and keyboard hooks only run on Windows.
 
 The screenshots in this README are rendered **off-screen** from the real UI with made-up demo content, using [`egui_kittest`](https://crates.io/crates/egui_kittest). To regenerate them after a UI change:
 
@@ -279,11 +338,20 @@ The screenshots in this README are rendered **off-screen** from the real UI with
 cargo test --release readme_screenshots -- --ignored
 ```
 
-They are written to `docs/images/`.
+They are written to `docs/images/`. The shared guide page is a web page, so its picture comes from a browser: the run above also writes `target/guide-readme.html`; then
+
+```sh
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --hide-scrollbars \
+  --force-prefers-reduced-motion --force-device-scale-factor=2 --window-size=1360,860 \
+  --screenshot="$PWD/docs/images/guide-page.png" "file://$PWD/target/guide-readme.html#1"
+```
+
+To look at a guide page with other markers or themes, `GUIDE_MARKER=spotlight GUIDE_THEME=light cargo test sample_page -- --ignored` writes `target/guide-sample.html`.
 
 ## Roadmap
 
 - [x] Windows build
+- [x] Step-by-step guides, shared as one HTML page
 - [ ] Audio in recordings
 - [ ] Capturing across several displays at once
 - [x] H.264 through the operating system's codec instead of a bundled encoder (patent licensing)
