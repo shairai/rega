@@ -157,7 +157,7 @@ MP4 video uses the H.264 codec built into the operating system (VideoToolbox on 
 ### Build the app
 
 ```sh
-git clone https://github.com/shair/Rega.git
+git clone https://github.com/shairai/Rega.git
 cd Rega
 ./scripts/bundle-macos.sh          # builds target/release/Rega.app
 open target/release/Rega.app
