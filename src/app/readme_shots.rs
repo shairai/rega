@@ -476,8 +476,9 @@ fn settle(h: &mut Harness<'_, RegaApp>) {
     for _ in 0..80 {
         h.step();
         let app = h.state();
-        let images = app.library.iter().filter(|i| i.kind == crate::library::ItemKind::Image).count();
-        if app.thumbs.len() >= images {
+        use crate::library::ItemKind;
+        let pictured = app.library.iter().filter(|i| matches!(i.kind, ItemKind::Image | ItemKind::Guide)).count();
+        if app.thumbs.len() >= pictured {
             break;
         }
         std::thread::sleep(Duration::from_millis(40));
@@ -555,7 +556,10 @@ fn save(img: &RgbaImage, name: &str) {
 }
 
 fn demo_library() -> (PathBuf, RgbaImage) {
-    let dir = std::env::temp_dir().join(format!("rega-demo-{}", std::process::id()));
+    // One folder per call: tests run side by side in one process.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("rega-demo-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let dashboard = render_ui(DASH, draw_dashboard);
@@ -577,7 +581,44 @@ fn demo_library() -> (PathBuf, RgbaImage) {
     let mp4 = dir.join("Rega 2026-11-02 at 09.30.00.mp4");
     let older = std::time::SystemTime::now() - Duration::from_secs(60);
     let _ = std::fs::File::options().write(true).open(&mp4).and_then(|f| f.set_modified(older));
+    std::thread::sleep(Duration::from_millis(20));
+    write_demo_guide(&dir, &dashboard, &code);
     (dir, dashboard)
+}
+
+/// The demo library's guide (its newest item).
+const DEMO_GUIDE: &str = "Rega 2026-11-02 at 10.00.00.html";
+
+/// A three-step guide through the demo dashboard and code editor.
+fn write_demo_guide(library: &Path, dashboard: &RgbaImage, code: &RgbaImage) {
+    use crate::guide::editor::GuideEditor;
+    use crate::guide::{Action, Button, Guide, Shot, Step};
+    let mut typed = dashboard.clone();
+    for (x, y) in (1500..1720).flat_map(|x| (60..84).map(move |y| (x, y))) {
+        typed.put_pixel(x, y, image::Rgba([30, 30, 30, 255]));
+    }
+    let step = |img: &RgbaImage, action: Action, marker: Option<[f32; 2]>, title: &str| Step {
+        shot: Shot::encode(&crate::guide::fit_capture(img.clone(), Some(1920))).unwrap(),
+        action,
+        marker,
+        marker_hidden: false,
+        title: title.into(),
+        note: String::new(),
+    };
+    let click = Action::Click { button: Button::Left, count: 1 };
+    let mut steps = vec![
+        step(dashboard, click.clone(), Some([0.075, 0.21]), "Open Customers"),
+        step(&typed, Action::Type { text: "Jane".into(), then: Some("Enter".into()) }, Some([0.80, 0.105]), "Type “Jane” and press Enter"),
+        step(code, click, Some([0.5, 0.4]), "Click here"),
+    ];
+    steps[0].note = "It's in the sidebar, under Overview.".into();
+    let mut guide = Guide::new("Find a customer".into(), steps);
+    guide.style.seconds = 5.0;
+    // GUIDE_MARKER=hand (etc.) shows the other shapes.
+    if let Ok(m) = std::env::var("GUIDE_MARKER") {
+        guide.style.marker = serde_json::from_value(serde_json::Value::String(m)).unwrap();
+    }
+    GuideEditor::new(&egui::Context::default(), library.join(DEMO_GUIDE), guide).save_now().unwrap();
 }
 
 fn desktop(dashboard: &RgbaImage, code: &RgbaImage) -> (RgbaImage, Vec<WinRect>) {
@@ -663,7 +704,11 @@ fn readme_screenshots() {
     save(&window_chrome(&h.render().unwrap()), "new-canvas.png");
     h.state_mut().show_new_dialog = false;
 
-    // 5. Settings (General and Shortcuts tabs).
+    // 5. Settings (General and Shortcuts tabs), showing the library where it
+    // would be on a Mac rather than this run's temporary folder. Marking the
+    // library freshly scanned keeps the tray from rescanning that path.
+    h.state_mut().settings.save_dir = PathBuf::from("/Users/you/Pictures/Rega");
+    h.state_mut().library_scanned = std::time::Instant::now();
     h.state_mut().show_settings = true;
     for _ in 0..6 {
         h.step();
@@ -946,38 +991,9 @@ fn write_guide_shots() {
 
 /// The demo guide open in the editor, rendered, and where its page was saved.
 fn guide_editor_shot() -> (RgbaImage, PathBuf) {
-    use crate::guide::{Action, Button, Guide, Shot, Step};
     use crate::guide::editor::GuideEditor;
-    let (library, dashboard) = demo_library();
-    let code = render_ui(CODE, draw_code_editor);
-    let mut typed = dashboard.clone();
-    for (x, y) in (1500..1720).flat_map(|x| (60..84).map(move |y| (x, y))) {
-        typed.put_pixel(x, y, image::Rgba([30, 30, 30, 255]));
-    }
-    let step = |img: &RgbaImage, action: Action, marker: Option<[f32; 2]>, title: &str| Step {
-        shot: Shot::encode(&crate::guide::fit_capture(img.clone(), Some(1920))).unwrap(),
-        action,
-        marker,
-        marker_hidden: false,
-        title: title.into(),
-        note: String::new(),
-    };
-    let click = Action::Click { button: Button::Left, count: 1 };
-    let mut steps = vec![
-        step(&dashboard, click.clone(), Some([0.075, 0.21]), "Open Customers"),
-        step(&typed, Action::Type { text: "Jane".into(), then: Some("Enter".into()) }, Some([0.80, 0.105]), "Type “Jane” and press Enter"),
-        step(&code, click, Some([0.5, 0.4]), "Click here"),
-    ];
-    steps[0].note = "It's in the sidebar, under Overview.".into();
-    let path = library.join("Rega 2026-11-02 at 10.00.00.html");
-    let mut guide = Guide::new("Find a customer".into(), steps);
-    guide.style.seconds = 5.0;
-    // GUIDE_MARKER=hand (etc.) shows the other shapes.
-    if let Ok(m) = std::env::var("GUIDE_MARKER") {
-        guide.style.marker = serde_json::from_value(serde_json::Value::String(m)).unwrap();
-    }
-    let ctx = egui::Context::default();
-    GuideEditor::new(&ctx, path.clone(), guide.clone()).save_now().unwrap();
+    let (library, _) = demo_library();
+    let path = library.join(DEMO_GUIDE);
     let page = path.clone();
     let mut h = app_harness(APP_SIZE, move |ctx| {
         let mut app = RegaApp::demo(ctx, library);
