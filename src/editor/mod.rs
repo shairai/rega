@@ -219,6 +219,23 @@ fn paint_stamp(painter: &egui::Painter, center: Pos2, diameter: f32, stamp: Stam
 
 /// How close (screen points) the pointer must be to grab a resize handle.
 const HANDLE_GRAB: f32 = 10.0;
+/// A mark copied inside the editor, and what the system clipboard held then —
+/// if that has changed by paste time, the user copied something else.
+struct CopiedElement {
+    ann: Annotation,
+    clipboard: Option<u64>,
+    pastes: u32,
+}
+
+fn clipboard_fingerprint() -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let img = crate::platform::clipboard_image()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (img.width(), img.height()).hash(&mut h);
+    img.as_raw().hash(&mut h);
+    Some(h.finish())
+}
+
 /// Gap (screen points) between a selected mark and its dashed outline.
 const SELECTION_PAD: f32 = 4.0;
 
@@ -318,6 +335,8 @@ pub struct Editor {
     drawing: Option<Annotation>,
     crop_drag: Option<(P, P)>,
     selected: Option<usize>,
+    /// The mark copied with ⌘C, for ⌘V to duplicate.
+    copied: Option<CopiedElement>,
     moving: Option<P>,
     moved: bool,
     editing_text: Option<usize>,
@@ -391,6 +410,7 @@ impl Editor {
             drawing: None,
             crop_drag: None,
             selected: None,
+            copied: None,
             moving: None,
             menu_target: None,
             moved: false,
@@ -1989,7 +2009,10 @@ impl Editor {
             return;
         }
         if copy_requested {
-            *action = self.copy_action();
+            *action = match self.selected.filter(|&i| i < self.anns.len()) {
+                Some(i) => self.copy_element(i),
+                None => self.copy_action(),
+            };
         }
         // ⌘V: egui sends `PasteImage` when the clipboard holds only an image,
         // and `Paste` (text) otherwise — e.g. a file copied in Finder.
@@ -2003,7 +2026,9 @@ impl Editor {
             i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
                 || (i.modifiers.command && i.key_pressed(Key::V))
         });
-        if let Some(img) = pasted_image {
+        if (pasted_image.is_some() || paste_requested) && self.paste_copied_element() {
+            *action = EditorAction::Toast("Element pasted".into());
+        } else if let Some(img) = pasted_image {
             self.paste_image(img);
             *action = EditorAction::Toast("Image pasted — drag to move, pull the corner to resize".into());
         } else if paste_requested {
@@ -2061,7 +2086,40 @@ impl Editor {
         }
     }
 
+    /// ⌘C with a mark selected: remember it so ⌘V can duplicate it. A pasted
+    /// image also goes on the system clipboard so other apps can take it.
+    fn copy_element(&mut self, i: usize) -> EditorAction {
+        self.commit_text();
+        let Some(ann) = self.anns.get(i).cloned() else { return self.copy_action() };
+        if let Kind::Image { img, .. } = &ann.kind {
+            let _ = crate::platform::copy_image(img);
+        }
+        self.copied = Some(CopiedElement { ann, clipboard: clipboard_fingerprint(), pastes: 0 });
+        EditorAction::Toast("Element copied — paste to duplicate it".into())
+    }
+
+    /// Duplicate the copied mark, unless something else has been copied since.
+    fn paste_copied_element(&mut self) -> bool {
+        let Some(c) = &mut self.copied else { return false };
+        if c.clipboard != clipboard_fingerprint() {
+            self.copied = None;
+            return false;
+        }
+        c.pastes += 1;
+        let off = 16.0 * c.pastes as f32;
+        let mut ann = c.ann.clone();
+        ann.translate(off, off);
+        self.push_undo();
+        self.anns.push(ann);
+        self.selected = Some(self.anns.len() - 1);
+        self.texture_dirty = true;
+        self.dirty = true;
+        self.change_tool(Tool::Select);
+        true
+    }
+
     fn copy_action(&mut self) -> EditorAction {
+        self.copied = None;
         self.commit_text();
         match crate::platform::copy_image(&self.flatten()) {
             Ok(()) => EditorAction::Toast("Image copied to clipboard".into()),
