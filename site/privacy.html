@@ -8,6 +8,7 @@
 <meta name="theme-color" content="#0b0d11">
 <link rel="icon" type="image/png" href="/favicon.png">
 <link rel="stylesheet" href="/styles.css">
+<script src="/consent.js"></script>
 </head>
 <body>
 
@@ -21,35 +22,43 @@
       <a href="/#shortcuts">Shortcuts</a>
       <a href="/releases">What's new</a>
     </nav>
-    <a class="btn btn-primary btn-small" href="/#download">Download</a>
+    <div class="nav-actions">
+      <a class="btn btn-small nav-gh" href="https://github.com/shairai/rega" aria-label="Rega on GitHub"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8"/></svg><span>GitHub</span></a>
+      <a class="btn btn-primary btn-small" href="/#download">Download</a>
+    </div>
   </div>
 </header>
 
 <main class="page">
   <div class="wrap prose">
     <h1>Privacy</h1>
-    <p class="lede">Short version: what you capture stays on your computer, and nobody is watching.</p>
+    <p class="lede">Short version: what you capture stays on your computer, and the website only counts visits if you allow it.</p>
 
     <h2>The app</h2>
-    <p><strong>Your captures never leave your computer.</strong> Screenshots, recordings, guides and the text Rega reads from your screen are saved as files in the folder you choose in Settings, and copied to your clipboard when you ask. Rega has no account, no cloud storage and no analytics.</p>
+    <p><strong>Your captures never leave your computer.</strong> Screenshots, recordings, guides and the text Rega reads from your screen are saved as files in the folder you choose in Settings, and copied to your clipboard when you ask. Rega has no account, no cloud storage and no analytics — and it's open source, so you don't have to take our word for it: <a href="https://github.com/shairai/rega">read the code on GitHub</a>.</p>
     <p>Recording a guide sees your clicks and typing <strong>only while the guide is recording</strong>, and only to turn them into steps. Typed text goes into captions only if you turn that on, and on macOS, typing into password fields is never seen.</p>
 
     <h2>The update check</h2>
     <p>Once a day, Rega downloads <a href="/latest.json">latest.json</a> from this website to see whether a newer version is out. The request carries Rega's version number and nothing about you or your captures. Like any web request it comes from your IP address, which our host, Vercel, may keep in its logs for a short time.</p>
     <p>Turn it off in Rega's Settings › General › Updates. You can still check by hand from the same place.</p>
 
-    <h2>This website</h2>
-    <p>No cookies, no analytics, no trackers, no third-party fonts or scripts. Vercel, which hosts the site, keeps standard request logs (IP address, page and time) to run and protect the service; see <a href="https://vercel.com/legal/privacy-policy">Vercel's privacy policy</a>.</p>
+    <h2 id="website">This website</h2>
+    <p><strong>Analytics only if you agree.</strong> On your first visit the site asks whether it may count visits and downloads. Until you click <strong>Accept</strong>, nothing from Google loads and no cookies are set.</p>
+    <p>If you accept, the site loads Google Tag Manager, which runs Google Analytics. It sets cookies (named <code>_ga…</code>) to tell visits apart, and records the pages you open and which download you click. Google receives your IP address and browser details to do this; see <a href="https://policies.google.com/privacy">Google's privacy policy</a>. The app itself never runs any of this.</p>
+    <p>Change your mind any time with <a href="#" data-consent-open>Cookie settings</a>, at the bottom of every page. Declining stops the analytics and removes its cookies.</p>
+    <p>The site uses no other cookies, trackers or third-party fonts. Vercel, which hosts it, keeps standard request logs (IP address, page and time) to run and protect the service; see <a href="https://vercel.com/legal/privacy-policy">Vercel's privacy policy</a>.</p>
   </div>
 </main>
 
 <footer>
   <div class="wrap">
-    <span>© 2026 Shai Raiten · MIT License</span>
+    <span>© 2026 Shai Raiten · <a href="https://github.com/shairai/rega/blob/master/LICENSE">MIT License</a></span>
     <nav aria-label="Footer">
       <a href="/">Home</a>
       <a href="/releases">What's new</a>
       <a href="/#download">Download</a>
+      <a href="https://github.com/shairai/rega">GitHub</a>
+      <a href="#" data-consent-open>Cookie settings</a>
     </nav>
   </div>
 </footer>

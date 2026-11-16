@@ -21,6 +21,8 @@ use crate::editor::model::{Annotation, BlurStyle, DEFAULT_BLUR_STRENGTH, Kind, P
 use crate::overlay::{Overlay, Purpose};
 use crate::theme;
 
+mod demo;
+
 const PPP: f32 = 2.0;
 const APP_SIZE: Vec2 = Vec2::new(1360.0, 900.0);
 
@@ -622,9 +624,14 @@ fn write_demo_guide(library: &Path, dashboard: &RgbaImage, code: &RgbaImage) {
 }
 
 fn desktop(dashboard: &RgbaImage, code: &RgbaImage) -> (RgbaImage, Vec<WinRect>) {
+    desktop_with_code_at(dashboard, code, Pos2::new(640.0, 330.0))
+}
+
+/// The demo desktop with the code window's top-left at `code_at`.
+fn desktop_with_code_at(dashboard: &RgbaImage, code: &RgbaImage, code_at: Pos2) -> (RgbaImage, Vec<WinRect>) {
     let size = Vec2::new(1440.0, 900.0);
     let dash_rect = Rect::from_min_size(Pos2::new(70.0, 70.0), Vec2::new(880.0, 550.0));
-    let code_rect = Rect::from_min_size(Pos2::new(640.0, 330.0), Vec2::new(740.0, 471.0));
+    let code_rect = Rect::from_min_size(code_at, Vec2::new(740.0, 471.0));
     let to_color = |img: &RgbaImage| egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
     let (dash_c, code_c) = (to_color(dashboard), to_color(code));
     let mut textures: Option<(egui::TextureHandle, egui::TextureHandle)> = None;

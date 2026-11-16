@@ -21,6 +21,8 @@ import pathlib
 import re
 import sys
 
+GITHUB_URL = "https://github.com/shairai/rega"
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SITE = ROOT / "site"
 DOWNLOADS = SITE / "downloads"
@@ -159,8 +161,7 @@ CARDS = {
         "needs": "macOS 12.3 or later",
         "steps": [
             "Open the disk image and drag Rega to Applications.",
-            "Open Rega. macOS says it can't check the app for malware: Rega isn't notarized by Apple yet.",
-            "Open System Settings › Privacy &amp; Security, scroll down and click <b>Open Anyway</b>.",
+            "Open Rega. It's signed and notarized by Apple, so it opens like any other app.",
             "Grant Screen Recording (and Accessibility for scrolling captures and guides) when Rega asks.",
         ],
     },
@@ -192,7 +193,7 @@ def downloads_html(latest, files):
       <div><h3>{card['name']}</h3><div class="os-note">{card['note']}</div></div>
       <span class="you-tag">Your system</span>
     </header>
-    <a class="btn btn-primary btn-large" href="/download/{card['slug']}">{card['button']}</a>
+    <a class="btn btn-primary btn-large" href="/download/{card['slug']}" data-version="{latest['version']}">{card['button']}</a>
     <dl><dt>Version</dt><dd>{latest['version']} · {nice_date(latest['date'])}</dd><dt>Size</dt><dd>{megabytes(files[key]['size'])} {card['kind']}</dd><dt>Needs</dt><dd>{card['needs']}</dd></dl>
     <details>
       <summary>First launch</summary>
@@ -288,7 +289,7 @@ def main():
         "pill": f'<a class="pill" href="/releases#v{version}"><b>New</b> Rega {version} — '
                 f"{html.escape(pill_title)} →</a>",
         "hero-meta": f'<p class="hero-meta">Version {version} · macOS 12.3+ and Windows 10/11 · '
-                     f'<a href="/releases">What\'s new</a></p>',
+                     f'<a href="/releases">What\'s new</a> · <a href="{GITHUB_URL}">Open source on GitHub</a></p>',
         "downloads": downloads_html(latest, files),
         "recent": changelog_html(releases[:3], "/releases"),
     })

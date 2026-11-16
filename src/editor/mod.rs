@@ -326,6 +326,8 @@ pub struct Editor {
     hex_edit: Option<String>,
 
     zoom: f32,
+    /// Screen position of the image's top-left corner, as last drawn.
+    view_origin: Pos2,
     fit: bool,
     /// The flattened canvas as GPU tiles (image-pixel rect each): GPUs cap a
     /// texture side at 8192–16384 px and scrolling captures reach 40000.
@@ -404,6 +406,7 @@ impl Editor {
             picker_hue: 0.0,
             hex_edit: None,
             zoom: 1.0,
+            view_origin: Pos2::ZERO,
             fit: true,
             tiles: Vec::new(),
             texture_dirty: true,
@@ -451,6 +454,13 @@ impl Editor {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Where an image pixel is on screen as of the last frame, for driving the
+    /// editor with pointer events off-screen (the website's demo video).
+    #[cfg(test)]
+    pub(crate) fn image_to_screen(&self, p: P) -> Pos2 {
+        Pos2::new(self.view_origin.x + p.x * self.zoom, self.view_origin.y + p.y * self.zoom)
     }
 
     pub fn flatten(&self) -> RgbaImage {
@@ -1784,6 +1794,7 @@ impl Editor {
                 if size.y < area.y { outer.center().y - size.y / 2.0 } else { outer.min.y },
             );
             let img_rect = Rect::from_min_size(origin, size);
+            self.view_origin = origin;
             let zoom = self.zoom;
             let to_img = |p: Pos2| P::new((p.x - origin.x) / zoom, (p.y - origin.y) / zoom);
             let to_screen = |p: P| Pos2::new(origin.x + p.x * zoom, origin.y + p.y * zoom);

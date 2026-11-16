@@ -19,6 +19,7 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="preload" href="/fonts/ubuntu-bold.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/styles.css">
+<script src="/consent.js"></script>
 <script src="/site.js" defer></script>
 </head>
 <body>
@@ -33,7 +34,10 @@
       <a href="#shortcuts">Shortcuts</a>
       <a href="/releases">What's new</a>
     </nav>
-    <a class="btn btn-primary btn-small" href="#download">Download</a>
+    <div class="nav-actions">
+      <a class="btn btn-small nav-gh" href="https://github.com/shairai/rega" aria-label="Rega on GitHub"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8"/></svg><span>GitHub</span></a>
+      <a class="btn btn-primary btn-small" href="#download">Download</a>
+    </div>
   </div>
 </header>
 
@@ -42,7 +46,7 @@
 <section class="hero">
   <div class="wrap">
     <!-- generated:pill -->
-    <a class="pill" href="/releases#v0.4.2"><b>New</b> Rega 0.4.2 — Update notices, and a steadier window on Windows →</a>
+    <a class="pill" href="/releases#v0.4.3"><b>New</b> Rega 0.4.3 — Signed and notarized on macOS →</a>
     <!-- /generated:pill -->
     <h1>Capture anything. <span class="gradient-text">Share it in a <a class="rega" href="#name" title="רֶגַע (rega) is Hebrew for “a moment”">rega</a>.</span></h1>
     <p class="lede">Screenshots, scrolling captures, screen recordings and step-by-step guides — marked up and on your clipboard in seconds. A fast, native app for macOS and Windows.</p>
@@ -54,11 +58,24 @@
       <a class="btn btn-large" href="#features">See what it does</a>
     </div>
     <!-- generated:hero-meta -->
-    <p class="hero-meta">Version 0.4.2 · macOS 12.3+ and Windows 10/11 · <a href="/releases">What's new</a></p>
+    <p class="hero-meta">Version 0.4.3 · macOS 12.3+ and Windows 10/11 · <a href="/releases">What's new</a> · <a href="https://github.com/shairai/rega">Open source on GitHub</a></p>
     <!-- /generated:hero-meta -->
-    <div class="hero-shot">
-      <img src="/images/editor.webp" width="2000" height="1397" alt="The Rega editor: a dashboard screenshot marked up with an arrow, a callout, a highlighted row, blurred emails, numbered steps and check-mark stamps, with the tools panel on the right and the library along the bottom" fetchpriority="high">
-    </div>
+    <figure class="hero-shot demo">
+      <div class="demo-frame">
+        <video id="demo-video" src="/media/demo.mp4" poster="/media/demo.jpg" width="1920" height="1200" muted loop playsinline controls preload="auto"
+          aria-label="Rega in use: press Control-Option-C, drag over part of a dashboard, add an arrow, a text callout, a blur, step numbers and a check mark, copy it, and paste it into a team chat"></video>
+        <button class="demo-toggle" type="button" aria-label="Pause the demo" hidden>
+          <svg class="i-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5h3.5v14H7zm6.5 0H17v14h-3.5z"/></svg>
+          <svg class="i-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>
+        </button>
+      </div>
+      <ol class="demo-steps">
+        <li data-step="1" data-t="0.00"><b>1</b><span>Press <kbd>⌃⌥C</kbd> anywhere</span></li>
+        <li data-step="2" data-t="1.60"><b>2</b><span>Drag over what you want</span></li>
+        <li data-step="3" data-t="4.40"><b>3</b><span>Mark it up, one key per tool</span></li>
+        <li data-step="4" data-t="12.47"><b>4</b><span><kbd>⌘C</kbd> and paste anywhere</span></li>
+      </ol>
+    </figure>
   </div>
 </section>
 
@@ -213,12 +230,13 @@
     <div class="section-head">
       <span class="eyebrow">Private by design</span>
       <h2>Your screen stays on your computer</h2>
-      <p>No account, no cloud, no analytics. Rega is a native app that works offline.</p>
+      <p>No account, no cloud, nothing watching what you capture — and the code is open, so you don't have to take our word for it.</p>
     </div>
-    <div class="cards">
+    <div class="cards cards-4">
       <div class="card"><h3><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 22q-.82 0-1.41-.59T4 20V10q0-.82.59-1.41T6 8h1V6q0-2.08 1.46-3.54T12 1t3.54 1.46T17 6v2h1q.82 0 1.41.59T20 10v10q0 .82-.59 1.41T18 22zm0-2h12V10H6zm6-3q.82 0 1.41-.59T14 15t-.59-1.41T12 13t-1.41.59T10 15t.59 1.41T12 17M9 8h6V6q0-1.25-.88-2.12T12 3t-2.12.88T9 6z"/></svg>Nothing uploaded</h3><p>Captures, recordings and guides are files in a folder you pick. Nothing is sent anywhere.</p></div>
       <div class="card"><h3><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 12q-1.65 0-2.82-1.17T8 8t1.18-2.82T12 4t2.83 1.18T16 8t-1.17 2.83T12 12m-8 8v-2.8q0-.85.44-1.56t1.16-1.09q1.55-.77 3.15-1.16T12 13t3.25.39 3.15 1.16q.72.38 1.16 1.09T20 17.2V20z"/></svg>No account</h3><p>Download, open, capture. There's nothing to sign up for.</p></div>
-      <div class="card"><h3><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 17q.42 0 .71-.29T13 16t-.29-.71T12 15t-.71.29T11 16t.29.71.71.29m-1-4h2V7h-2zm1 9q-2.08 0-3.9-.79t-3.17-2.14-2.14-3.17T2 12t.79-3.9 2.14-3.17T8.1 2.79 12 2t3.9.79 3.17 2.14 2.14 3.17T22 12t-.79 3.9-2.14 3.17-3.17 2.14T12 22"/></svg>No tracking</h3><p>No analytics in the app or on this site. The only request Rega makes is a daily look for a new version — and you can turn that off.</p></div>
+      <div class="card"><h3><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 17q.42 0 .71-.29T13 16t-.29-.71T12 15t-.71.29T11 16t.29.71.71.29m-1-4h2V7h-2zm1 9q-2.08 0-3.9-.79t-3.17-2.14-2.14-3.17T2 12t.79-3.9 2.14-3.17T8.1 2.79 12 2t3.9.79 3.17 2.14 2.14 3.17T22 12t-.79 3.9-2.14 3.17-3.17 2.14T12 22"/></svg>No tracking</h3><p>No analytics in the app. The only request Rega makes is a daily look for a new version — and you can turn that off. This website counts visits only if you allow it.</p></div>
+      <div class="card"><h3><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m8 18-6-6 6-6 1.42 1.42L4.85 12l4.57 4.58zm8 0-1.42-1.42L19.15 12l-4.57-4.58L16 6l6 6z"/></svg>Open source</h3><p>Every line is <a href="https://github.com/shairai/rega">on GitHub</a> under the MIT License. Read what Rega does with your screen, or build it yourself.</p></div>
     </div>
   </div>
 </section>
@@ -246,7 +264,7 @@
     <div class="free">
       <span class="eyebrow">Pricing</span>
       <h2>Free. <span class="gradient-text">Really.</span></h2>
-      <p>No subscription, no trial, no “Pro” tier hiding the good tools. Every feature on this page is in the free download.</p>
+      <p>No subscription, no trial, no “Pro” tier hiding the good tools. Every feature on this page is in the free download, and the code is <a href="https://github.com/shairai/rega">open source</a>.</p>
       <p class="fine-print"><b>The fine print:</b> if the word “free” makes you think “Free Palestine”, you can definitely feel free — and not download.</p>
     </div>
   </div>
@@ -292,14 +310,13 @@
           <div><h3>macOS</h3><div class="os-note">Apple silicon and Intel</div></div>
           <span class="you-tag">Your system</span>
         </header>
-        <a class="btn btn-primary btn-large" href="/download/mac">Download for Mac</a>
-        <dl><dt>Version</dt><dd>0.4.2 · 16 Nov 2026</dd><dt>Size</dt><dd>15.7 MB disk image</dd><dt>Needs</dt><dd>macOS 12.3 or later</dd></dl>
+        <a class="btn btn-primary btn-large" href="/download/mac" data-version="0.4.3">Download for Mac</a>
+        <dl><dt>Version</dt><dd>0.4.3 · 16 Nov 2026</dd><dt>Size</dt><dd>15.8 MB disk image</dd><dt>Needs</dt><dd>macOS 12.3 or later</dd></dl>
         <details>
           <summary>First launch</summary>
           <ol>
             <li>Open the disk image and drag Rega to Applications.</li>
-            <li>Open Rega. macOS says it can't check the app for malware: Rega isn't notarized by Apple yet.</li>
-            <li>Open System Settings › Privacy &amp; Security, scroll down and click <b>Open Anyway</b>.</li>
+            <li>Open Rega. It's signed and notarized by Apple, so it opens like any other app.</li>
             <li>Grant Screen Recording (and Accessibility for scrolling captures and guides) when Rega asks.</li>
           </ol>
         </details>
@@ -310,8 +327,8 @@
           <div><h3>Windows</h3><div class="os-note">64-bit installer</div></div>
           <span class="you-tag">Your system</span>
         </header>
-        <a class="btn btn-primary btn-large" href="/download/windows">Download for Windows</a>
-        <dl><dt>Version</dt><dd>0.4.2 · 16 Nov 2026</dd><dt>Size</dt><dd>6.5 MB installer</dd><dt>Needs</dt><dd>Windows 10 or 11, 64-bit</dd></dl>
+        <a class="btn btn-primary btn-large" href="/download/windows" data-version="0.4.3">Download for Windows</a>
+        <dl><dt>Version</dt><dd>0.4.3 · 16 Nov 2026</dd><dt>Size</dt><dd>6.6 MB installer</dd><dt>Needs</dt><dd>Windows 10 or 11, 64-bit</dd></dl>
         <details>
           <summary>First launch</summary>
           <ol>
@@ -323,6 +340,7 @@
       </article>
     </div>
     <!-- /generated:downloads -->
+    <p class="download-alt">Rather build it yourself? The source and build steps are <a href="https://github.com/shairai/rega#install">on GitHub</a>. Found a bug? <a href="https://github.com/shairai/rega/issues">Tell us there</a>.</p>
   </div>
 </section>
 
@@ -334,17 +352,17 @@
     </div>
     <!-- generated:recent -->
     <div class="changelog">
+      <article class="release" id="v0.4.3">
+        <div class="release-meta"><a class="v" href="/releases#v0.4.3">0.4.3</a><time datetime="2026-11-16">16 Nov 2026</time><br><span class="latest">Latest</span></div>
+        <div><h3>Signed and notarized on macOS.</h3><ul><li>macOS: Rega is signed with a Developer ID and notarized by Apple, so it opens like any other app — no more <strong>Open Anyway</strong> in System Settings.</li><li>If macOS asks for Screen Recording or Accessibility again after this update, allow them once more; later updates keep them.</li></ul></div>
+      </article>
       <article class="release" id="v0.4.2">
-        <div class="release-meta"><a class="v" href="/releases#v0.4.2">0.4.2</a><time datetime="2026-11-16">16 Nov 2026</time><br><span class="latest">Latest</span></div>
+        <div class="release-meta"><a class="v" href="/releases#v0.4.2">0.4.2</a><time datetime="2026-11-16">16 Nov 2026</time></div>
         <div><h3>Update notices, and a steadier window on Windows.</h3><ul><li>Rega tells you when a new version is out: it checks the website once a day and shows a notice with a <strong>Download</strong> button. Turn it off in Settings › General › Updates.</li><li>Windows: Rega draws with DirectX 12 on the graphics card that drives your screen, to stop the window blinking blank while you hover the capture buttons on some PCs.</li></ul></div>
       </article>
       <article class="release" id="v0.4.1">
         <div class="release-meta"><a class="v" href="/releases#v0.4.1">0.4.1</a><time datetime="2026-11-15">15 Nov 2026</time></div>
         <div><h3>Copy and paste marks in the editor.</h3><ul><li>Select any mark (arrow, text, shape, stamp, pasted image…) and press <code>⌘C</code> / <code>Ctrl+C</code>, then <code>⌘V</code> / <code>Ctrl+V</code> to drop a copy next to it. Paste again for more copies, each a little further along.</li><li>Copying a pasted image also puts it on the system clipboard, so other apps can take it.</li></ul></div>
-      </article>
-      <article class="release" id="v0.4.0">
-        <div class="release-meta"><a class="v" href="/releases#v0.4.0">0.4.0</a><time datetime="2026-11-11">11 Nov 2026</time></div>
-        <div><h3>Guides: do a task once, get a step-by-step how-to.</h3><ul><li><strong>Guide</strong> (<code>⌃⌥G</code>) turns every click into a step with a screenshot and a marker, typing in a field into one step, and shortcuts into steps of their own.</li><li>Reorder steps by dragging, give each a title and description, move or hide its marker.</li><li>Share one small HTML page that plays like stories, works offline and on phones, and follows the viewer's light or dark mode.</li><li>Settings › Guide: marker style and colour, step time, quality, and what recording picks up.</li><li>Step numbers in the editor can start at any number, or <strong>Continue at N</strong> from another image.</li><li>The highlighter keeps its own yellow and straightens wobbly strokes.</li><li>The selection and recording border turns in the logo's gradient, with rounded corners.</li></ul></div>
       </article>
     </div>
     <!-- /generated:recent -->
@@ -356,12 +374,15 @@
 
 <footer>
   <div class="wrap">
-    <span>© 2026 Shai Raiten · MIT License</span>
+    <span>© 2026 Shai Raiten · <a href="https://github.com/shairai/rega/blob/master/LICENSE">MIT License</a></span>
     <nav aria-label="Footer">
       <a href="/releases">What's new</a>
       <a href="/#download">Download</a>
       <a href="/privacy">Privacy</a>
+      <a href="https://github.com/shairai/rega">GitHub</a>
+      <a href="https://github.com/shairai/rega/issues">Report a bug</a>
       <a href="/latest.json">latest.json</a>
+      <a href="#" data-consent-open>Cookie settings</a>
     </nav>
   </div>
 </footer>

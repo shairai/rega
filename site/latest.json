@@ -1,20 +1,20 @@
 {
-  "version": "0.4.2",
+  "version": "0.4.3",
   "date": "2026-11-16",
-  "title": "Update notices, and a steadier window on Windows.",
+  "title": "Signed and notarized on macOS.",
   "notes": [
-    "Rega tells you when a new version is out: it checks the website once a day and shows a notice with a Download button. Turn it off in Settings › General › Updates.",
-    "Windows: Rega draws with DirectX 12 on the graphics card that drives your screen, to stop the window blinking blank while you hover the capture buttons on some PCs."
+    "macOS: Rega is signed with a Developer ID and notarized by Apple, so it opens like any other app — no more Open Anyway in System Settings.",
+    "If macOS asks for Screen Recording or Accessibility again after this update, allow them once more; later updates keep them."
   ],
   "url": "https://rega-capture.vercel.app/releases",
   "downloads": {
     "macos": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.2-macos-universal.dmg",
-      "size": 15749824
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.3-macos-universal.dmg",
+      "size": 15765152
     },
     "windows": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.2-windows-x64-setup.exe",
-      "size": 6548605
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.3-windows-x64-setup.exe",
+      "size": 6551218
     }
   }
 }

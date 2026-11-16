@@ -8,8 +8,10 @@ Hobby plan.
 | File | What it is |
 |---|---|
 | `index.html`, `releases.html`, `privacy.html`, `404.html` | The pages. Edit them by hand, except the `<!-- generated:… -->` blocks. |
-| `styles.css`, `site.js` | Styles (the app's colours and Ubuntu font); `site.js` only picks the visitor's system for the download button. |
+| `styles.css`, `site.js` | Styles (the app's colours and Ubuntu font); `site.js` picks the visitor's system for the download button and runs the demo video. |
+| `consent.js` | The cookie banner, and Google Tag Manager once the visitor accepts. See [Analytics](#analytics). |
 | `images/`, `fonts/` | Screenshots from `docs/images` as WebP, and the Ubuntu font as WOFF2 subsets. |
+| `media/demo.mp4`, `media/demo.jpg` | The home page's demo video and its poster. Rendered from the real UI, see below. |
 | `latest.json` | **Read by the app** once a day to see if a newer version is out. |
 | `releases.json` | Every version and its notes. |
 | `vercel.json` | Headers, and the `/download/mac` and `/download/windows` redirects. |
@@ -24,7 +26,11 @@ installers. Don't edit them by hand.
 ```sh
 # 1. Bump `version` in Cargo.toml, then in CHANGELOG.md rename
 #    "## Unreleased" to "## 0.4.2" (the script adds the date).
-# 2. Build both installers.
+# 2. Build both installers. On the Mac with the "Developer ID Application"
+#    certificate and the rega-notary profile (see package-macos.sh), the app
+#    and DMG are signed, notarized and stapled; publish-site.sh refuses a
+#    DMG that isn't. Run it in Terminal: the first signing asks for keychain
+#    access (click Always Allow).
 ./scripts/package-macos.sh
 ./scripts/package-windows-cross.sh
 # 3. Copy them into site/downloads, regenerate the site, deploy, and check
@@ -41,6 +47,55 @@ and serve the folder, e.g. `npx serve site` (which also honours `cleanUrls`).
 To try the app's notice against it, start Rega with
 `REGA_UPDATE_URL=http://localhost:3000/latest.json` and a higher version in
 that file.
+
+## The demo video
+
+The video at the top of the home page is the real app, rendered off-screen
+the same way as the README screenshots. It presses ⌃⌥C, drags over a demo
+dashboard, adds an arrow, a callout, a blur, step numbers and a stamp with
+their one-key tools, copies, and pastes into a chat. The pointer, click
+rings and key badges are drawn on top. After a UI change, render it again
+(needs `ffmpeg`):
+
+```sh
+cargo test --release demo_video -- --ignored
+```
+
+This rewrites `media/demo.mp4` (about 1 MB) and `media/demo.jpg`, and sets
+the `data-t` times of the four steps under the video in `index.html`. The
+script is `src/app/readme_shots/demo.rs`.
+
+## Analytics
+
+`consent.js` asks each visitor once whether the site may count visits.
+Nothing from Google loads until they click **Accept**. Then it loads Google
+Tag Manager (container `GTM-5Q9HZX6Z`, set at the top of the file) with
+Consent Mode's `analytics_storage` granted. **Cookie settings** in every
+footer reopens the banner; Decline turns analytics off and removes the
+`_ga` cookies.
+
+Each click on a download button pushes this to the data layer:
+
+```js
+{ event: "rega_download", download_os: "mac" | "windows", download_version: "0.4.2",
+  download_placement: "hero" | "download-card", download_page: "/" }
+```
+
+The container needs, once:
+
+1. **Google tag**: your GA4 measurement ID (`G-…`, from GA4 Admin › Data
+   streams › Web), trigger *Initialization – All Pages*. This counts visits.
+2. **Data Layer Variables** `download_os`, `download_version`,
+   `download_placement`, `download_page`.
+3. **Trigger**: Custom Event, event name `rega_download`.
+4. **GA4 Event tag**: event name `file_download`, parameters `os`, `version`,
+   `placement` and `page` from those variables, on that trigger.
+5. **Submit** (publish) the container.
+
+In GA4, register `os`, `version` and `placement` under Admin › Custom
+definitions (event-scoped) to break `file_download` down by them in
+Reports › Engagement › Events. Only visitors who accepted are counted, so
+downloads are a lower bound.
 
 ## First deploy
 
