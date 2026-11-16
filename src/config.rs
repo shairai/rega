@@ -3,6 +3,12 @@ use std::path::PathBuf;
 
 pub const APP_NAME: &str = "Rega";
 
+/// The website (`site/`, deployed to Vercel). The app checks
+/// `<SITE_URL>/latest.json` for updates and opens `<SITE_URL>/releases` to
+/// download one; `scripts/publish-site.sh` reads this line for the site's
+/// own links. Change it here if the site moves, before releasing.
+pub const SITE_URL: &str = "https://rega-capture.vercel.app";
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub enum ImageFormat {
     Png,
@@ -106,6 +112,10 @@ pub struct Settings {
     pub shortcuts: crate::shortcuts::Shortcuts,
     /// Settings › Guide: defaults for new guides, and what recording picks up.
     pub guide: crate::guide::style::GuideSettings,
+    /// Look for a new version on the website once a day.
+    pub check_for_updates: bool,
+    /// The version whose update notice the user closed; it isn't shown again.
+    pub dismissed_update: Option<String>,
 }
 
 impl Default for Settings {
@@ -130,6 +140,8 @@ impl Default for Settings {
             screen_access_probed: false,
             shortcuts: Default::default(),
             guide: Default::default(),
+            check_for_updates: true,
+            dismissed_update: None,
         }
     }
 }

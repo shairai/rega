@@ -13,6 +13,17 @@ pub fn open_path(path: &Path) {
     }
 }
 
+/// Open a web page in the default browser. `url` must be a plain https link
+/// (on Windows it passes through `cmd`, where `&`, `|` or `^` would be read
+/// as commands).
+pub fn open_url(url: &str) {
+    if !url.starts_with("https://") || url.contains(|c: char| "&|^<>\"%! ".contains(c) || c.is_control()) {
+        log::warn!("not opening unexpected URL {url:?}");
+        return;
+    }
+    open_path(Path::new(url));
+}
+
 pub fn reveal_path(path: &Path) {
     #[cfg(target_os = "macos")]
     let result = Command::new("open").arg("-R").arg(path).spawn();

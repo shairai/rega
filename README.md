@@ -144,6 +144,8 @@ Rega also lives in the **menu bar** (macOS) or **system tray** (Windows), so cap
 
 ## Install
 
+Download the installer for macOS or Windows from **[rega-capture.vercel.app](https://rega-capture.vercel.app/#download)**, or build Rega from source as below.
+
 ### Requirements
 
 - macOS 12.3 or later (Apple Silicon or Intel), or Windows 10 / 11 (64-bit; on N editions, MP4 video needs Microsoft's free Media Feature Pack)
@@ -320,6 +322,7 @@ src/
 ├── ocr.rs             text recognition
 ├── shortcuts.rs       customizable global shortcuts
 ├── library.rs         capture library on disk
+├── update.rs          daily check of the website's latest.json for a new version
 └── platform.rs        macOS / Windows integration (window levels, permissions, clipboard)
 ```
 
@@ -347,6 +350,16 @@ They are written to `docs/images/`. The shared guide page is a web page, so its 
 ```
 
 To look at a guide page with other markers or themes, `GUIDE_MARKER=spotlight GUIDE_THEME=light cargo test sample_page -- --ignored` writes `target/guide-sample.html`.
+
+## Website and releases
+
+The website lives in [`site/`](site/): static pages, the installers and
+`latest.json`, which Rega reads once a day to tell users a new version is out
+(Settings › General › Updates turns that off). Release notes are written in
+[`CHANGELOG.md`](CHANGELOG.md). To publish a version: bump `Cargo.toml`, write
+its notes, build both installers, then run `./scripts/publish-site.sh`, which
+regenerates the site from the changelog and deploys it to Vercel. See
+[`site/README.md`](site/README.md) for details.
 
 ## Roadmap
 

@@ -28,6 +28,7 @@ use crate::player::{BackgroundSaves, Player, PlayerAction};
 use crate::recorder::{Finished, RecordConfig, Recorder};
 use crate::scroll::{self, ScrollMsg};
 use crate::shortcuts::{self, Action};
+use crate::update;
 
 #[derive(Clone, Copy, Debug)]
 pub enum AppEvent {
@@ -135,6 +136,14 @@ pub struct RegaApp {
     new_canvas: NewCanvas,
     show_new_dialog: bool,
     settings_tab: SettingsTab,
+    /// A newer version found on the website (see `update`).
+    update: Option<update::Latest>,
+    /// The update check running in the background.
+    update_rx: Option<Receiver<anyhow::Result<Option<update::Latest>>>>,
+    /// The running check was asked for in Settings: report how it went.
+    update_manual: bool,
+    /// When the daily check is next due; `None` never checks (screenshot tests).
+    update_due: Option<Instant>,
 }
 
 impl RegaApp {
@@ -247,6 +256,11 @@ impl RegaApp {
             new_canvas: NewCanvas::default(),
             show_new_dialog: false,
             settings_tab: SettingsTab::General,
+            update: None,
+            update_rx: None,
+            update_manual: false,
+            // A few seconds after launch, so starting up isn't slowed.
+            update_due: system.then(|| Instant::now() + Duration::from_secs(5)),
         }
     }
 
@@ -1236,6 +1250,11 @@ impl RegaApp {
                 .frame(theme::panel_frame(Color32::from_rgb(52, 30, 38), egui::Margin::symmetric(16, 10)))
                 .show(ui, |ui| self.permission_banner(ui));
         }
+        if let Some(latest) = self.update_to_announce() {
+            egui::Panel::top("update_banner")
+                .frame(theme::panel_frame(Color32::from_rgb(33, 29, 56), egui::Margin::symmetric(16, 10)))
+                .show(ui, |ui| self.update_banner(ui, &latest));
+        }
 
         egui::Panel::bottom("library_tray")
             .resizable(false)
@@ -1379,6 +1398,103 @@ impl RegaApp {
                 });
             });
         });
+    }
+
+    /// The newer version to tell the user about, unless they closed its notice.
+    fn update_to_announce(&self) -> Option<update::Latest> {
+        self.update.clone().filter(|l| self.settings.dismissed_update.as_deref() != Some(l.version.as_str()))
+    }
+
+    fn update_banner(&mut self, ui: &mut egui::Ui, latest: &update::Latest) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if theme::ghost_button(ui, None, "Not now").clicked() {
+                self.settings.dismissed_update = Some(latest.version.clone());
+                self.settings.save();
+            }
+            if theme::primary_button(ui, Some(icon::OPEN_EXTERNAL), "Download").clicked() {
+                platform::open_url(&update::releases_url());
+            }
+            ui.add_space(16.0);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(icon::INFO).font(theme::icon_font(22.0)).color(theme::ACCENT));
+                ui.vertical(|ui| {
+                    let title = format!("{APP_NAME} {} is available", latest.version);
+                    ui.label(egui::RichText::new(title).font(theme::medium(14.0)).color(theme::TEXT));
+                    let detail = if latest.title.is_empty() {
+                        format!("You have {}.", env!("CARGO_PKG_VERSION"))
+                    } else {
+                        format!("{} You have {}.", latest.title, env!("CARGO_PKG_VERSION"))
+                    };
+                    ui.add(egui::Label::new(egui::RichText::new(detail).color(theme::TEXT_MUTED)).wrap());
+                });
+            });
+        });
+    }
+
+    /// Start a check now; `manual` (from Settings) reports the outcome in a toast.
+    fn check_for_update(&mut self, manual: bool) {
+        if self.update_rx.is_some() {
+            self.update_manual |= manual;
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(update::check());
+            ctx.request_repaint();
+        });
+        self.update_rx = Some(rx);
+        self.update_manual = manual;
+    }
+
+    /// Daily update check (when on), and its result once it arrives.
+    fn tick_updates(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.update_rx {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.update_rx = None,
+                Ok(result) => {
+                    self.update_rx = None;
+                    let manual = std::mem::take(&mut self.update_manual);
+                    match result {
+                        Ok(Some(latest)) => {
+                            log::info!("{APP_NAME} {} is available", latest.version);
+                            if manual {
+                                // Asked for: show it even if an earlier notice was closed.
+                                self.settings.dismissed_update = None;
+                                self.settings.save();
+                                self.toast(format!("{APP_NAME} {} is available", latest.version));
+                            }
+                            self.update = Some(latest);
+                        }
+                        Ok(None) => {
+                            self.update = None;
+                            if manual {
+                                self.toast(format!("{APP_NAME} {} is the latest version", env!("CARGO_PKG_VERSION")));
+                            }
+                        }
+                        Err(e) => {
+                            log::info!("update check failed: {e}");
+                            if manual {
+                                self.toast(format!("Couldn't check for updates: {}", truncate(&e.to_string(), 60)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let Some(due) = self.update_due else { return };
+        if !self.settings.check_for_updates {
+            return;
+        }
+        let now = Instant::now();
+        if now >= due {
+            self.update_due = Some(now + update::INTERVAL);
+            self.check_for_update(false);
+        } else {
+            // Wake an idle Rega (closed to the menu bar for days) when the next check is due.
+            ctx.request_repaint_after(due - now);
+        }
     }
 
     /// Re-read permission status (at most once per ~0.7 s unless `force`).
@@ -2063,6 +2179,29 @@ impl RegaApp {
                             });
                         });
                         ui.add_space(8.0);
+                        theme::section(ui, "Updates");
+                        theme::switch(ui, &mut self.settings.check_for_updates, "Check for updates daily")
+                            .on_hover_text("Rega asks the website for the latest version number.\nNothing else is sent.");
+                        ui.horizontal(|ui| {
+                            let (status, color) = if self.update_rx.is_some() {
+                                ("Checking…".to_owned(), theme::TEXT_MUTED)
+                            } else if let Some(latest) = &self.update {
+                                (format!("{APP_NAME} {} is available", latest.version), theme::TEXT)
+                            } else {
+                                (format!("You have {APP_NAME} {}", env!("CARGO_PKG_VERSION")), theme::TEXT_MUTED)
+                            };
+                            ui.label(egui::RichText::new(status).color(color));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if self.update.is_some() {
+                                    if theme::primary_button(ui, Some(icon::OPEN_EXTERNAL), "Download").clicked() {
+                                        platform::open_url(&update::releases_url());
+                                    }
+                                } else if theme::secondary_button(ui, None, "Check now").clicked() {
+                                    self.check_for_update(true);
+                                }
+                            });
+                        });
+                        ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(format!("{APP_NAME} {}", env!("CARGO_PKG_VERSION"))).color(theme::TEXT_FAINT));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2305,6 +2444,11 @@ impl RegaApp {
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new(APP_NAME).font(theme::bold(26.0)).color(theme::TEXT));
                     ui.label(egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(theme::TEXT_MUTED));
+                    if let Some(latest) = &self.update
+                        && ui.link(format!("{APP_NAME} {} is available — download", latest.version)).clicked()
+                    {
+                        platform::open_url(&update::releases_url());
+                    }
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new("Capture anything on your screen, mark it up, and share it — in seconds.")
@@ -2587,6 +2731,7 @@ impl eframe::App for RegaApp {
             self.thumbs.insert(path, (modified, tex));
         }
         self.report_background_saves();
+        self.tick_updates(ctx);
         self.advance_activity(ctx, frame);
         self.sync_capture_zoom(ctx);
 
@@ -2959,6 +3104,33 @@ mod tests {
 
     fn toast(h: &Harness<'_, RegaApp>) -> Option<String> {
         h.state().toast.as_ref().map(|(msg, _)| msg.clone())
+    }
+
+    /// A newer version on the website shows a notice over the workspace,
+    /// until the user closes it for that version.
+    #[test]
+    fn update_notice() {
+        let lib = std::env::temp_dir().join(format!("rega-update-notice-{}", std::process::id()));
+        std::fs::create_dir_all(&lib).unwrap();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1360.0, 840.0))
+            .with_accessibility_check(false)
+            .wgpu()
+            .build_eframe(move |cc| RegaApp::demo(&cc.egui_ctx, lib));
+        h.step();
+        // Tests never reach out to the website.
+        assert!(h.state().update_due.is_none());
+        let title = "Rega 9.0.0 is available";
+        assert!(h.query_by_label(title).is_none());
+
+        h.state_mut().update = Some(crate::update::Latest { version: "9.0.0".into(), title: "Big things.".into() });
+        h.step();
+        assert!(h.query_by_label(title).is_some());
+        assert!(h.query_by_label("Big things. You have 0.4.1.".replace("0.4.1", env!("CARGO_PKG_VERSION")).as_str()).is_some());
+
+        h.state_mut().settings.dismissed_update = Some("9.0.0".into());
+        h.step();
+        assert!(h.query_by_label(title).is_none());
     }
 
     fn video(name: &str) -> PathBuf {

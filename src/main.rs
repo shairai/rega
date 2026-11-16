@@ -20,6 +20,7 @@ mod resize;
 mod scroll;
 mod shortcuts;
 mod theme;
+mod update;
 
 use std::sync::Arc;
 

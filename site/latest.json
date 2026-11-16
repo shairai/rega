@@ -1,0 +1,20 @@
+{
+  "version": "0.4.1",
+  "date": "2026-11-15",
+  "title": "Copy and paste marks in the editor.",
+  "notes": [
+    "Select any mark (arrow, text, shape, stamp, pasted image…) and press ⌘C / Ctrl+C, then ⌘V / Ctrl+V to drop a copy next to it. Paste again for more copies, each a little further along.",
+    "Copying a pasted image also puts it on the system clipboard, so other apps can take it."
+  ],
+  "url": "https://rega-capture.vercel.app/releases",
+  "downloads": {
+    "macos": {
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.1-macos-universal.dmg",
+      "size": 15714173
+    },
+    "windows": {
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.1-windows-x64-setup.exe",
+      "size": 6531035
+    }
+  }
+}
