@@ -10,6 +10,15 @@ What's new in each version of Rega. The website's download section, its
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.3 — 2026-11-16
+
+Signed and notarized on macOS.
+
+- macOS: Rega is signed with a Developer ID and notarized by Apple, so it
+  opens like any other app — no more **Open Anyway** in System Settings.
+- If macOS asks for Screen Recording or Accessibility again after this
+  update, allow them once more; later updates keep them.
+
 ## 0.4.2 — 2026-11-16
 
 Update notices, and a steadier window on Windows.

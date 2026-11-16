@@ -46,11 +46,24 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signatures change with every build, and macOS ties the Screen
-# Recording permission to the signature. A designated requirement based on
-# the bundle identifier keeps the permission valid across rebuilds.
-codesign --force --sign - --identifier app.rega.Rega \
-  --requirements '=designated => identifier "app.rega.Rega"' "$APP" >/dev/null
+# Sign. With a "Developer ID Application" certificate in the keychain (or
+# REGA_SIGN_IDENTITY set), sign for distribution: the hardened runtime and a
+# secure timestamp, which notarization requires (see package-macos.sh). Its
+# designated requirement names the team, so permissions survive updates.
+IDENTITY="${REGA_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+  | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')}"
+if [[ -n "$IDENTITY" ]]; then
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+  codesign --verify --strict "$APP"
+  echo "Signed with $IDENTITY"
+else
+  # No certificate (CI, other machines): ad hoc. Ad-hoc signatures change with
+  # every build and macOS ties the Screen Recording permission to the
+  # signature; a requirement on the bundle identifier keeps it across rebuilds.
+  codesign --force --sign - --identifier app.rega.Rega \
+    --requirements '=designated => identifier "app.rega.Rega"' "$APP" >/dev/null
+  echo "Signed ad hoc (no Developer ID Application certificate found)"
+fi
 
 # The bundle is recreated from scratch each time; tell Launch Services and
 # Finder about it so they show the new icon instead of a cached blank one.

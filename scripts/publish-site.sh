@@ -35,6 +35,14 @@ for f in "$MAC" "$WIN"; do
   fi
 done
 
+# The site tells Mac users the app opens without warnings: only publish a
+# disk image notarized by Apple (see package-macos.sh).
+if ! xcrun stapler validate -q "dist/$MAC" 2>/dev/null && [[ "${REGA_ALLOW_UNNOTARIZED:-}" != 1 ]]; then
+  echo "dist/$MAC isn't notarized. Run ./scripts/package-macos.sh with the Developer ID"
+  echo "certificate and the rega-notary profile (or set REGA_ALLOW_UNNOTARIZED=1 to publish anyway)."
+  exit 1
+fi
+
 # Only the current version is hosted; older installers are dropped.
 rm -rf site/downloads
 mkdir -p site/downloads

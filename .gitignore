@@ -3,3 +3,9 @@
 .DS_Store
 /site/downloads
 /site/.vercel
+
+# Signing material: certificates and requests live in the keychain, never in git.
+*.cer
+*.certSigningRequest
+*.p12
+*.p8

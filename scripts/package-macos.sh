@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Build dist/Rega-<version>-macos-<arch>.dmg: a drag-to-Applications disk image
 # with the Rega volume icon, a branded background and a laid-out window.
+#
+# With a Developer ID certificate (see bundle-macos.sh) and notarization
+# credentials stored once as a keychain profile, the app and the disk image
+# are also notarized by Apple and stapled, so they open without warnings:
+#   xcrun notarytool store-credentials rega-notary \
+#     --apple-id <Apple ID> --team-id <Team ID> --password <app-specific password>
+# (REGA_NOTARY_PROFILE picks another profile name.)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -8,9 +15,41 @@ cd "$(dirname "$0")/.."
 APP=target/release/Rega.app
 VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 OUT="dist/Rega-${VERSION}-macos-universal.dmg"
+IDENTITY="${REGA_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+  | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')}"
+PROFILE="${REGA_NOTARY_PROFILE:-rega-notary}"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+
+NOTARIZE=0
+if [[ -n "$IDENTITY" ]] && xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null 2>&1; then
+  NOTARIZE=1
+elif [[ -n "$IDENTITY" ]]; then
+  echo "warning: no notarization profile '$PROFILE'; the DMG will be signed but not notarized" >&2
+fi
+
+# Submit $1 to Apple's notary service and wait; on rejection print Apple's log.
+notarize() {
+  local result id status
+  echo "Notarizing $(basename "$1") (usually a few minutes)…"
+  result=$(xcrun notarytool submit "$1" --keychain-profile "$PROFILE" --wait --output-format json)
+  id=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$result")
+  status=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$result")
+  if [[ "$status" != "Accepted" ]]; then
+    echo "Notarization $status ($id):" >&2
+    xcrun notarytool log "$id" --keychain-profile "$PROFILE" >&2 || true
+    exit 1
+  fi
+}
+
+# The app first, so the copy in the disk image carries its own ticket and
+# opens without a network check once dragged to Applications.
+if [[ $NOTARIZE == 1 ]]; then
+  ditto -c -k --keepParent "$APP" "$WORK/Rega.zip"
+  notarize "$WORK/Rega.zip"
+  xcrun stapler staple -q "$APP"
+fi
 
 # Background artwork is drawn by the app itself (src/branding.rs); 1x + 2x in one TIFF.
 "$APP/Contents/MacOS/Rega" --write-branding "$WORK/art"
@@ -69,4 +108,18 @@ hdiutil detach "$DEV" -quiet || hdiutil detach "$DEV" -force -quiet
 mkdir -p dist
 rm -f "$OUT"
 hdiutil convert "$RW" -format UDZO -imagekey zlib-level=9 -o "$OUT" >/dev/null
-echo "Built $OUT"
+
+if [[ -n "$IDENTITY" ]]; then
+  codesign --force --timestamp --sign "$IDENTITY" "$OUT"
+fi
+if [[ $NOTARIZE == 1 ]]; then
+  notarize "$OUT"
+  xcrun stapler staple -q "$OUT"
+  # What a downloaded copy will get from Gatekeeper.
+  spctl --assess --type open --context context:primary-signature -v "$OUT"
+  echo "Built $OUT (signed and notarized)"
+elif [[ -n "$IDENTITY" ]]; then
+  echo "Built $OUT (signed, not notarized)"
+else
+  echo "Built $OUT (unsigned: no Developer ID certificate)"
+fi
