@@ -10,11 +10,16 @@ What's new in each version of Rega. The website's download section, its
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
-## Unreleased
+## 0.4.2
+
+Update notices, and a steadier window on Windows.
 
 - Rega tells you when a new version is out: it checks the website once a day
   and shows a notice with a **Download** button. Turn it off in Settings ›
   General › Updates.
+- Windows: Rega draws with DirectX 12 on the graphics card that drives your
+  screen, to stop the window blinking blank while you hover the capture
+  buttons on some PCs.
 
 ## 0.4.1 — 2026-11-15
 
