@@ -10,7 +10,7 @@ What's new in each version of Rega. The website's download section, its
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
-## 0.4.2
+## 0.4.2 — 2026-11-16
 
 Update notices, and a steadier window on Windows.
 

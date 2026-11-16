@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.4.2",
+    "date": "2026-11-16",
+    "title": "Update notices, and a steadier window on Windows.",
+    "notes": [
+      "Rega tells you when a new version is out: it checks the website once a day and shows a notice with a Download button. Turn it off in Settings › General › Updates.",
+      "Windows: Rega draws with DirectX 12 on the graphics card that drives your screen, to stop the window blinking blank while you hover the capture buttons on some PCs."
+    ]
+  },
+  {
     "version": "0.4.1",
     "date": "2026-11-15",
     "title": "Copy and paste marks in the editor.",
