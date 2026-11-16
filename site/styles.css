@@ -63,6 +63,17 @@ code, kbd {
   color: transparent;
 }
 
+/* "rega" the Hebrew word (not the app's name): links to its explanation. */
+a.rega {
+  color: inherit;
+  text-decoration: underline dotted;
+  text-decoration-color: rgba(163, 170, 189, 0.7);
+  text-decoration-thickness: 0.07em;
+  text-underline-offset: 0.14em;
+}
+a.rega:hover { text-decoration-style: solid; text-decoration-color: var(--accent); }
+section[id] { scroll-margin-top: 64px; }
+
 .eyebrow {
   display: inline-block;
   font: 500 13px/1 var(--font);
