@@ -53,7 +53,8 @@ fn main() -> eframe::Result<()> {
     }
 
     let (rgba, width, height) = icon::app_icon(256);
-    let options = eframe::NativeOptions {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(config::APP_NAME)
             .with_inner_size([1360.0, 840.0])
@@ -70,9 +71,25 @@ fn main() -> eframe::Result<()> {
         })),
         ..Default::default()
     };
+    #[cfg(windows)]
+    prefer_native_renderer(&mut options.wgpu_options);
     eframe::run_native(
         config::APP_NAME,
         options,
         Box::new(|cc| Ok(Box::new(app::RegaApp::new(cc)))),
     )
+}
+
+/// Windows: draw with DirectX 12 on the GPU that drives the display. By default
+/// wgpu takes Vulkan (it is enumerated first) on the most powerful GPU, and on
+/// laptops with two GPUs that hands every frame across to the other one, which
+/// shows as the whole window blinking blank while it animates. OpenGL stays as a
+/// fallback; `WGPU_BACKEND` and `WGPU_POWER_PREF` still override both choices.
+#[cfg(windows)]
+fn prefer_native_renderer(options: &mut eframe::egui_wgpu::WgpuConfiguration) {
+    use eframe::egui_wgpu::{WgpuSetup, wgpu};
+    if let WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
+        setup.instance_descriptor.backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::DX12 | wgpu::Backends::GL);
+        setup.power_preference = wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::LowPower);
+    }
 }
