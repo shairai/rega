@@ -10,6 +10,21 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.5 — 2026-11-17
+
+Capture on any screen, and copy several captures at once.
+
+- More than one screen: the capture overlay follows the mouse, so move it to
+  the screen you want and select there. **Screen** asks which screen to take:
+  click the one you want.
+- Library: select several captures (`⌘`-click or Shift-click) and copy them
+  all with **Copy**, the right-click menu or `⌘C` / `Ctrl+C`. They paste into
+  chats, emails and folders as files.
+- New image: clearer sizes, width and height boxes you can type in, and a
+  padlock that keeps the ratio.
+- Guides: the page settings fit their panel again, and **Marker size** no
+  longer hides behind its buttons.
+
 ## 0.4.4 — 2026-11-17
 
 A new look for the color picker.

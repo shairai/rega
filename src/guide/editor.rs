@@ -18,6 +18,10 @@ use super::{Action, Button, Guide, Shot, Step, export};
 use crate::theme::{self, ItemStyle, icon};
 
 /// Changes are saved this long after the last one.
+/// The properties column beside the step: its width and inner margin.
+pub const PROPERTIES_WIDTH: f32 = 280.0;
+pub const PROPERTIES_MARGIN: i8 = 18;
+
 const AUTOSAVE_AFTER: Duration = Duration::from_millis(1200);
 /// Full-size screenshots kept as textures; the rest are re-decoded when shown.
 const FULL_TEXTURES: usize = 8;
@@ -606,9 +610,10 @@ impl GuideEditor {
         theme::section(ui, "Marker");
         style::marker_controls(ui, &mut self.guide.style);
         ui.add_space(12.0);
+        // Unindented: the panel has no width to spare.
         egui::CollapsingHeader::new(egui::RichText::new("Page options").color(theme::TEXT_MUTED))
             .id_salt("guide-page-options")
-            .show(ui, |ui| {
+            .show_unindented(ui, |ui| {
                 style::page_controls(ui, &mut self.guide.style);
                 ui.add_space(6.0);
                 ui.label("Quality");
@@ -895,10 +900,59 @@ mod tests {
     use super::*;
 
     fn editor(n: usize) -> GuideEditor {
+        editor_in(&egui::Context::default(), n)
+    }
+
+    /// A guide of `n` steps, its pictures loading into `ctx`.
+    fn editor_in(ctx: &egui::Context, n: usize) -> GuideEditor {
         let shot = Shot::encode(&screen(64, 40, 1)).unwrap();
         let steps = (0..n).map(|i| step(&shot, &format!("Step {i}"))).collect();
         let path = std::env::temp_dir().join(format!("rega-guide-editor-{}-{n}.html", std::process::id()));
-        GuideEditor::new(&egui::Context::default(), path, Guide::new("Test".into(), steps))
+        GuideEditor::new(ctx, path, Guide::new("Test".into(), steps))
+    }
+
+    /// The properties fit their column with Page options open: nothing is
+    /// wider than the column, so nothing pushes past its edge (under the
+    /// step). Set `GUIDE_PANEL_PREVIEW_DIR` to save it.
+    #[test]
+    fn properties_fit_their_column() {
+        use egui_kittest::kittest::Queryable;
+        #[derive(Default)]
+        struct State {
+            ed: Option<GuideEditor>,
+            width: f32,
+        }
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(600.0, 1100.0))
+            .with_pixels_per_point(2.0)
+            .with_accessibility_check(false)
+            .with_context_setup(theme::install)
+            .wgpu()
+            .build_ui_state(
+                |ui, s: &mut State| {
+                    let ed = s.ed.get_or_insert_with(|| editor_in(ui.ctx(), 2));
+                    egui::Panel::right("guide-properties")
+                        .resizable(false)
+                        .exact_size(PROPERTIES_WIDTH)
+                        .frame(theme::panel_frame(theme::SURFACE, egui::Margin::same(PROPERTIES_MARGIN)))
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                ed.properties_panel(ui);
+                                s.width = ui.min_rect().width();
+                            });
+                        });
+                },
+                State::default(),
+            );
+        h.run();
+        h.get_by_label("Page options").click();
+        h.run();
+        if let Ok(dir) = std::env::var("GUIDE_PANEL_PREVIEW_DIR") {
+            h.render().unwrap().save(std::path::Path::new(&dir).join("guide-properties.png")).unwrap();
+        }
+        let room = PROPERTIES_WIDTH - 2.0 * PROPERTIES_MARGIN as f32;
+        let width = h.state().width;
+        assert!(width <= room + 0.5, "the properties are {width} points wide in a {room}-point column");
     }
 
     fn titles(ed: &GuideEditor) -> Vec<&str> {

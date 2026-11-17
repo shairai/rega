@@ -465,19 +465,20 @@ pub fn tool_tile_painted(ui: &mut Ui, selected: bool, tooltip: &str, icon: impl 
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) -> bool {
     let mut changed = false;
     let font = medium(12.5);
-    let widths: Vec<f32> = options
-        .iter()
-        .map(|(_, l)| ui.painter().layout_no_wrap(l.to_string(), font.clone(), TEXT).size().x + 22.0)
-        .collect();
+    let labels: Vec<f32> = options.iter().map(|(_, l)| ui.painter().layout_no_wrap(l.to_string(), font.clone(), TEXT).size().x).collect();
+    // Roomy padding, tightened when the space is short (a narrow side panel).
+    let pad = ((ui.available_width() - 6.0 - labels.iter().sum::<f32>()) / options.len().max(1) as f32).clamp(10.0, 22.0);
+    let widths: Vec<f32> = labels.iter().map(|w| w + pad).collect();
     let total = widths.iter().sum::<f32>() + 6.0;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(total, 32.0), Sense::hover());
+    // Its own id keys the choices, so two controls offering "Small" can sit together.
+    let (rect, whole) = ui.allocate_exact_size(Vec2::new(total, 32.0), Sense::hover());
     let p = ui.painter().clone();
     p.rect_filled(rect, 9.0, Color32::from_rgb(11, 13, 17));
     p.rect_stroke(rect, 9.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
     let mut x = rect.min.x + 3.0;
     for ((opt, label), w) in options.iter().zip(widths) {
         let r = Rect::from_min_size(egui::pos2(x, rect.min.y + 3.0), Vec2::new(w, 26.0));
-        let resp = ui.interact(r, ui.scope_id().with(("seg", label)), Sense::click());
+        let resp = ui.interact(r, whole.id.with(("seg", label)), Sense::click());
         let selected = *value == *opt;
         if selected {
             p.rect_filled(r, 7.0, SURFACE_3);

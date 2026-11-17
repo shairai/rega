@@ -124,7 +124,9 @@ in `vercel.json`), which the frame needs.
 
 Deploy with the script rather than connecting the GitHub repository to
 Vercel. A Git-connected project would redeploy on every push **without** the
-installers (they aren't in git), and the download links would break.
+installers (they aren't in git), and the download links would break. If the
+site breaks after pushes, the project got connected (Vercel offers it while
+setting up a project): `cd site && vercel git disconnect`, then publish again.
 
 ## Moving the site
 

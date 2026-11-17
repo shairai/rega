@@ -948,6 +948,14 @@ pub fn copy_image(img: &image::RgbaImage) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Put files on the clipboard the way Finder and Explorer copy them, so they
+/// paste into chats, emails and folders. (A clipboard holds one picture, but
+/// any number of files.)
+pub fn copy_files(paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
+    arboard::Clipboard::new()?.set().file_list(paths)?;
+    Ok(())
+}
+
 /// An image from the clipboard: copied pixels, or an image file copied in
 /// Finder / Explorer.
 pub fn clipboard_image() -> Option<image::RgbaImage> {

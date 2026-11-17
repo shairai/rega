@@ -145,11 +145,67 @@ fn monitor_at(cursor: (i32, i32)) -> Result<Monitor> {
         .context("no monitor found")
 }
 
+/// One screen, in global logical points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Screen {
+    pub origin: (i32, i32),
+    pub size: (u32, u32),
+    /// What the system calls it ("Built-in Retina Display", "DELL U2720Q").
+    pub name: String,
+}
+
+impl Screen {
+    pub fn contains(&self, p: (i32, i32)) -> bool {
+        let (x, y) = (p.0 - self.origin.0, p.1 - self.origin.1);
+        x >= 0 && y >= 0 && (x as u32) < self.size.0 && (y as u32) < self.size.1
+    }
+}
+
+/// Every screen, left to right (then top to bottom).
+pub fn screens() -> Vec<Screen> {
+    let mut out: Vec<Screen> = Monitor::all()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| {
+            let d = dpi(m);
+            let size = ((m.width().ok()? as f32 / d).round() as u32, (m.height().ok()? as f32 / d).round() as u32);
+            let name = m.friendly_name().ok().filter(|n| !n.trim().is_empty()).or_else(|| m.name().ok()).unwrap_or_default();
+            (size.0 > 0 && size.1 > 0).then_some(Screen { origin: logical_origin(m)?, size, name })
+        })
+        .collect();
+    out.sort_by_key(|s| s.origin);
+    out
+}
+
+/// Freeze each of `screens` except the one at `except`, one after another on
+/// a background thread; each picture arrives on the channel once it's taken.
+pub fn snapshot_others(screens: &[Screen], except: (i32, i32), cursor: (i32, i32)) -> std::sync::mpsc::Receiver<Snapshot> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let origins: Vec<(i32, i32)> = screens.iter().map(|s| s.origin).filter(|&o| o != except).collect();
+    std::thread::spawn(move || {
+        for origin in origins {
+            let snap = monitor_with_origin(origin).context("the screen is gone").and_then(|m| snapshot_of(&m, cursor));
+            match snap {
+                Ok(snap) => {
+                    if tx.send(snap).is_err() {
+                        break; // the capture is over
+                    }
+                }
+                Err(e) => log::warn!("couldn't freeze the screen at {origin:?}: {e:#}"),
+            }
+        }
+    });
+    rx
+}
+
 /// Freeze the monitor under `cursor` (read when the shortcut was pressed, not
 /// now, so a slow capture can't make the marker lag behind the mouse).
 pub fn snapshot_at(cursor: (i32, i32)) -> Result<Snapshot> {
-    let monitor = monitor_at(cursor)?;
-    let d = dpi(&monitor);
+    snapshot_of(&monitor_at(cursor)?, cursor)
+}
+
+fn snapshot_of(monitor: &Monitor, cursor: (i32, i32)) -> Result<Snapshot> {
+    let d = dpi(monitor);
     let phys_origin = (monitor.x()?, monitor.y()?);
     let origin = ((phys_origin.0 as f32 / d).round() as i32, (phys_origin.1 as f32 / d).round() as i32);
     let size = ((monitor.width()? as f32 / d).round() as u32, (monitor.height()? as f32 / d).round() as u32);

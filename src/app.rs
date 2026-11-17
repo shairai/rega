@@ -654,13 +654,14 @@ impl RegaApp {
                     return;
                 }
                 self.set_tray_title(None);
+                let screens = capture::screens();
                 match capture::snapshot_at(cursor) {
                     Err(e) => {
                         self.activity = Activity::Idle;
                         self.show_normal(ctx, frame);
                         self.toast(format!("Capture failed: {e:#}"));
                     }
-                    Ok(snap) if full => {
+                    Ok(snap) if full && screens.len() < 2 => {
                         self.activity = Activity::Idle;
                         self.finish_image(ctx, frame, snap.image);
                     }
@@ -671,7 +672,17 @@ impl RegaApp {
                             crate::h264::warm_up();
                         }
                         let (origin, size) = (snap.origin, snap.size);
-                        self.activity = Activity::Selecting(Box::new(Overlay::new(ctx, snap, purpose)));
+                        let mut overlay = Overlay::new(ctx, snap, purpose);
+                        if screens.len() > 1 {
+                            // The others are frozen in the background; the overlay
+                            // moves to whichever screen the pointer goes to.
+                            let others = capture::snapshot_others(&screens, origin, cursor);
+                            overlay = overlay.with_screens(screens, others);
+                            if full {
+                                overlay = overlay.picking_screen();
+                            }
+                        }
+                        self.activity = Activity::Selecting(Box::new(overlay));
                         self.show_overlay(ctx, frame, origin, size);
                     }
                 }
@@ -1043,7 +1054,7 @@ impl RegaApp {
 
     /// Start a blank canvas in the editor (saved to the library right away).
     fn create_blank(&mut self) {
-        let NewCanvas { width, height, background } = self.new_canvas;
+        let NewCanvas { width, height, background, .. } = self.new_canvas;
         let img = RgbaImage::from_pixel(width.max(1), height.max(1), image::Rgba(background.rgba()));
         // A transparent canvas must stay PNG even if the default format is JPEG.
         let ext = if background == Background::Transparent { "png" } else { self.settings.image_format.ext() };
@@ -1096,22 +1107,21 @@ impl RegaApp {
         ui.set_width(260.0);
         theme::section(ui, "Size");
         let nc = &mut self.new_canvas;
-        for (w, h, label) in [
-            (1280, 800, "Laptop · 1280 × 800"),
-            (1920, 1080, "Full HD · 1920 × 1080"),
-            (1080, 1080, "Square · 1080 × 1080"),
-            (800, 600, "Small · 800 × 600"),
-        ] {
-            if ui.selectable_label(nc.width == w && nc.height == h, label).clicked() {
-                nc.width = w;
-                nc.height = h;
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for (w, h, name) in [(1280, 800, "Laptop"), (1920, 1080, "Full HD"), (1080, 1080, "Square"), (800, 600, "Small")] {
+                if size_row(ui, nc.width == w && nc.height == h, name, &format!("{w} × {h}")).clicked() {
+                    nc.width = w;
+                    nc.height = h;
+                    // A kept ratio becomes the chosen size's.
+                    if nc.ratio.is_some() {
+                        nc.ratio = Some((w, h));
+                    }
+                }
             }
-        }
-        ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut nc.width).range(16..=8000).suffix(" px"));
-            ui.label("×");
-            ui.add(egui::DragValue::new(&mut nc.height).range(16..=8000).suffix(" px"));
         });
+        theme::section(ui, "Custom size");
+        custom_size(ui, nc);
         theme::section(ui, "Background");
         theme::segmented(
             ui,
@@ -1297,8 +1307,8 @@ impl RegaApp {
                     .show(ui, |ui| guide_actions.push(ed.steps_panel(ui)));
                 egui::Panel::right("guide-properties")
                     .resizable(false)
-                    .exact_size(280.0)
-                    .frame(theme::panel_frame(theme::SURFACE, egui::Margin::same(18)))
+                    .exact_size(crate::guide::editor::PROPERTIES_WIDTH)
+                    .frame(theme::panel_frame(theme::SURFACE, egui::Margin::same(crate::guide::editor::PROPERTIES_MARGIN)))
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| guide_actions.push(ed.properties_panel(ui)));
                     });
@@ -1694,6 +1704,22 @@ impl RegaApp {
         // Items hidden by the filter or search can't be acted on unseen.
         self.lib_selection.retain(|p| items.iter().any(|i| &i.path == p));
         let mut delete_selection = false;
+        // The selected images and videos, in tray order (guides are folders of pages).
+        let copyable: Vec<Item> = items
+            .iter()
+            .filter(|i| self.lib_selection.contains(&i.path) && i.kind != ItemKind::Guide)
+            .cloned()
+            .collect();
+        let mut copy_selection = false;
+        // ⌘C with items selected copies them (the tray comes before the
+        // editor, which would otherwise copy its own selection).
+        if !self.lib_selection.is_empty() && ui.ctx().memory(|m| m.focused().is_none()) {
+            copy_selection = ui.input_mut(|i| {
+                let event = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+                i.events.retain(|e| !matches!(e, egui::Event::Copy));
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::C) || event
+            });
+        }
 
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Library").font(theme::medium(14.0)).color(theme::TEXT));
@@ -1715,6 +1741,13 @@ impl RegaApp {
                     let n = self.lib_selection.len();
                     if theme::danger_button(ui, Some(icon::DELETE), &format!("Delete {n}")).clicked() {
                         delete_selection = true;
+                    }
+                    if !copyable.is_empty()
+                        && theme::secondary_button(ui, Some(icon::COPY), &format!("Copy {}", copyable.len()))
+                            .on_hover_text(format!("Copy to paste into a chat, an email or a folder ({}C)", platform::CMD))
+                            .clicked()
+                    {
+                        copy_selection = true;
                     }
                     if theme::ghost_button(ui, None, "Clear").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         self.lib_selection.clear();
@@ -1799,7 +1832,12 @@ impl RegaApp {
                             platform::reveal_path(&item.path);
                             ui.close();
                         }
-                        if item.kind == ItemKind::Image && ui.button("Copy").clicked() {
+                        if many && !copyable.is_empty() {
+                            if ui.button(format!("Copy {} selected", copyable.len())).clicked() {
+                                copy_selection = true;
+                                ui.close();
+                            }
+                        } else if item.kind == ItemKind::Image && ui.button("Copy").clicked() {
                             if let Ok(img) = image::open(&item.path) {
                                 let _ = platform::copy_image(&img.to_rgba8());
                             }
@@ -1828,6 +1866,35 @@ impl RegaApp {
         }
         if delete_selection {
             self.delete_selection();
+        }
+        if copy_selection {
+            self.copy_items(&copyable);
+        }
+    }
+
+    /// Copy library items: one image as a picture, as before; several as
+    /// files, the way Finder and Explorer copy them.
+    fn copy_items(&mut self, items: &[Item]) {
+        let result = match items {
+            [] => {
+                self.toast("Guides can't be copied: open one to export it");
+                return;
+            }
+            [one] if one.kind == ItemKind::Image => {
+                image::open(&one.path).map_err(anyhow::Error::from).and_then(|img| platform::copy_image(&img.to_rgba8()))
+            }
+            _ => platform::copy_files(&items.iter().map(|i| i.path.clone()).collect::<Vec<_>>()),
+        };
+        let what = match items.iter().filter(|i| i.kind == ItemKind::Image).count() {
+            n if n == items.len() && n == 1 => "the image".to_owned(),
+            n if n == items.len() => format!("{n} images"),
+            _ if items.len() == 1 => "the video".to_owned(),
+            _ => format!("{} files", items.len()),
+        };
+        match result {
+            Ok(()) if items.len() > 1 => self.toast(format!("Copied {what}: paste them into a chat, an email or a folder")),
+            Ok(()) => self.toast(format!("Copied {what}")),
+            Err(e) => self.toast(format!("Couldn't copy {what}: {e:#}")),
         }
     }
 
@@ -2609,12 +2676,177 @@ struct NewCanvas {
     width: u32,
     height: u32,
     background: Background,
+    /// Width and height whose ratio editing either side keeps (the padlock is shut).
+    ratio: Option<(u32, u32)>,
 }
 
 impl Default for NewCanvas {
     fn default() -> Self {
-        Self { width: 1280, height: 800, background: Background::White }
+        Self { width: 1280, height: 800, background: Background::White, ratio: None }
     }
+}
+
+/// Sides a new canvas can have, in pixels.
+const CANVAS_SIDES: std::ops::RangeInclusive<u32> = 16..=8000;
+
+/// One preset size in the New form: its name, and its size on the right.
+fn size_row(ui: &mut egui::Ui, selected: bool, name: &str, size: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, format!("{name} · {size}")));
+    let fill = if selected {
+        theme::ACCENT
+    } else if resp.hovered() {
+        theme::SURFACE_3
+    } else {
+        Color32::TRANSPARENT
+    };
+    let (text, faint) = if selected { (Color32::WHITE, Color32::from_white_alpha(210)) } else { (theme::TEXT, theme::TEXT_MUTED) };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 8.0, fill);
+    let font = FontId::proportional(14.0);
+    painter.text(rect.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, name, font.clone(), text);
+    painter.text(rect.right_center() - Vec2::new(12.0, 0.0), Align2::RIGHT_CENTER, size, font, faint);
+    resp
+}
+
+/// Width and height boxes for a size of your own, joined by a padlock that
+/// keeps their ratio while it is shut.
+fn custom_size(ui: &mut egui::Ui, nc: &mut NewCanvas) {
+    const LOCK_W: f32 = 30.0;
+    const LABEL_W: f32 = 52.0;
+    let left = ui.cursor().min.x;
+    let mut row_y = [0.0; 2];
+    let mut changed = [false; 2];
+    ui.horizontal(|ui| {
+        ui.add_space(LOCK_W);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 10.0;
+            for (i, name) in ["Width", "Height"].into_iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let label = ui
+                        .allocate_ui_with_layout(Vec2::new(LABEL_W, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.set_width(LABEL_W);
+                            ui.label(egui::RichText::new(name).color(theme::TEXT_MUTED))
+                        })
+                        .inner;
+                    let value = if i == 0 { &mut nc.width } else { &mut nc.height };
+                    let field;
+                    (field, changed[i]) = px_field(ui, value, name);
+                    row_y[i] = field.labelled_by(label.id).rect.center().y;
+                });
+            }
+        });
+    });
+    if let Some((w, h)) = nc.ratio {
+        let scale = |v: u32, from: u32, to: u32| {
+            ((v as f32 * to as f32 / from as f32).round() as u32).clamp(*CANVAS_SIDES.start(), *CANVAS_SIDES.end())
+        };
+        if changed[0] {
+            nc.height = scale(nc.width, w, h);
+        } else if changed[1] {
+            nc.width = scale(nc.height, h, w);
+        }
+    }
+
+    // The padlock between the rows, with a bracket out to each.
+    let area = Rect::from_min_max(Pos2::new(left, row_y[0]), Pos2::new(left + LOCK_W, row_y[1]));
+    let resp = ui.interact(area, ui.make_persistent_id("keep-ratio"), Sense::click());
+    if resp.clicked() {
+        nc.ratio = if nc.ratio.is_some() { None } else { Some((nc.width, nc.height)) };
+    }
+    let locked = nc.ratio.is_some();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, locked, "Keep the ratio"));
+    let color = if locked {
+        theme::ACCENT
+    } else if resp.hovered() {
+        theme::TEXT_MUTED
+    } else {
+        theme::TEXT_FAINT
+    };
+    let (x, mid, end) = (area.center().x, area.center().y, area.right() - 4.0);
+    let stroke = Stroke::new(1.0, color);
+    let painter = ui.painter();
+    for (from, to) in [
+        (Pos2::new(end, row_y[0]), Pos2::new(x, row_y[0])),
+        (Pos2::new(x, row_y[0]), Pos2::new(x, mid - 12.0)),
+        (Pos2::new(x, mid + 10.0), Pos2::new(x, row_y[1])),
+        (Pos2::new(x, row_y[1]), Pos2::new(end, row_y[1])),
+    ] {
+        painter.line_segment([from, to], stroke);
+    }
+    padlock(painter, Pos2::new(x, mid), locked, color);
+    resp.on_hover_text(if locked { "Keeping the ratio. Click to set each side on its own." } else { "Keep the ratio" });
+}
+
+/// A box to type one side of the canvas in pixels. The value follows every
+/// valid keystroke; leaving the box brings an out-of-range number back in
+/// range. Returns the box and whether the user changed the value.
+fn px_field(ui: &mut egui::Ui, value: &mut u32, name: &str) -> (egui::Response, bool) {
+    let id = ui.make_persistent_id(("px-field", name));
+    // While typing, the box keeps its own text (it may be empty or too small yet).
+    let mut text = match ui.memory(|m| m.has_focus(id)) {
+        true => ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| value.to_string()),
+        false => value.to_string(),
+    };
+    let bg = ui.painter().add(egui::Shape::Noop);
+    let field = ui.add_sized(
+        [ui.available_width(), 30.0],
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            // Room for the "px" painted on the right.
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 10, right: 30, top: 0, bottom: 0 }))
+            .align(Align2::LEFT_CENTER)
+            .char_limit(4)
+            .hint_text(name),
+    );
+    let mut changed = false;
+    if field.changed() {
+        text.retain(|c| c.is_ascii_digit());
+        if let Ok(n) = text.parse::<u32>()
+            && CANVAS_SIDES.contains(&n)
+            && n != *value
+        {
+            *value = n;
+            changed = true;
+        }
+    }
+    if field.lost_focus() {
+        let n = text.parse::<u32>().unwrap_or(*value).clamp(*CANVAS_SIDES.start(), *CANVAS_SIDES.end());
+        changed |= n != *value;
+        *value = n;
+    }
+    if field.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text));
+    } else {
+        ui.data_mut(|d| d.remove::<String>(id));
+    }
+    let edge = if field.has_focus() {
+        theme::ACCENT
+    } else if field.hovered() {
+        theme::TEXT_FAINT
+    } else {
+        theme::BORDER_STRONG
+    };
+    let fill = ui.visuals().extreme_bg_color;
+    ui.painter().set(bg, egui::epaint::RectShape::new(field.rect, 8, fill, Stroke::new(1.0, edge), StrokeKind::Inside));
+    ui.painter().text(field.rect.right_center() - Vec2::new(10.0, 0.0), Align2::RIGHT_CENTER, "px", FontId::proportional(13.0), theme::TEXT_FAINT);
+    (field, changed)
+}
+
+/// A small padlock centred on `at`: shut, or open with its shackle raised.
+fn padlock(painter: &egui::Painter, at: Pos2, shut: bool, color: Color32) {
+    use std::f32::consts::PI;
+    let body = Rect::from_center_size(at + Vec2::new(0.0, 3.0), Vec2::new(12.0, 9.5));
+    painter.rect_filled(body, 2.0, color);
+    let (r, top) = (3.6, body.top() - if shut { 3.0 } else { 5.5 });
+    let mut shackle = vec![Pos2::new(at.x - r, body.top())];
+    shackle.extend((0..=12).map(|k| {
+        let a = PI + PI * k as f32 / 12.0;
+        Pos2::new(at.x + r * a.cos(), top + r * a.sin())
+    }));
+    // Open, the right leg stops short of the body.
+    shackle.push(Pos2::new(at.x + r, if shut { body.top() } else { top + 2.0 }));
+    painter.add(egui::Shape::line(shackle, Stroke::new(1.6, color)));
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2760,6 +2992,16 @@ impl eframe::App for RegaApp {
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(fit));
                 self.min_size = Vec2::new(fit.x.min(1300.0), fit.y.min(640.0));
             }
+        }
+        let moved_screen = match &mut self.activity {
+            Activity::Selecting(overlay) => overlay.follow_pointer(&ctx),
+            _ => false,
+        };
+        if moved_screen {
+            // Hidden while it moves, so the new screen's picture never shows
+            // for a frame where the old one was.
+            platform::set_window_alpha(frame, 0.0);
+            self.hide_until_painted(&ctx, 1);
         }
         if let Activity::Selecting(overlay) = &mut self.activity {
             // The overlay must cover the whole monitor, Dock and menu bar included.
@@ -3133,6 +3375,64 @@ mod tests {
         h.state_mut().settings.dismissed_update = Some("9.0.0".into());
         h.step();
         assert!(h.query_by_label(title).is_none());
+    }
+
+    /// The New form: a preset sets both sides; with the padlock shut, typing
+    /// one side scales the other; open, each side is its own; a size out of
+    /// range comes back in range when its box loses focus. Set
+    /// `NEW_FORM_PREVIEW_DIR` to save the form.
+    #[test]
+    fn new_canvas_sizes_and_kept_ratio() {
+        use egui::accesskit::Role;
+        let lib = std::env::temp_dir().join(format!("rega-new-form-{}", std::process::id()));
+        std::fs::create_dir_all(&lib).unwrap();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1360.0, 840.0))
+            .with_pixels_per_point(2.0)
+            .with_accessibility_check(false)
+            .wgpu()
+            .build_eframe(move |cc| RegaApp::demo(&cc.egui_ctx, lib));
+        h.step();
+        h.get_by_label("New").click();
+        h.run();
+        let size = |h: &Harness<'_, RegaApp>| (h.state().new_canvas.width, h.state().new_canvas.height);
+        let set = |h: &mut Harness<'_, RegaApp>, side: &str, text: &str| {
+            h.get_by_role_and_label(Role::TextInput, side).focus();
+            h.run();
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+            h.get_by_role_and_label(Role::TextInput, side).type_text(text);
+            h.run();
+        };
+
+        h.get_by_label("Full HD · 1920 × 1080").click();
+        h.run();
+        assert_eq!(size(&h), (1920, 1080));
+
+        h.get_by_label("Keep the ratio").click();
+        h.run();
+        set(&mut h, "Width", "1280");
+        assert_eq!(size(&h), (1280, 720), "the height follows at 16:9");
+        set(&mut h, "Height", "1080");
+        assert_eq!(size(&h), (1920, 1080), "and the width follows the height");
+        if let Ok(dir) = std::env::var("NEW_FORM_PREVIEW_DIR") {
+            h.hover_at(egui::pos2(1200.0, 300.0));
+            h.run();
+            h.render().unwrap().save(std::path::Path::new(&dir).join("new-form-locked.png")).unwrap();
+        }
+
+        h.get_by_label("Keep the ratio").click();
+        h.run();
+        set(&mut h, "Width", "1000");
+        assert_eq!(size(&h), (1000, 1080), "open, the height stays");
+
+        set(&mut h, "Height", "5");
+        assert_eq!(size(&h), (1000, 1080), "5 px is too small to take while typing");
+        h.key_press(egui::Key::Tab);
+        h.run();
+        assert_eq!(size(&h), (1000, 16), "leaving the box makes it the smallest side");
+        if let Ok(dir) = std::env::var("NEW_FORM_PREVIEW_DIR") {
+            h.render().unwrap().save(std::path::Path::new(&dir).join("new-form.png")).unwrap();
+        }
     }
 
     fn video(name: &str) -> PathBuf {

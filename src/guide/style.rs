@@ -269,12 +269,9 @@ pub fn marker_controls(ui: &mut egui::Ui, style: &mut Style) -> bool {
         }
     });
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label("Marker size");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            changed |= theme::segmented(ui, &mut style.size, &[(MarkerSize::Small, "Small"), (MarkerSize::Medium, "Medium"), (MarkerSize::Large, "Large")]);
-        });
-    });
+    // Above its choices, not beside them: the side panel is too narrow for both.
+    ui.label("Marker size");
+    changed |= theme::segmented(ui, &mut style.size, &[(MarkerSize::Small, "Small"), (MarkerSize::Medium, "Medium"), (MarkerSize::Large, "Large")]);
     changed
 }
 
