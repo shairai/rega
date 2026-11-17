@@ -13,7 +13,7 @@ Hobby plan.
 | `images/`, `fonts/` | Screenshots from `docs/images` as WebP, and the Ubuntu font as WOFF2 subsets. |
 | `media/demo.mp4`, `media/demo.jpg` | The home page's demo video and its poster. Rendered from the real UI, see below. |
 | `guide-demo.html` | A real guide page, exported by Rega's own exporter, shown in a frame in the Guides section. See below. |
-| `latest.json` | **Read by the app** once a day to see if a newer version is out. |
+| `latest.json` | **Read by the app** once a day to see if a newer version is out. Lists each installer's size and SHA-256: **Update now** (from 0.4.7) installs it in place only if the download matches. |
 | `vercel.json` | Headers, and the `/download/mac` and `/download/windows` redirects. |
 | `downloads/` | The current installers. Git-ignored: only Vercel gets them. |
 

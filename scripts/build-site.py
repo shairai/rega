@@ -16,6 +16,7 @@ when its inputs do). Standard library only, Python 3.9+.
 """
 
 import datetime
+import hashlib
 import html
 import json
 import pathlib
@@ -231,7 +232,8 @@ def main():
         f = DOWNLOADS / name
         if not f.is_file():
             fail(f"missing site/downloads/{name} (scripts/publish-site.sh copies it from dist/)")
-        files[key] = {"name": name, "size": f.stat().st_size}
+        # The app checks what it downloads against this before installing it.
+        files[key] = {"name": name, "size": f.stat().st_size, "sha256": hashlib.sha256(f.read_bytes()).hexdigest()}
 
     write_json(SITE / "latest.json", {
         "version": version,
@@ -240,7 +242,8 @@ def main():
         "notes": [plain(n) for n in latest["notes"]],
         "url": f"{url}/#download",
         "downloads": {
-            key: {"url": f"{url}/downloads/{f['name']}", "size": f["size"]} for key, f in files.items()
+            key: {"url": f"{url}/downloads/{f['name']}", "size": f["size"], "sha256": f["sha256"]}
+            for key, f in files.items()
         },
     })
 

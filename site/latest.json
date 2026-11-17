@@ -1,23 +1,21 @@
 {
-  "version": "0.4.6",
+  "version": "0.4.7",
   "date": "2026-11-17",
-  "title": "Every screen at once, and edits that save themselves.",
+  "title": "Update in place, with one click.",
   "notes": [
-    "More than one screen: the capture overlay now covers every screen at once. Select, click a window or press Enter on whichever screen you like; Screen lets you click the screen to take.",
-    "Edits save themselves a moment after you stop, and the library's preview follows, sharper than before. The Save button is gone (⌘S / Ctrl+S still saves at once).",
-    "The editor opens with the tool you used last.",
-    "Highlighter: starts 8 thick and keeps its own thickness; hold Shift to stay on the line you started on.",
-    "Guides: \"Made with Rega\" links to the Rega website."
+    "Updates in place: the update notice's Update now saves your work, downloads the new version, checks it (its checksum, and on macOS that it's signed by the same developer) and restarts into it. Where Rega can't replace itself (run from the disk image, say) it opens the download page."
   ],
   "url": "https://rega-capture.vercel.app/#download",
   "downloads": {
     "macos": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.6-macos-universal.dmg",
-      "size": 15858965
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.7-macos-universal.dmg",
+      "size": 15920904,
+      "sha256": "034901417e512ec29444f2c3b876c18518fb8d36fd17f023dc3c0e01160dd9ba"
     },
     "windows": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.6-windows-x64-setup.exe",
-      "size": 6580732
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.7-windows-x64-setup.exe",
+      "size": 6605302,
+      "sha256": "134cca2fbb2deea8aad57a6365f22125ed6f5abf8b25105c0db6200803969860"
     }
   }
 }

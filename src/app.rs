@@ -145,6 +145,20 @@ pub struct RegaApp {
     /// When the daily check is next due, by the clock (so time asleep
     /// counts); `None` never checks (tests).
     update_due: Option<SystemTime>,
+    /// An update being installed in place, and its step as last heard.
+    installing: Option<(Receiver<update::Progress>, Installing)>,
+    /// A checked new version, waiting for Rega to be idle to restart into it.
+    ready_update: Option<update::Prepared>,
+    /// Where this copy can update itself in place, worked out once (`Err`: why not).
+    install_target: Option<Result<PathBuf, String>>,
+}
+
+/// What the update notice shows while an update is installed in place.
+#[derive(Clone, Copy, PartialEq)]
+enum Installing {
+    Downloading(f32),
+    Checking,
+    Restarting,
 }
 
 impl RegaApp {
@@ -262,6 +276,9 @@ impl RegaApp {
             update_manual: false,
             // A few seconds after launch, so starting up isn't slowed.
             update_due: system.then(|| SystemTime::now() + Duration::from_secs(5)),
+            installing: None,
+            ready_update: None,
+            install_target: None,
         }
     }
 
@@ -1432,13 +1449,39 @@ impl RegaApp {
     }
 
     fn update_banner(&mut self, ui: &mut egui::Ui, latest: &update::Latest) {
+        let in_place = self.can_update_in_place(latest);
+        let installing = self.installing.as_ref().map(|(_, step)| *step);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if theme::ghost_button(ui, None, "Not now").clicked() {
-                self.settings.dismissed_update = Some(latest.version.clone());
-                self.settings.save();
-            }
-            if theme::primary_button(ui, Some(icon::OPEN_EXTERNAL), "Download").clicked() {
-                platform::open_url(&update::download_url());
+            match installing {
+                Some(step) => {
+                    let (text, share) = match step {
+                        Installing::Downloading(share) => (format!("Downloading… {:.0}%", share * 100.0), Some(share)),
+                        Installing::Checking => ("Checking it…".to_owned(), None),
+                        Installing::Restarting => ("Restarting when the capture is done…".to_owned(), None),
+                    };
+                    if let Some(share) = share {
+                        ui.add(egui::ProgressBar::new(share).desired_width(140.0));
+                    } else {
+                        ui.spinner();
+                    }
+                    ui.label(egui::RichText::new(text).color(theme::TEXT_MUTED));
+                }
+                None => {
+                    if theme::ghost_button(ui, None, "Not now").clicked() {
+                        self.settings.dismissed_update = Some(latest.version.clone());
+                        self.settings.save();
+                    }
+                    if in_place {
+                        if theme::primary_button(ui, Some(icon::IMPORT), "Update now")
+                            .on_hover_text("Rega saves your work, installs the new version and restarts")
+                            .clicked()
+                        {
+                            self.update_now(latest);
+                        }
+                    } else if theme::primary_button(ui, Some(icon::OPEN_EXTERNAL), "Download").clicked() {
+                        platform::open_url(&update::download_url());
+                    }
+                }
             }
             ui.add_space(16.0);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -1455,6 +1498,72 @@ impl RegaApp {
                 });
             });
         });
+    }
+
+    /// Whether `latest` can be installed over this copy, here and now.
+    fn can_update_in_place(&mut self, latest: &update::Latest) -> bool {
+        latest.installer().is_some() && self.install_target.get_or_insert_with(update::install_target).is_ok()
+    }
+
+    /// "Update now": download, check and install `latest` over this copy,
+    /// then restart into it; where that can't be done, the download page.
+    fn update_now(&mut self, latest: &update::Latest) {
+        if self.installing.is_some() {
+            return;
+        }
+        let target = self.install_target.get_or_insert_with(update::install_target).clone();
+        let (Some(installer), Ok(target)) = (latest.installer().cloned(), target) else {
+            platform::open_url(&update::download_url());
+            return;
+        };
+        let ctx = self.ctx.clone();
+        let rx = update::prepare(latest.version.clone(), installer, target, move || ctx.request_repaint());
+        self.installing = Some((rx, Installing::Downloading(0.0)));
+    }
+
+    /// An update in place: follow its steps, and once it's ready and nothing
+    /// is under way (a recording, a capture), quit into the new version.
+    fn tick_install(&mut self, ctx: &egui::Context) {
+        let mut finished = None;
+        if let Some((rx, step)) = &mut self.installing {
+            while let Ok(progress) = rx.try_recv() {
+                match progress {
+                    update::Progress::Downloading(share) => *step = Installing::Downloading(share),
+                    update::Progress::Checking => *step = Installing::Checking,
+                    other => finished = Some(other),
+                }
+            }
+        }
+        match finished {
+            Some(update::Progress::Ready(prepared)) => {
+                self.ready_update = Some(prepared);
+                if let Some((_, step)) = &mut self.installing {
+                    *step = Installing::Restarting;
+                }
+            }
+            Some(update::Progress::Failed(e)) => self.update_failed(&e),
+            _ => {}
+        }
+        if self.ready_update.is_some() && matches!(self.activity, Activity::Idle) {
+            let prepared = self.ready_update.take().expect("checked");
+            match update::apply(&prepared) {
+                Ok(()) => {
+                    log::info!("restarting into the new version");
+                    self.prepare_to_quit();
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                    std::process::exit(0);
+                }
+                Err(e) => self.update_failed(&format!("{e:#}")),
+            }
+        }
+    }
+
+    fn update_failed(&mut self, why: &str) {
+        log::warn!("updating in place: {why}");
+        self.installing = None;
+        self.ready_update = None;
+        self.toast(format!("Couldn't update in place ({why}). Opening the download page"));
+        platform::open_url(&update::download_url());
     }
 
     /// Start a check now; `manual` (from Settings) reports the outcome in a toast.
@@ -2289,8 +2398,14 @@ impl RegaApp {
                             };
                             ui.label(egui::RichText::new(status).color(color));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if self.update.is_some() {
-                                    if theme::primary_button(ui, Some(icon::OPEN_EXTERNAL), "Download").clicked() {
+                                if let Some(latest) = self.update.clone() {
+                                    if self.installing.is_some() {
+                                        ui.spinner();
+                                    } else if self.can_update_in_place(&latest) {
+                                        if theme::primary_button(ui, Some(icon::IMPORT), "Update now").clicked() {
+                                            self.update_now(&latest);
+                                        }
+                                    } else if theme::primary_button(ui, Some(icon::OPEN_EXTERNAL), "Download").clicked() {
                                         platform::open_url(&update::download_url());
                                     }
                                 } else if theme::secondary_button(ui, None, "Check now").clicked() {
@@ -2998,6 +3113,7 @@ impl eframe::App for RegaApp {
         }
         self.report_background_saves();
         self.tick_updates(ctx);
+        self.tick_install(ctx);
         self.advance_activity(ctx, frame);
         self.sync_capture_zoom(ctx);
 
@@ -3445,7 +3561,7 @@ mod tests {
         let title = "Rega 9.0.0 is available";
         assert!(h.query_by_label(title).is_none());
 
-        h.state_mut().update = Some(crate::update::Latest { version: "9.0.0".into(), title: "Big things.".into() });
+        h.state_mut().update = Some(crate::update::Latest { version: "9.0.0".into(), title: "Big things.".into(), downloads: Default::default() });
         h.step();
         assert!(h.query_by_label(title).is_some());
         assert!(h.query_by_label("Big things. You have 0.4.1.".replace("0.4.1", env!("CARGO_PKG_VERSION")).as_str()).is_some());

@@ -10,6 +10,15 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.7 — 2026-11-17
+
+Update in place, with one click.
+
+- Updates in place: the update notice's **Update now** saves your work,
+  downloads the new version, checks it (its checksum, and on macOS that it's
+  signed by the same developer) and restarts into it. Where Rega can't
+  replace itself (run from the disk image, say) it opens the download page.
+
 ## 0.4.6 — 2026-11-17
 
 Every screen at once, and edits that save themselves.
