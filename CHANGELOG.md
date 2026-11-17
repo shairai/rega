@@ -10,6 +10,15 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.4 — 2026-11-17
+
+A new look for the color picker.
+
+- Editor: the eyedropper's loupe now sits right on the pointer: a round,
+  enlarged view of the pixels under it, the one a click picks outlined in
+  the middle, and its hex code (like `#AE4E4A`) just below.
+- Screen readers now name the capture buttons on the home screen.
+
 ## 0.4.3 — 2026-11-16
 
 Signed and notarized on macOS.

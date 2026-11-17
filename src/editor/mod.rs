@@ -1802,7 +1802,6 @@ impl Editor {
             // Input
             let mut pick_preview: Option<(Pos2, Color32, (u32, u32))> = None;
             if let Some(snap) = self.picking.clone() {
-                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
                 if let Some(h) = resp.hover_pos() {
                     let p = to_img(h);
                     if p.x >= 0.0 && p.y >= 0.0 && (p.x as u32) < snap.width() && (p.y as u32) < snap.height() {
@@ -1811,6 +1810,9 @@ impl Editor {
                         pick_preview = Some((h, Color32::from_rgb(px[0], px[1], px[2]), (x, y)));
                     }
                 }
+                // Over the image the loupe is the pointer; its middle square
+                // marks the pixel a click picks.
+                ui.ctx().set_cursor_icon(if pick_preview.is_some() { CursorIcon::None } else { CursorIcon::Crosshair });
                 if resp.clicked()
                     && let Some((_, c, _)) = pick_preview
                 {
@@ -1930,7 +1932,9 @@ impl Editor {
             }
 
             if let (Some((at, color, (cx, cy))), Some(snap)) = (pick_preview, &self.picking) {
-                paint_loupe(&painter, snap, at, (cx, cy), color, outer);
+                // Above the panels, so it isn't cut off near the canvas edge.
+                let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("rega-loupe"));
+                paint_loupe(&ui.ctx().layer_painter(layer), snap, at, (cx, cy), color);
                 ui.ctx().request_repaint();
             }
 
@@ -2297,21 +2301,28 @@ fn square(a: P, p: P) -> P {
 }
 
 /// Magnified pixels around the cursor with the picked color and its hex code.
-fn paint_loupe(painter: &egui::Painter, img: &RgbaImage, at: Pos2, (cx, cy): (u32, u32), color: Color32, bounds: Rect) {
-    const CELLS: i32 = 11;
-    const CELL: f32 = 10.0;
-    let size = CELLS as f32 * CELL;
-    let mut min = at + Vec2::new(22.0, 22.0);
-    if min.x + size > bounds.max.x {
-        min.x = at.x - 22.0 - size;
-    }
-    if min.y + size + 34.0 > bounds.max.y {
-        min.y = at.y - 22.0 - size - 34.0;
-    }
-    let r = Rect::from_min_size(min, Vec2::splat(size));
-    painter.add(crate::theme::soft_shadow(r, 10));
-    painter.rect_filled(r.expand(3.0), 10.0, crate::theme::SURFACE);
-    let half = CELLS / 2;
+/// Pixels across the eyedropper's loupe; odd, so the picked one is in the middle.
+const LOUPE_CELLS: i32 = 15;
+/// Points per enlarged pixel in the loupe.
+const LOUPE_CELL: f32 = 8.0;
+
+/// The eyedropper's loupe, centred on the pointer: a circle of the pixels
+/// around (`cx`, `cy`) enlarged, the picked one outlined in the middle and
+/// its hex code on a pill below it.
+fn paint_loupe(painter: &egui::Painter, img: &RgbaImage, at: Pos2, (cx, cy): (u32, u32), color: Color32) {
+    let radius = LOUPE_CELLS as f32 * LOUPE_CELL / 2.0;
+    let disc = Rect::from_center_size(at, Vec2::splat(radius * 2.0));
+    painter.add(
+        egui::epaint::Shadow { offset: [0, 4], blur: 18, spread: 0, color: Color32::from_black_alpha(90) }
+            .as_shape(disc, CornerRadius::same(radius as u8)),
+    );
+
+    // One flat mesh (no anti-aliasing, so no seams between pixels), each
+    // pixel cut to the circle; the ring drawn after covers the jagged edge.
+    let circle: Vec<Pos2> = (0..96).map(|i| at + Vec2::angled(i as f32 * std::f32::consts::TAU / 96.0) * radius).collect();
+    let inscribed = radius * (std::f32::consts::PI / 96.0).cos();
+    let mut mesh = egui::Mesh::default();
+    let half = LOUPE_CELLS / 2;
     for dy in -half..=half {
         for dx in -half..=half {
             let (x, y) = (cx as i32 + dx, cy as i32 + dy);
@@ -2321,30 +2332,64 @@ fn paint_loupe(painter: &egui::Painter, img: &RgbaImage, at: Pos2, (cx, cy): (u3
             } else {
                 crate::theme::BG
             };
-            let cell = Rect::from_min_size(
-                r.min + Vec2::new((dx + half) as f32 * CELL, (dy + half) as f32 * CELL),
-                Vec2::splat(CELL),
-            );
-            painter.rect_filled(cell, 0.0, c);
+            let cell = Rect::from_center_size(at + Vec2::new(dx as f32, dy as f32) * LOUPE_CELL, Vec2::splat(LOUPE_CELL));
+            let corners = vec![cell.left_top(), cell.right_top(), cell.right_bottom(), cell.left_bottom()];
+            let far = corners.iter().map(|p| p.distance(at)).fold(0.0, f32::max);
+            let poly = if far <= inscribed { corners } else { clip_convex(corners, &circle) };
+            if poly.len() < 3 {
+                continue;
+            }
+            let first = mesh.vertices.len() as u32;
+            for &p in &poly {
+                mesh.colored_vertex(p, c);
+            }
+            for k in 1..poly.len() as u32 - 1 {
+                mesh.add_triangle(first, first + k, first + k + 1);
+            }
         }
     }
-    let center = Rect::from_min_size(r.min + Vec2::splat(half as f32 * CELL), Vec2::splat(CELL));
-    painter.rect_stroke(center, 0.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Outside);
-    painter.rect_stroke(center.expand(1.5), 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
-    painter.rect_stroke(r, 8.0, Stroke::new(1.0, crate::theme::BORDER_STRONG), StrokeKind::Outside);
+    painter.add(mesh);
 
-    let label = Rect::from_min_size(Pos2::new(r.min.x, r.max.y + 8.0), Vec2::new(size, 26.0));
-    painter.rect_filled(label, 8.0, crate::theme::SURFACE_3);
-    let swatch = Rect::from_center_size(label.left_center() + Vec2::new(14.0, 0.0), Vec2::splat(14.0));
-    painter.rect_filled(swatch, 4.0, color);
-    painter.rect_stroke(swatch, 4.0, Stroke::new(1.0, Color32::from_white_alpha(60)), StrokeKind::Inside);
-    painter.text(
-        label.left_center() + Vec2::new(28.0, 0.0),
-        Align2::LEFT_CENTER,
+    // The picked pixel: a light square with a dark edge, seen on any color.
+    let center = Rect::from_center_size(at, Vec2::splat(LOUPE_CELL));
+    painter.rect_stroke(center, 0.0, Stroke::new(1.0, Color32::from_white_alpha(230)), StrokeKind::Outside);
+    painter.rect_stroke(center.expand(1.0), 0.0, Stroke::new(1.0, Color32::from_black_alpha(140)), StrokeKind::Outside);
+
+    painter.circle_stroke(at, radius, Stroke::new(2.0, Color32::from_gray(48)));
+    painter.circle_stroke(at, radius - 1.5, Stroke::new(1.0, Color32::from_white_alpha(70)));
+
+    let galley = painter.layout_no_wrap(
         format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b()),
-        FontId::monospace(12.0),
-        crate::theme::TEXT,
+        FontId::proportional(12.0),
+        Color32::WHITE,
     );
+    let pill = Rect::from_center_size(at + Vec2::new(0.0, radius * 0.45), galley.size() + Vec2::new(16.0, 6.0));
+    painter.rect_filled(pill, CornerRadius::same((pill.height() / 2.0) as u8), Color32::from_rgba_unmultiplied(30, 30, 34, 215));
+    painter.galley(pill.center() - galley.size() / 2.0, galley, Color32::WHITE);
+}
+
+/// The part of convex polygon `poly` inside convex polygon `clip`, whose
+/// points go counter-clockwise in x/y (Sutherland–Hodgman).
+fn clip_convex(mut poly: Vec<Pos2>, clip: &[Pos2]) -> Vec<Pos2> {
+    for (i, &a) in clip.iter().enumerate() {
+        let b = clip[(i + 1) % clip.len()];
+        let side = |p: Pos2| (b - a).x * (p - a).y - (b - a).y * (p - a).x;
+        let input = std::mem::take(&mut poly);
+        for (j, &p) in input.iter().enumerate() {
+            let q = input[(j + 1) % input.len()];
+            let (sp, sq) = (side(p), side(q));
+            if sp >= 0.0 {
+                poly.push(p);
+            }
+            if (sp >= 0.0) != (sq >= 0.0) {
+                poly.push(p + (q - p) * (sp / (sp - sq)));
+            }
+        }
+        if poly.is_empty() {
+            break;
+        }
+    }
+    poly
 }
 
 /// Subtle dot grid behind the image.
@@ -2947,5 +2992,65 @@ mod tests {
         h.run();
         assert_eq!(h.state().ed.size(), (12_000, 100), "a choice past the limit does nothing");
         assert_eq!(h.state().toast, None);
+    }
+
+    /// The eyedropper's loupe sits on the pointer in place of the cursor: the
+    /// pixels around the hovered one, enlarged, in a circle centred on it.
+    /// Set `LOUPE_PREVIEW_DIR` to save the frame.
+    #[test]
+    fn eyedropper_loupe_is_centred_on_the_pointer() {
+        // Coral with a dark diagonal edge, every pixel near the pick a different shade.
+        let img = RgbaImage::from_fn(240, 160, |x, y| {
+            if x + y > 230 {
+                image::Rgba([40 + (x % 8) as u8, 40 + (y % 8) as u8, 46, 255])
+            } else {
+                image::Rgba([200 + (x % 48) as u8, 70 + (y % 48) as u8, 83, 255])
+            }
+        });
+        let mut ed = Editor::new(PathBuf::from("unused.png"), img.clone(), None, true);
+        ed.toggle_picking();
+        let ppp = 2.0;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(600.0, 400.0))
+            .with_pixels_per_point(ppp)
+            .with_accessibility_check(false)
+            .with_context_setup(crate::theme::install)
+            .wgpu()
+            .build_ui_state(|ui, ed: &mut Editor| ed.canvas(ui), ed);
+        h.step();
+        // Next to the dark edge, which crosses the loupe's lower right.
+        let (px, py) = (112, 110);
+        let at = h.state().image_to_screen(P::new(px as f32 + 0.5, py as f32 + 0.5));
+        h.hover_at(at);
+        h.step();
+        h.step();
+        assert_eq!(h.output().platform_output.cursor_icon, CursorIcon::None, "the loupe replaces the cursor");
+        let shot = h.render().expect("render");
+        if let Ok(dir) = std::env::var("LOUPE_PREVIEW_DIR") {
+            shot.save(std::path::Path::new(&dir).join("loupe.png")).unwrap();
+        }
+
+        let screen = |d: Vec2| {
+            let p = (at + d) * ppp;
+            let c = shot.get_pixel(p.x as u32, p.y as u32);
+            [c[0], c[1], c[2]]
+        };
+        let source = |dx: i32, dy: i32| {
+            let c = img.get_pixel((px + dx) as u32, (py + dy) as u32);
+            [c[0], c[1], c[2]]
+        };
+        let close = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 2);
+        // Pixels around the pick, each LOUPE_CELL points per pixel from the pointer
+        // (the pill sits below the middle, so look above and beside it).
+        for (dx, dy) in [(-4, 0), (3, 0), (0, -2), (-5, -4), (5, -5), (6, 2), (-6, 1), (5, 4)] {
+            let got = screen(Vec2::new(dx as f32, dy as f32) * LOUPE_CELL);
+            assert!(close(got, source(dx, dy)), "pixel {dx},{dy} away shows {got:?}, not {:?}", source(dx, dy));
+        }
+        // The square's corners are outside the circle: at the lower left the
+        // backdrop below the image shows, not the coral pixel a square would put there.
+        let r = LOUPE_CELLS as f32 * LOUPE_CELL / 2.0;
+        let corner = screen(Vec2::new(-(r - 3.0), r - 3.0));
+        let half = LOUPE_CELLS / 2;
+        assert!(!close(corner, source(-half, half)), "the loupe is round: {corner:?}");
     }
 }
