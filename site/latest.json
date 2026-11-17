@@ -1,20 +1,22 @@
 {
-  "version": "0.4.4",
+  "version": "0.4.5",
   "date": "2026-11-17",
-  "title": "A new look for the color picker.",
+  "title": "Capture on any screen, and copy several captures at once.",
   "notes": [
-    "Editor: the eyedropper's loupe now sits right on the pointer: a round, enlarged view of the pixels under it, the one a click picks outlined in the middle, and its hex code (like #AE4E4A) just below.",
-    "Screen readers now name the capture buttons on the home screen."
+    "More than one screen: the capture overlay follows the mouse, so move it to the screen you want and select there. Screen asks which screen to take: click the one you want.",
+    "Library: select several captures (⌘-click or Shift-click) and copy them all with Copy, the right-click menu or ⌘C / Ctrl+C. They paste into chats, emails and folders as files.",
+    "New image: clearer sizes, width and height boxes you can type in, and a padlock that keeps the ratio.",
+    "Guides: the page settings fit their panel again, and Marker size no longer hides behind its buttons."
   ],
   "url": "https://rega-capture.vercel.app/#download",
   "downloads": {
     "macos": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.4-macos-universal.dmg",
-      "size": 15771904
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.5-macos-universal.dmg",
+      "size": 15833451
     },
     "windows": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.4-windows-x64-setup.exe",
-      "size": 6550904
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.5-windows-x64-setup.exe",
+      "size": 6577326
     }
   }
 }
