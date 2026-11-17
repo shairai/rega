@@ -47,6 +47,7 @@
 | **Guide** | Do a task once and get a step-by-step how-to: every click becomes a step with a screenshot and a marker, shared as one small HTML page. See [Guides](#guides). |
 | **Video** | Record any region to **MP4** (H.264) or **GIF**, with pause/resume and an optional cursor highlight. The control bar stays out of the recording. In the built-in player, trim a recording or **Save as GIF** (the whole video or just the trimmed part). |
 | **Grab text (OCR)** | Select a region and get its text on the clipboard, using the built-in OCR engine of macOS (Vision) or Windows (Windows.Media.Ocr; install a language pack in Settings › Time & language if none is present). |
+| **Pick a color** | One shortcut, a loupe on the pointer over any screen: click a pixel and its hex code (`#AE4E4A`) is on your clipboard, without opening Rega. |
 | **Delay timer** | 3, 5 or 10 seconds to open a menu or hover state first. |
 
 <p align="center">
@@ -226,6 +227,9 @@ Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thin
 **Copy text out of an image or video call**
 `⌃⌥T` → select the text → it's on your clipboard, and shown in a window you can edit before copying again.
 
+**Grab a color from anything on screen**
+`⌃⌥P` → click the pixel → its hex code is on your clipboard.
+
 **Capture a whole web page**
 `⌃⌥S` → select the browser's content area → Rega scrolls to the end and stitches one tall image.
 
@@ -249,6 +253,7 @@ Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thin
 | `⌃⌥S` | Scrolling capture |
 | `⌃⌥G` | Start / stop recording a guide |
 | `⌃⌥T` | Grab text (OCR) |
+| `⌃⌥P` | Pick a color: its hex code goes on the clipboard |
 
 ### In the app
 

@@ -11,6 +11,7 @@ mod guide;
 mod h264;
 mod icon;
 mod library;
+mod loupe;
 mod ocr;
 mod overlay;
 mod platform;

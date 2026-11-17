@@ -10,6 +10,16 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.8 — 2026-11-17
+
+Pick a color from anything on screen.
+
+- **Pick a color** from anything on screen: `⌃⌥P` (`Ctrl+Alt+P` on Windows)
+  puts a loupe on the pointer over every screen; click a pixel and its hex
+  code (like `#AE4E4A`) is on your clipboard, without opening Rega. The
+  shortcut can be changed in Settings › Shortcuts. It's also on Rega's home
+  screen, its toolbar and the menu bar.
+
 ## 0.4.7 — 2026-11-17
 
 Update in place, with one click.

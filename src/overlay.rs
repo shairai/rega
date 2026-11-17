@@ -17,6 +17,8 @@ pub enum Purpose {
     Scroll,
     Guide,
     Text,
+    /// Pick a colour off the screen: its hex code goes on the clipboard.
+    Color,
 }
 
 impl Purpose {
@@ -27,6 +29,7 @@ impl Purpose {
             Purpose::Scroll => "Scrolling capture",
             Purpose::Guide => "Guide",
             Purpose::Text => "Grab text",
+            Purpose::Color => "Pick a color",
         }
     }
 }
@@ -36,6 +39,8 @@ pub enum Outcome {
     Cancel,
     /// Selected rect in monitor-local logical points.
     Selected(Rect),
+    /// The colour picked (its hex code is already on the clipboard).
+    Color(Color32),
 }
 
 pub struct Overlay {
@@ -64,6 +69,9 @@ pub struct Overlay {
     pick_screen: bool,
     /// macOS: this extra overlay's window has been made an overlay panel.
     pub presented: bool,
+    /// Colour picking: the colour picked, where (window point, image pixel)
+    /// and when, shown as copied for a moment before the overlay closes.
+    picked: Option<(Color32, Pos2, (u32, u32), f64)>,
 }
 
 /// A color along the logo gradient (0 = top-left coral, 1 = bottom-right violet).
@@ -116,6 +124,7 @@ impl Overlay {
             incoming: None,
             pick_screen: false,
             presented: false,
+            picked: None,
         }
     }
 
@@ -191,6 +200,10 @@ impl Overlay {
 
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             return Outcome::Cancel;
+        }
+        if self.purpose == Purpose::Color {
+            let here = pointer.filter(|p| screen.contains(*p));
+            return self.color_ui(&ctx, &painter, full, here, to_win(Pos2::ZERO).to_vec2());
         }
         if ctx.input(|i| i.key_pressed(Key::Enter)) {
             return Outcome::Selected(screen);
@@ -277,6 +290,51 @@ impl Overlay {
         self.hint(&painter, full, hint);
 
         ctx.request_repaint();
+        Outcome::Pending
+    }
+
+    /// Pick a colour: the loupe on the pointer over the frozen screen; a click
+    /// (or Enter) copies the pixel's hex code, shows it copied for a moment,
+    /// and is done. `here` is the pointer when it's on this screen;
+    /// `to_win` turns monitor-local points into window points.
+    fn color_ui(&mut self, ctx: &egui::Context, painter: &egui::Painter, full: Rect, here: Option<Pos2>, to_win: Vec2) -> Outcome {
+        const SHOW_COPIED: f64 = 0.6;
+        let now = ctx.input(|i| i.time);
+        ctx.request_repaint();
+        if let Some((color, at, px, since)) = self.picked {
+            if now - since > SHOW_COPIED {
+                return Outcome::Color(color);
+            }
+            crate::loupe::paint(painter, &self.snap.image, at, px, &format!("Copied {}", crate::loupe::hex(color)));
+            return Outcome::Pending;
+        }
+        self.hint(painter, full, format!("{}  ·  click to copy its hex code  ·  Esc = cancel", self.purpose.title()));
+        let Some(p) = here else { return Outcome::Pending };
+        // The loupe is the pointer; its middle square marks the pixel a click takes.
+        ctx.set_cursor_icon(CursorIcon::None);
+        let (s, img) = (self.snap.scale, &self.snap.image);
+        let px = (
+            ((p.x * s).floor().max(0.0) as u32).min(img.width().saturating_sub(1)),
+            ((p.y * s).floor().max(0.0) as u32).min(img.height().saturating_sub(1)),
+        );
+        let c = img.get_pixel(px.0, px.1);
+        let color = Color32::from_rgb(c[0], c[1], c[2]);
+        let at = p + to_win;
+        if ctx.input(|i| i.pointer.primary_released() || i.key_pressed(Key::Enter)) {
+            let hex = crate::loupe::hex(color);
+            // (Tests leave the real clipboard alone.)
+            if !cfg!(test)
+                && let Err(e) = crate::platform::copy_text(&hex)
+            {
+                log::warn!("copying {hex}: {e:#}");
+            }
+            self.picked = Some((color, at, px, now));
+        }
+        let label = match self.picked {
+            Some(_) => format!("Copied {}", crate::loupe::hex(color)),
+            None => crate::loupe::hex(color),
+        };
+        crate::loupe::paint(painter, img, at, px, &label);
         Outcome::Pending
     }
 
@@ -568,6 +626,50 @@ mod tests {
         h.drop_at(Pos2::new(300.0, 300.0));
         h.step();
         assert_eq!(h.state().selected, Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0))));
+    }
+
+    /// Picking a colour: the loupe follows the pointer, a click takes the
+    /// pixel under it, shows it copied for a moment, then it's done. Set
+    /// `BORDER_PREVIEW_DIR` to save the loupe and the "Copied" moment.
+    #[test]
+    fn a_click_picks_the_colour_under_the_pointer() {
+        let mut snap = Some(snapshot());
+        let mut h = Harness::builder().with_size(Vec2::new(800.0, 500.0)).with_pixels_per_point(2.0).wgpu().build_ui_state(
+            move |ui, run: &mut (Option<Overlay>, Option<Color32>)| {
+                let overlay = run.0.get_or_insert_with(|| Overlay::new(ui.ctx(), snap.take().expect("one overlay"), Purpose::Color));
+                if let Outcome::Color(c) = overlay.ui(ui) {
+                    run.1 = Some(c);
+                }
+            },
+            (None, None),
+        );
+        let save = |h: &mut Harness<'_, (Option<Overlay>, Option<Color32>)>, name: &str| {
+            if let Ok(dir) = std::env::var("BORDER_PREVIEW_DIR") {
+                h.render().unwrap().save(std::path::Path::new(&dir).join(name)).unwrap();
+            }
+        };
+        // `snapshot` is 30 + x/16, 40 + y/12, 70: at (320, 240) that's 50, 60, 70.
+        let at = Pos2::new(320.5, 240.5);
+        h.input_mut().time = Some(1.0);
+        h.hover_at(at);
+        h.step();
+        h.step();
+        save(&mut h, "color-loupe.png");
+        assert_eq!(h.output().platform_output.cursor_icon, CursorIcon::None, "the loupe is the pointer");
+        assert!(h.state().0.as_ref().unwrap().picked.is_none());
+
+        h.drag_at(at);
+        h.step();
+        h.drop_at(at);
+        h.step();
+        let picked = h.state().0.as_ref().unwrap().picked.map(|p| p.0);
+        assert_eq!(picked, Some(Color32::from_rgb(50, 60, 70)));
+        assert_eq!(h.state().1, None, "\"Copied\" shows for a moment first");
+        save(&mut h, "color-copied.png");
+
+        h.input_mut().time = Some(2.0);
+        h.step();
+        assert_eq!(h.state().1, Some(Color32::from_rgb(50, 60, 70)));
     }
 
     /// Renders the hovered-window highlight, the same outline around a window;

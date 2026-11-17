@@ -647,7 +647,9 @@ impl RegaApp {
         } else {
             Duration::from_millis(120)
         };
-        let delay = Duration::from_secs(self.settings.delay_secs as u64).max(settle);
+        // The capture delay is for setting a screen up; a colour is picked at once.
+        let wait = if purpose == Purpose::Color { 0 } else { self.settings.delay_secs as u64 };
+        let delay = Duration::from_secs(wait).max(settle);
         self.activity = Activity::Pending {
             purpose,
             full,
@@ -664,7 +666,7 @@ impl RegaApp {
                 let now = Instant::now();
                 if now < at {
                     let left = at - now;
-                    if self.settings.delay_secs > 0 {
+                    if self.settings.delay_secs > 0 && purpose != Purpose::Color {
                         let secs = left.as_secs_f32().ceil() as u32;
                         self.set_tray_title(Some(&secs.to_string()));
                     }
@@ -813,6 +815,8 @@ impl RegaApp {
     fn on_selection(&mut self, ctx: &egui::Context, frame: &eframe::Frame, overlay: &Overlay, rect: Rect) {
         let snap = &overlay.snap;
         match overlay.purpose {
+            // Picking a colour ends with `Outcome::Color`, not a selection.
+            Purpose::Color => self.return_to_rest(ctx, frame),
             Purpose::Image => {
                 let img = snap.crop(rect.min.x, rect.min.y, rect.width(), rect.height());
                 self.finish_image(ctx, frame, img);
@@ -1217,6 +1221,7 @@ impl RegaApp {
                             (icon::SCROLL, "Scrolling", Action::Scroll, Purpose::Scroll, false),
                             (icon::GUIDE, "Guide", Action::Guide, Purpose::Guide, false),
                             (icon::OCR, "Text", Action::Text, Purpose::Text, false),
+                            (icon::EYEDROPPER, "Color", Action::Color, Purpose::Color, false),
                         ] {
                             let style = if action == Action::Image { ItemStyle::Primary } else { ItemStyle::Normal };
                             let tip = format!("{}   {}", action.label(), self.keys(action));
@@ -1783,11 +1788,18 @@ impl RegaApp {
                     (icon::SCROLL, "Scrolling", self.keys(Action::Scroll), Purpose::Scroll, false),
                     (icon::GUIDE, "Guide", self.keys(Action::Guide), Purpose::Guide, false),
                     (icon::OCR, "Grab text", self.keys(Action::Text), Purpose::Text, false),
+                    (icon::EYEDROPPER, "Pick color", self.keys(Action::Color), Purpose::Color, false),
                 ];
-                let tile = Vec2::new(104.0, 104.0);
+                // Wider than the card: centred on the screen, and smaller when
+                // the window is too narrow for the whole row.
                 let gap = 12.0;
-                let row_w = tile.x * tiles.len() as f32 + gap * (tiles.len() - 1) as f32;
-                let (row, _) = ui.allocate_exact_size(Vec2::new(row_w, tile.y), Sense::hover());
+                let n = tiles.len() as f32;
+                let side = ((avail.width() - 48.0 - gap * (n - 1.0)) / n).clamp(84.0, 104.0);
+                let tile = Vec2::splat(side);
+                let row_w = tile.x * n + gap * (n - 1.0);
+                let top = ui.cursor().min.y;
+                let row = Rect::from_min_size(Pos2::new(avail.center().x - row_w / 2.0, top), Vec2::new(row_w, tile.y));
+                ui.allocate_space(Vec2::new(0.0, tile.y));
                 for (n, (glyph, label, keys, purpose, full)) in tiles.into_iter().enumerate() {
                     let r = Rect::from_min_size(row.min + Vec2::new(n as f32 * (tile.x + gap), 0.0), tile);
                     if mode_tile(ui, r, glyph, label, &keys).clicked() {
@@ -3181,6 +3193,7 @@ impl eframe::App for RegaApp {
                 match extra_outcome {
                     Outcome::Pending => {}
                     Outcome::Cancel => outcome = Outcome::Cancel,
+                    Outcome::Color(c) => outcome = Outcome::Color(c),
                     Outcome::Selected(rect) => chosen = Some((i, rect)),
                 }
             }
@@ -3188,6 +3201,12 @@ impl eframe::App for RegaApp {
                 (Outcome::Cancel, _) => {
                     self.activity = Activity::Idle;
                     self.return_to_rest(&ctx, frame);
+                }
+                // Already on the clipboard: back to where the user was.
+                (Outcome::Color(color), _) => {
+                    self.activity = Activity::Idle;
+                    self.return_to_rest(&ctx, frame);
+                    self.toast(format!("Copied {}", crate::loupe::hex(color)));
                 }
                 (Outcome::Selected(rect), _) => {
                     if let Activity::Selecting(overlay) = std::mem::replace(&mut self.activity, Activity::Idle) {
@@ -3285,6 +3304,7 @@ fn menu_label(action: Action, shortcuts: &shortcuts::Shortcuts) -> String {
         Action::Scroll => "Scrolling Capture",
         Action::Guide => "Record Guide",
         Action::Text => "Grab Text",
+        Action::Color => "Pick Color",
     };
     let keys = shortcuts.display(action);
     if keys.is_empty() { title.to_owned() } else { format!("{title}    {keys}") }
@@ -3569,6 +3589,37 @@ mod tests {
         h.state_mut().settings.dismissed_update = Some("9.0.0".into());
         h.step();
         assert!(h.query_by_label(title).is_none());
+    }
+
+    /// The home screen's capture tiles, Pick color among them, all fit in the
+    /// window side by side, shrinking in a narrow one. Set
+    /// `HOME_PREVIEW_DIR` to save both.
+    #[test]
+    fn home_tiles_fit_the_window() {
+        for width in [1360.0, 760.0] {
+            let lib = std::env::temp_dir().join(format!("rega-home-tiles-{}-{width}", std::process::id()));
+            std::fs::create_dir_all(&lib).unwrap();
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(width, 760.0))
+                .with_accessibility_check(false)
+                .wgpu()
+                .build_eframe(move |cc| RegaApp::demo(&cc.egui_ctx, lib));
+            h.step();
+            h.step();
+            if let Ok(dir) = std::env::var("HOME_PREVIEW_DIR") {
+                h.render().unwrap().save(std::path::Path::new(&dir).join(format!("home-{width}.png"))).unwrap();
+            }
+            // The first, second and last two tiles (the others share their
+            // names with toolbar buttons).
+            let tiles: Vec<egui::Rect> = ["Region", "Full screen", "Grab text", "Pick color"]
+                .iter()
+                .map(|label| h.get_by_label(label).rect())
+                .collect();
+            for (r, next) in tiles.iter().zip(tiles.iter().skip(1)) {
+                assert!(r.max.x <= next.min.x, "tiles overlap at {width}: {r:?} {next:?}");
+            }
+            assert!(tiles[0].min.x >= 0.0 && tiles[3].max.x <= width, "off screen at {width}: {tiles:?}");
+        }
     }
 
     /// A card's picture has the card's shape at 3× its size: the middle of a

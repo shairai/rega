@@ -18,10 +18,11 @@ pub enum Action {
     Scroll,
     Guide,
     Text,
+    Color,
 }
 
 impl Action {
-    pub const ALL: [Action; 6] = [Action::Image, Action::FullScreen, Action::Video, Action::Scroll, Action::Guide, Action::Text];
+    pub const ALL: [Action; 7] = [Action::Image, Action::FullScreen, Action::Video, Action::Scroll, Action::Guide, Action::Text, Action::Color];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -31,6 +32,7 @@ impl Action {
             Action::Scroll => "Scrolling capture",
             Action::Guide => "Record guide",
             Action::Text => "Grab text",
+            Action::Color => "Pick a color",
         }
     }
 
@@ -42,6 +44,7 @@ impl Action {
             Action::Scroll => AppEvent::Capture(Purpose::Scroll),
             Action::Guide => AppEvent::Capture(Purpose::Guide),
             Action::Text => AppEvent::Capture(Purpose::Text),
+            Action::Color => AppEvent::Capture(Purpose::Color),
         }
     }
 
@@ -53,6 +56,7 @@ impl Action {
             Action::Scroll => "control+alt+KeyS",
             Action::Guide => "control+alt+KeyG",
             Action::Text => "control+alt+KeyT",
+            Action::Color => "control+alt+KeyP",
         }
     }
 }
@@ -168,6 +172,11 @@ mod tests {
         }
         if cfg!(target_os = "macos") {
             assert_eq!(s.display(Action::Image), "⌃⌥C");
+            assert_eq!(s.display(Action::Color), "⌃⌥P");
+        }
+        // No two defaults share a shortcut.
+        for a in Action::ALL {
+            assert_eq!(s.conflict(a, s.hotkey(a).unwrap()), None, "{a:?}");
         }
     }
 
