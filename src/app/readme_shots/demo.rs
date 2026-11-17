@@ -627,3 +627,141 @@ fn set_step_times(page: &Path, marks: &[(u32, f32)]) {
     }
     std::fs::write(page, html).unwrap();
 }
+
+// ---------- the demo guide ----------
+
+/// The website's demo guide: a real guide page, exported the way Rega exports
+/// one, that also teaches the basics. Each step's screenshot is the real UI.
+///
+/// ```sh
+/// cargo test --release site_guide -- --ignored
+/// ```
+/// Writes `site/guide-demo.html`, which the home page shows in a frame.
+#[test]
+#[ignore = "writes the website's demo guide; run with --ignored"]
+fn site_guide() {
+    use crate::guide::style::PageTheme;
+    use crate::guide::{Action, Button, Guide, Shot, Step};
+
+    let (library, dashboard) = demo_library();
+    let code = render_ui(CODE, draw_code_editor);
+    let click = Action::Click { button: Button::Left, count: 1 };
+    // A spot in points on a screenshot of `size` points, as the page wants it.
+    let spot = |p: Pos2, size: Vec2| Some([p.x / size.x, p.y / size.y]);
+    let step = |img: RgbaImage, action: Action, marker: Option<[f32; 2]>, title: &str, note: &str| Step {
+        shot: Shot::encode(&crate::guide::fit_capture(img, Some(1920))).unwrap(),
+        action,
+        marker,
+        marker_hidden: false,
+        title: title.into(),
+        note: note.into(),
+    };
+    let mut steps = Vec::new();
+
+    // 1. The home screen: the Region tile.
+    let lib = library.clone();
+    let mut h = app_harness(APP_SIZE, move |ctx| RegaApp::demo(ctx, lib));
+    settle(&mut h);
+    let region = h.get_by_label("Region").rect().center();
+    steps.push(step(
+        h.render().unwrap(),
+        click.clone(),
+        spot(region, APP_SIZE),
+        "Click Region, or press ⌃⌥C in any app",
+        "Rega waits in the menu bar, so the shortcut works wherever you are.",
+    ));
+    drop(h);
+
+    // 2. The frozen screen, mid-drag over the dashboard.
+    let (desk, windows) = desktop_with_code_at(&dashboard, &code, Pos2::new(985.0, 300.0));
+    let lib = library.clone();
+    let mut h = app_harness(SCREEN, move |ctx| {
+        let snap = Snapshot { image: desk, origin: (0, 0), size: (1440, 900), scale: PPP, windows, cursor: (-1, -1) };
+        let mut app = RegaApp::demo(ctx, lib);
+        app.activity = Activity::Selecting(Box::new(Overlay::new(ctx, snap, Purpose::Image)));
+        app
+    });
+    let (start, end) = (SELECTION.min, SELECTION.max);
+    h.hover_at(start);
+    h.step();
+    h.event(egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    for i in 1..=10 {
+        h.hover_at(start + (end - start) * (i as f32 / 10.0));
+        h.step();
+    }
+    for _ in 0..4 {
+        h.step();
+    }
+    steps.push(step(
+        h.render().unwrap(),
+        click.clone(),
+        spot(end, SCREEN),
+        "Drag over what you want",
+        "Or click a window to capture just that window. Esc cancels.",
+    ));
+    drop(h);
+
+    // 3. The editor with marks; 4. copied; 5. the Export menu.
+    let ed = Editor::new(library.join("Rega 2026-11-02 at 09.50.00.png"), dashboard.clone(), Some(dashboard_project()), true);
+    let lib = library.clone();
+    let mut h = app_harness(APP_SIZE, move |ctx| {
+        let mut app = RegaApp::demo(ctx, lib);
+        app.mode = Mode::Editor(Box::new(ed));
+        app
+    });
+    settle(&mut h);
+    let arrow = dashboard_project().annotations.iter().find_map(|a| match a.kind {
+        Kind::Arrow { b, .. } => Some(b),
+        _ => None,
+    });
+    let arrow = match &h.state().mode {
+        Mode::Editor(ed) => ed.image_to_screen(arrow.expect("the demo project has an arrow")),
+        _ => unreachable!(),
+    };
+    steps.push(step(
+        h.render().unwrap(),
+        click.clone(),
+        spot(arrow, APP_SIZE),
+        "Mark it up",
+        "Arrows, text, blur, steps and stamps, one key each. Every mark stays editable.",
+    ));
+
+    // Shown fully faded in: toasts fade in over their first 0.15 s.
+    h.state_mut().toast = Some(("Image copied to clipboard".into(), Instant::now() - Duration::from_secs(1)));
+    for _ in 0..3 {
+        h.step();
+    }
+    let copy = h.get_by_label("Copy").rect().center();
+    steps.push(step(
+        h.render().unwrap(),
+        Action::Key { combo: "⌘C".into() },
+        spot(copy, APP_SIZE),
+        "Press ⌘C and paste it anywhere",
+        "Slack, an email, a ticket: it's already on your clipboard.",
+    ));
+    h.state_mut().toast = None;
+
+    h.get_by_label("Export").click();
+    for _ in 0..6 {
+        h.step();
+    }
+    let export = h.get_by_label("Export").rect().center();
+    steps.push(step(
+        h.render().unwrap(),
+        click,
+        spot(export, APP_SIZE),
+        "Or choose Export for a file",
+        "PNG, JPEG, PDF, WebP, TIFF or BMP. Every capture is also kept in the library at the bottom.",
+    ));
+    drop(h);
+
+    let mut guide = Guide::new("Capture, mark up and share a screenshot".into(), steps);
+    guide.style.theme = PageTheme::Dark;
+    guide.style.repeat = true;
+    guide.style.seconds = 5.0;
+    let html = crate::guide::export::page(&guide, &crate::guide::export::Cache::default()).unwrap();
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("site/guide-demo.html");
+    std::fs::write(&out, &html).unwrap();
+    println!("wrote {} ({} KB, {} steps)", out.display(), html.len() / 1024, guide.steps.len());
+    let _ = std::fs::remove_dir_all(&library);
+}

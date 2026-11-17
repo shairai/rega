@@ -1085,7 +1085,8 @@ fn guide_settings_render() {
     for _ in 0..8 {
         h.step();
     }
-    h.get_by_label("Guide");
+    // "Guide" is also the top bar button and the home screen tile.
+    assert!(h.query_all_by_label("Guide").count() > 0, "the Guide settings tab");
     if let Ok(d) = std::env::var("GUIDE_PREVIEW_DIR") {
         h.render().unwrap().save(Path::new(&d).join("guide-settings.png")).unwrap();
     }

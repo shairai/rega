@@ -12,6 +12,7 @@ Hobby plan.
 | `consent.js` | The cookie banner, and Google Tag Manager once the visitor accepts. See [Analytics](#analytics). |
 | `images/`, `fonts/` | Screenshots from `docs/images` as WebP, and the Ubuntu font as WOFF2 subsets. |
 | `media/demo.mp4`, `media/demo.jpg` | The home page's demo video and its poster. Rendered from the real UI, see below. |
+| `guide-demo.html` | A real guide page, exported by Rega's own exporter, shown in a frame in the Guides section. See below. |
 | `latest.json` | **Read by the app** once a day to see if a newer version is out. |
 | `vercel.json` | Headers, and the `/download/mac` and `/download/windows` redirects. |
 | `downloads/` | The current installers. Git-ignored: only Vercel gets them. |
@@ -98,6 +99,21 @@ In GA4, register `os`, `version` and `placement` under Admin › Custom
 definitions (event-scoped) to break `file_download` down by them in
 Reports › Engagement › Events. Only visitors who accepted are counted, so
 downloads are a lower bound.
+
+## The demo guide
+
+The Guides section frames `guide-demo.html`: a five-step guide, *Capture,
+mark up and share a screenshot*, exported exactly the way Rega exports one
+(`src/guide/export.rs`). Each step's screenshot is the real UI rendered
+off-screen, with the marker on the control that step uses. After a UI or
+guide-page change, render it again:
+
+```sh
+cargo test --release site_guide -- --ignored
+```
+
+The site allows framing its own pages only (`X-Frame-Options: SAMEORIGIN`
+in `vercel.json`), which the frame needs.
 
 ## First deploy
 

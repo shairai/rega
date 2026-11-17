@@ -2628,6 +2628,8 @@ enum LibFilter {
 /// Large capture-mode button for the welcome screen.
 fn mode_tile(ui: &mut egui::Ui, rect: Rect, glyph: &str, label: &str, keys: &str) -> egui::Response {
     let resp = ui.interact(rect, ui.scope_id().with(("mode", label)), Sense::click());
+    // Painted by hand, so name it for screen readers.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
     let p = ui.painter();
     let lifted = rect.translate(Vec2::new(0.0, -2.0 * t));
