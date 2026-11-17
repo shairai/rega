@@ -6,7 +6,7 @@
     "macOS: Rega is signed with a Developer ID and notarized by Apple, so it opens like any other app — no more Open Anyway in System Settings.",
     "If macOS asks for Screen Recording or Accessibility again after this update, allow them once more; later updates keep them."
   ],
-  "url": "https://rega-capture.vercel.app/releases",
+  "url": "https://rega-capture.vercel.app/#download",
   "downloads": {
     "macos": {
       "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.3-macos-universal.dmg",

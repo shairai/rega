@@ -1,23 +1,22 @@
 # Rega website
 
 The static site at **https://rega-capture.vercel.app** (the address is
-`SITE_URL` in `src/config.rs`): the home page, **What's new**, privacy, and
+`SITE_URL` in `src/config.rs`): the home page, privacy, and
 the installers. Plain HTML and CSS with no build step, hosted free on Vercel's
 Hobby plan.
 
 | File | What it is |
 |---|---|
-| `index.html`, `releases.html`, `privacy.html`, `404.html` | The pages. Edit them by hand, except the `<!-- generated:… -->` blocks. |
+| `index.html`, `privacy.html`, `404.html` | The pages. Edit them by hand, except the `<!-- generated:… -->` blocks. |
 | `styles.css`, `site.js` | Styles (the app's colours and Ubuntu font); `site.js` picks the visitor's system for the download button and runs the demo video. |
 | `consent.js` | The cookie banner, and Google Tag Manager once the visitor accepts. See [Analytics](#analytics). |
 | `images/`, `fonts/` | Screenshots from `docs/images` as WebP, and the Ubuntu font as WOFF2 subsets. |
 | `media/demo.mp4`, `media/demo.jpg` | The home page's demo video and its poster. Rendered from the real UI, see below. |
 | `latest.json` | **Read by the app** once a day to see if a newer version is out. |
-| `releases.json` | Every version and its notes. |
 | `vercel.json` | Headers, and the `/download/mac` and `/download/windows` redirects. |
 | `downloads/` | The current installers. Git-ignored: only Vercel gets them. |
 
-`latest.json`, `releases.json`, the redirects and the generated blocks are
+`latest.json`, the redirects and the generated blocks are
 written by `scripts/build-site.py` from `CHANGELOG.md`, `Cargo.toml` and the
 installers. Don't edit them by hand.
 
@@ -40,7 +39,10 @@ installers. Don't edit them by hand.
 ```
 
 Within a day, every running Rega with update checks on shows *"Rega 0.4.2 is
-available"* with a **Download** button that opens `/releases`.
+available"* with a **Download** button that opens the site's downloads
+(`/#download`; Rega 0.4.2 and 0.4.3 open `/releases`, which redirects there).
+The release notes stay in `CHANGELOG.md`; the site shows only the latest
+version's one-line summary, in the "New" pill at the top of the home page.
 
 To look at the site before deploying, run `./scripts/publish-site.sh --no-deploy`
 and serve the folder, e.g. `npx serve site` (which also honours `cleanUrls`).

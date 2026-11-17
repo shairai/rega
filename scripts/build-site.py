@@ -6,8 +6,9 @@ address from src/config.rs (SITE_URL) and the installers in site/downloads/,
 then writes:
 
   site/latest.json     what the app's update check reads
-  site/releases.json   every version, for anything else that wants it
-  site/vercel.json     /download/mac and /download/windows point at the files
+  site/vercel.json     /download/mac and /download/windows point at the files,
+                       and /releases (opened by Rega 0.4.2-0.4.3's update
+                       notice) at the downloads
   site/*.html          the blocks between <!-- generated:NAME --> markers
 
 Run by scripts/publish-site.sh; safe to run again (the output only changes
@@ -100,14 +101,6 @@ def parse_changelog(text):
     return releases
 
 
-def inline(md):
-    """The little Markdown the changelog uses: **bold** and `code`."""
-    out = html.escape(md, quote=False)
-    out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
-    out = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", out)
-    return out
-
-
 def plain(md):
     return re.sub(r"\*\*(.+?)\*\*|`([^`]+)`", lambda m: m.group(1) or m.group(2), md)
 
@@ -122,26 +115,6 @@ def megabytes(size):
 
 
 # ---------- HTML blocks ----------
-
-def release_html(r, href, latest):
-    v = r["version"]
-    badge = '<br><span class="latest">Latest</span>' if latest else ""
-    title = f"<h3>{inline(r['title'])}</h3>" if r["title"] else ""
-    notes = "".join(f"<li>{inline(n)}</li>" for n in r["notes"])
-    return (
-        f'<article class="release" id="v{v}">\n'
-        f'  <div class="release-meta"><a class="v" href="{href}#v{v}">{v}</a>'
-        f'<time datetime="{r["date"]}">{nice_date(r["date"])}</time>{badge}</div>\n'
-        f"  <div>{title}<ul>{notes}</ul></div>\n"
-        f"</article>"
-    )
-
-
-def changelog_html(releases, href):
-    items = "\n".join(release_html(r, href, i == 0) for i, r in enumerate(releases))
-    items = "\n".join("  " + line for line in items.splitlines())
-    return f'<div class="changelog">\n{items}\n</div>'
-
 
 APPLE = ('<path d="M16.37 12.73c-.02-2.13 1.74-3.15 1.82-3.2-.99-1.45-2.53-1.65-3.08-1.67-1.31-.13-2.56.77-3.22.77'
          '-.67 0-1.69-.75-2.78-.73-1.43.02-2.75.83-3.48 2.11-1.49 2.58-.38 6.39 1.07 8.48.71 1.02 1.55 2.17 2.66 2.13'
@@ -265,20 +238,20 @@ def main():
         "date": latest["date"],
         "title": plain(latest["title"]),
         "notes": [plain(n) for n in latest["notes"]],
-        "url": f"{url}/releases",
+        "url": f"{url}/#download",
         "downloads": {
             key: {"url": f"{url}/downloads/{f['name']}", "size": f["size"]} for key, f in files.items()
         },
     })
-    write_json(SITE / "releases.json", [
-        dict(r, notes=[plain(n) for n in r["notes"]], title=plain(r["title"])) for r in releases
-    ])
 
     vercel = json.loads((SITE / "vercel.json").read_text())
     vercel["redirects"] = [
         {"source": f"/download/{slug}", "destination": f"/downloads/{files[key]['name']}", "permanent": False}
         for key, slug, _ in PLATFORMS
-    ] + [{"source": "/download", "destination": "/#download", "permanent": False}]
+    ] + [
+        {"source": "/download", "destination": "/#download", "permanent": False},
+        {"source": "/releases", "destination": "/#download", "permanent": False},
+    ]
     write_json(SITE / "vercel.json", vercel)
 
     pill_title = plain(latest["title"]).rstrip(".") or "see what's new"
@@ -286,19 +259,13 @@ def main():
         "head": head_html(url, "/", "Rega — capture anything, mark it up, share it in seconds",
                           "Screenshots, scrolling captures, screen recordings, step-by-step guides and OCR "
                           "for macOS and Windows. Free."),
-        "pill": f'<a class="pill" href="/releases#v{version}"><b>New</b> Rega {version} — '
+        "pill": f'<a class="pill" href="#download"><b>New</b> Rega {version} — '
                 f"{html.escape(pill_title)} →</a>",
         "hero-meta": f'<p class="hero-meta">Version {version} · macOS 12.3+ and Windows 10/11 · '
-                     f'<a href="/releases">What\'s new</a> · <a href="{GITHUB_URL}">Open source on GitHub</a></p>',
+                     f'<a href="{GITHUB_URL}">Open source on GitHub</a></p>',
         "downloads": downloads_html(latest, files),
-        "recent": changelog_html(releases[:3], "/releases"),
     })
-    fill(SITE / "releases.html", {
-        "head": head_html(url, "/releases", "What's new in Rega", "Every version of Rega and what changed in it."),
-        "downloads": downloads_html(latest, files),
-        "changelog": changelog_html(releases, ""),
-    })
-    print(f"site/: Rega {version} ({latest['date']}), {len(releases)} versions, {url}")
+    print(f"site/: Rega {version} ({latest['date']}), {url}")
 
 
 if __name__ == "__main__":

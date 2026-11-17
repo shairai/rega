@@ -71,6 +71,11 @@
       "source": "/download",
       "destination": "/#download",
       "permanent": false
+    },
+    {
+      "source": "/releases",
+      "destination": "/#download",
+      "permanent": false
     }
   ]
 }

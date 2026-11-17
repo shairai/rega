@@ -363,7 +363,8 @@ fn flatten(w: f32, h: f32, anns: &[Annotation]) -> RgbaImage {
 }
 
 /// The customer table before and after blurring names and emails (`B`).
-fn blur_example(dashboard: &RgbaImage) -> RgbaImage {
+/// The dashboard with the customer table's names pixelated and emails blurred.
+fn blurred_table(dashboard: &RgbaImage) -> RgbaImage {
     let d = dash_layout();
     // One blur per cell, as a user would drag them, so row dividers stay intact.
     let blur = |x0: f32, x1: f32, r: &Rect, style| {
@@ -373,7 +374,12 @@ fn blur_example(dashboard: &RgbaImage) -> RgbaImage {
     // Both styles: names pixelated, emails blurred.
     let marks: Vec<Annotation> =
         d.rows.iter().flat_map(|r| [blur(12.0, 150.0, r, BlurStyle::Pixelate), blur(222.0, 440.0, r, BlurStyle::Gaussian)]).collect();
-    let blurred = crate::editor::render::render(dashboard, &marks, &Default::default());
+    crate::editor::render::render(dashboard, &marks, &Default::default())
+}
+
+fn blur_example(dashboard: &RgbaImage) -> RgbaImage {
+    let d = dash_layout();
+    let blurred = blurred_table(dashboard);
     // Customer, email and plan columns.
     let region = Rect::from_min_max(d.table.min - Vec2::splat(12.0), Pos2::new(d.table.min.x + 620.0, d.table.max.y + 12.0));
     let (before, after) = (crop_pts(dashboard, region), crop_pts(&blurred, region));
@@ -448,10 +454,57 @@ fn feedback_example(dashboard: &RgbaImage) -> RgbaImage {
     flatten(pw + 2.0 * EX_MARGIN, ph + title + 2.0 * EX_MARGIN, &anns)
 }
 
+/// The blur example for a small card on the website: before above after,
+/// first two rows, so both fit a 4:3 box.
+fn blur_card(dashboard: &RgbaImage) -> RgbaImage {
+    let d = dash_layout();
+    let blurred = blurred_table(dashboard);
+    let region = Rect::from_min_max(d.table.min - Vec2::splat(12.0), Pos2::new(d.table.min.x + 620.0, d.rows[1].max.y + 6.0));
+    let (before, after) = (crop_pts(dashboard, region), crop_pts(&blurred, region));
+    let (pw, ph) = (before.width() as f32, before.height() as f32);
+    let (title, gap) = (76.0, 44.0);
+    let second = EX_MARGIN + title + ph + gap;
+    let mut anns = vec![
+        label(P::new(EX_MARGIN, EX_MARGIN), "Before", 36.0, EX_MUTED),
+        label(P::new(EX_MARGIN, second), "After: B, then Pixelate names and Blur emails", 36.0, EX_INK),
+    ];
+    anns.extend(pasted(before, P::new(EX_MARGIN, EX_MARGIN + title)));
+    anns.extend(pasted(after, P::new(EX_MARGIN, second + title)));
+    flatten(pw + 2.0 * EX_MARGIN, second + title + ph + EX_MARGIN, &anns)
+}
+
+/// The steps example for a small card on the website: three steps that fit
+/// one compact crop, with the legend under it.
+fn steps_card(dashboard: &RgbaImage) -> RgbaImage {
+    let d = dash_layout();
+    let (blue, radius) = ([30, 136, 229, 255], 26.0);
+    let spots = [
+        (Pos2::new(d.nav[1].max.x - 18.0, d.nav[1].center().y), "Open Customers"),
+        (Pos2::new(d.cards[0].max.x - 22.0, d.cards[0].min.y + 22.0), "Check this month's revenue"),
+        (Pos2::new(d.cards[1].max.x - 22.0, d.cards[1].min.y + 22.0), "Compare it with active users"),
+    ];
+    let step = |n: usize, pos: P| ann(Kind::Step { pos, n: n as u32 + 1, radius }, blue, 6.0);
+    let marks: Vec<Annotation> = spots.iter().enumerate().map(|(n, (p, _))| step(n, P::new(p.x * PPP, p.y * PPP))).collect();
+    let marked = crate::editor::render::render(dashboard, &marks, &Default::default());
+    let shot = crop_pts(&marked, Rect::from_min_max(Pos2::new(0.0, 38.0), Pos2::new(d.cards[1].max.x + 16.0, d.cards[1].max.y + 16.0)));
+    let (pw, ph) = (shot.width() as f32, shot.height() as f32);
+    let mut anns = pasted(shot, P::new(EX_MARGIN, EX_MARGIN)).to_vec();
+    let (legend_top, row_h) = (EX_MARGIN + ph + 56.0, 84.0);
+    for (n, (_, what)) in spots.iter().enumerate() {
+        let (x, y) = (EX_MARGIN + radius, legend_top + n as f32 * row_h + radius);
+        anns.push(step(n, P::new(x, y)));
+        anns.push(label(P::new(x + radius + 22.0, y - 22.0), what, 38.0, EX_INK));
+    }
+    flatten(pw + 2.0 * EX_MARGIN, legend_top + spots.len() as f32 * row_h + EX_MARGIN - 20.0, &anns)
+}
+
 fn write_examples(dashboard: &RgbaImage) {
     save(&blur_example(dashboard), "example-blur.png");
     save(&steps_example(dashboard), "example-steps.png");
     save(&feedback_example(dashboard), "example-feedback.png");
+    // Card-sized versions for the website's examples (converted to WebP in site/images).
+    save(&blur_card(dashboard), "card-blur.png");
+    save(&steps_card(dashboard), "card-steps.png");
 }
 
 #[test]

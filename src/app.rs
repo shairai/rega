@@ -1412,7 +1412,7 @@ impl RegaApp {
                 self.settings.save();
             }
             if theme::primary_button(ui, Some(icon::OPEN_EXTERNAL), "Download").clicked() {
-                platform::open_url(&update::releases_url());
+                platform::open_url(&update::download_url());
             }
             ui.add_space(16.0);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -2194,7 +2194,7 @@ impl RegaApp {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if self.update.is_some() {
                                     if theme::primary_button(ui, Some(icon::OPEN_EXTERNAL), "Download").clicked() {
-                                        platform::open_url(&update::releases_url());
+                                        platform::open_url(&update::download_url());
                                     }
                                 } else if theme::secondary_button(ui, None, "Check now").clicked() {
                                     self.check_for_update(true);
@@ -2447,7 +2447,7 @@ impl RegaApp {
                     if let Some(latest) = &self.update
                         && ui.link(format!("{APP_NAME} {} is available — download", latest.version)).clicked()
                     {
-                        platform::open_url(&update::releases_url());
+                        platform::open_url(&update::download_url());
                     }
                     ui.add_space(8.0);
                     ui.label(

@@ -1,6 +1,6 @@
 //! Looks for a newer Rega on the website: `<SITE_URL>/latest.json`, written
 //! by `scripts/build-site.py`. Rega only says that a version is out and opens
-//! the site's What's new page; the download and install are the user's.
+//! the site's downloads; the download and install are the user's.
 //!
 //! The request goes through the system's own curl (part of macOS, and of
 //! Windows 10 since version 1803), so Rega carries no HTTP or TLS library.
@@ -31,9 +31,10 @@ pub fn check() -> anyhow::Result<Option<Latest>> {
     Ok(is_newer(&latest.version, env!("CARGO_PKG_VERSION")).then_some(latest))
 }
 
-/// The website's page with the downloads and every version's notes.
-pub fn releases_url() -> String {
-    format!("{SITE_URL}/releases")
+/// The website's download section. (Rega 0.4.2 and 0.4.3 open `/releases`,
+/// which the site redirects there.)
+pub fn download_url() -> String {
+    format!("{SITE_URL}/#download")
 }
 
 fn latest_url() -> String {

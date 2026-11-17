@@ -4,7 +4,7 @@ use std::path::PathBuf;
 pub const APP_NAME: &str = "Rega";
 
 /// The website (`site/`, deployed to Vercel). The app checks
-/// `<SITE_URL>/latest.json` for updates and opens `<SITE_URL>/releases` to
+/// `<SITE_URL>/latest.json` for updates and opens `<SITE_URL>/#download` to
 /// download one; `scripts/publish-site.sh` reads this line for the site's
 /// own links. Change it here if the site moves, before releasing.
 pub const SITE_URL: &str = "https://rega-capture.vercel.app";

@@ -1,7 +1,7 @@
 # Changelog
 
-What's new in each version of Rega. The website's download section, its
-**What's new** page and the in-app update notice are built from this file by
+What's new in each version of Rega. The website's download section and the
+in-app update notice (`latest.json`) are built from this file by
 `scripts/publish-site.sh`:
 
 - One `## <version> — <YYYY-MM-DD>` heading per release, newest first. Leave
