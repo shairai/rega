@@ -181,9 +181,12 @@ pub fn page(guide: &Guide, cache: &Cache) -> Result<String> {
     // derail the block; JSON can spell every "<" as an escape instead.
     let json = serde_json::to_string(&data)?.replace('<', "\\u003c");
     let (head, rest) = PAGE.split_once("{{TITLE}}").expect("title slot");
+    let (before_site, rest) = rest.split_once("{{SITE}}").expect("site slot");
     let (middle, tail) = rest.split_once("{{DATA}}").expect("data slot");
     let title = if guide.title.trim().is_empty() { "Guide" } else { guide.title.as_str() };
-    Ok([head, &escape_html(title), middle, &json, tail].concat())
+    // "Made with Rega" links to the website.
+    let site = escape_html(crate::config::SITE_URL);
+    Ok([head, &escape_html(title), before_site, &site, middle, &json, tail].concat())
 }
 
 impl Cache {
@@ -409,6 +412,8 @@ mod tests {
         let html = page(&guide, &cache).unwrap();
         assert!(html.contains("<title>How to &lt;/script&gt; &lt;b&gt;this&lt;/b&gt;</title>"));
         assert_eq!(html.matches("</script>").count(), 2, "a caption can't close the data block");
+        let link = format!(r#"Made with <a href="{}" target="_blank" rel="noopener">Rega</a>"#, crate::config::SITE_URL);
+        assert!(html.contains(&link), "\"Made with Rega\" links to the website");
 
         let start = html.find("id=\"guide-data\">").unwrap() + "id=\"guide-data\">".len();
         let end = start + html[start..].find("</script>").unwrap();

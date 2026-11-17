@@ -216,6 +216,34 @@ pub fn present_overlay(frame: &eframe::Frame) {
     }
 }
 
+/// Make the window titled `title` (another screen's overlay, an extra egui
+/// window) an overlay panel like the main one, covering the screen at `x`,
+/// `y` (global points, top-left) including its menu bar and Dock. False
+/// until the window exists.
+#[cfg(target_os = "macos")]
+pub fn present_extra_overlay(title: &str, x: f32, y: f32, w: f32, h: f32) -> bool {
+    use objc2_app_kit::{NSApplication, NSScreen};
+    use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+
+    let Some(mtm) = MainThreadMarker::new() else { return false };
+    let Some(window) = NSApplication::sharedApplication(mtm).windows().iter().find(|w| w.title().to_string() == title) else {
+        return false;
+    };
+    overlay_panel::enter(&window);
+    if let Some(primary) = NSScreen::screens(mtm).firstObject() {
+        let primary_h = primary.frame().size.height;
+        window.setFrame_display(NSRect::new(NSPoint::new(x as f64, primary_h - (y + h) as f64), NSSize::new(w as f64, h as f64)), true);
+    }
+    window.orderFrontRegardless();
+    true
+}
+
+/// Windows: the extra overlay windows are created always on top already.
+#[cfg(not(target_os = "macos"))]
+pub fn present_extra_overlay(_title: &str, _x: f32, _y: f32, _w: f32, _h: f32) -> bool {
+    true
+}
+
 /// Window opacity, used to hide the window while it changes role (overlay ⇄
 /// normal) so its stale previous frame never flashes on screen.
 #[cfg(target_os = "macos")]

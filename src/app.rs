@@ -16,7 +16,7 @@ use image::RgbaImage;
 
 use crate::capture;
 use crate::config::{APP_NAME, GifQuality, ImageFormat, Settings, VideoFormat};
-use crate::editor::{Editor, EditorAction};
+use crate::editor::{Editor, EditorAction, Tool};
 use crate::guide::editor::{GuideAction, GuideEditor};
 use crate::guide::recorder::{GuideConfig, GuideRecorder};
 use crate::theme::{self, ItemStyle, icon};
@@ -142,8 +142,9 @@ pub struct RegaApp {
     update_rx: Option<Receiver<anyhow::Result<Option<update::Latest>>>>,
     /// The running check was asked for in Settings: report how it went.
     update_manual: bool,
-    /// When the daily check is next due; `None` never checks (screenshot tests).
-    update_due: Option<Instant>,
+    /// When the daily check is next due, by the clock (so time asleep
+    /// counts); `None` never checks (tests).
+    update_due: Option<SystemTime>,
 }
 
 impl RegaApp {
@@ -260,7 +261,7 @@ impl RegaApp {
             update_rx: None,
             update_manual: false,
             // A few seconds after launch, so starting up isn't slowed.
-            update_due: system.then(|| Instant::now() + Duration::from_secs(5)),
+            update_due: system.then(|| SystemTime::now() + Duration::from_secs(5)),
         }
     }
 
@@ -950,8 +951,7 @@ impl RegaApp {
         self.refresh_library();
         // Focusing means showing the new capture, so it opens in the editor either way.
         if self.settings.open_editor_after_capture || self.settings.focus_after_capture {
-            self.autosave_editor();
-            self.mode = Mode::Editor(Box::new(ed));
+            self.show_editor(ed);
         }
         self.after_capture(ctx, frame);
         let copied = if self.settings.copy_after_capture { " and copied" } else { "" };
@@ -967,6 +967,16 @@ impl RegaApp {
         });
         self.ocr_rx = Some(rx);
         self.toast("Recognizing text…");
+    }
+
+    /// Show `ed` in the workspace, after saving whatever was open; it starts
+    /// with the tool the user picked last.
+    fn show_editor(&mut self, mut ed: Editor) {
+        self.autosave_editor();
+        if let Some(tool) = self.settings.editor_tool.as_deref().and_then(Tool::from_key) {
+            ed.start_with(tool);
+        }
+        self.mode = Mode::Editor(Box::new(ed));
     }
 
     fn autosave_editor(&mut self) {
@@ -1000,8 +1010,7 @@ impl RegaApp {
             },
             ItemKind::Image => match Editor::open(item.path.clone()) {
                 Ok(ed) => {
-                    self.autosave_editor();
-                    self.mode = Mode::Editor(Box::new(ed));
+                    self.show_editor(ed);
                 }
                 Err(e) => self.toast(format!("{e:#}")),
             },
@@ -1044,8 +1053,7 @@ impl RegaApp {
         let mut ed = Editor::new(path, img, None, false);
         match ed.save() {
             Ok(()) => {
-                self.autosave_editor();
-                self.mode = Mode::Editor(Box::new(ed));
+                self.show_editor(ed);
                 self.refresh_library();
             }
             Err(e) => self.toast(format!("Import failed: {e:#}")),
@@ -1062,8 +1070,7 @@ impl RegaApp {
         let mut ed = Editor::new(path, img, None, false);
         match ed.save() {
             Ok(()) => {
-                self.autosave_editor();
-                self.mode = Mode::Editor(Box::new(ed));
+                self.show_editor(ed);
                 self.refresh_library();
                 self.toast(format!("New canvas — press {}V to paste an image onto it", platform::CMD));
             }
@@ -1298,6 +1305,14 @@ impl RegaApp {
                     .frame(egui::Frame::new().fill(theme::BG))
                     .show(ui, |ui| ed.canvas(ui));
                 actions.push(ed.end_frame(&ctx));
+                actions.push(ed.autosave(&ctx));
+                // The tool picked becomes the one new captures open with (not
+                // Crop: that's a one-off).
+                let tool = ed.tool();
+                if tool != Tool::Crop && self.settings.editor_tool.as_deref() != Some(tool.key().as_str()) {
+                    self.settings.editor_tool = Some(tool.key());
+                    self.settings.save();
+                }
             }
             Mode::Guide(ed) => {
                 egui::Panel::left("guide-steps")
@@ -1366,6 +1381,7 @@ impl RegaApp {
                     self.toast(msg);
                 }
                 EditorAction::Ocr(img) => self.start_ocr(&ctx, img),
+                EditorAction::Saved => self.refresh_library(),
             }
         }
         for action in guide_actions {
@@ -1497,13 +1513,16 @@ impl RegaApp {
         if !self.settings.check_for_updates {
             return;
         }
-        let now = Instant::now();
-        if now >= due {
-            self.update_due = Some(now + update::INTERVAL);
-            self.check_for_update(false);
-        } else {
-            // Wake an idle Rega (closed to the menu bar for days) when the next check is due.
-            ctx.request_repaint_after(due - now);
+        let now = SystemTime::now();
+        match due.duration_since(now) {
+            // Wake an idle Rega (closed to the menu bar for days) when the next
+            // check is due. Asleep, this timer stops, but the first frame after
+            // waking sees by the clock that the check is overdue.
+            Ok(left) if !left.is_zero() => ctx.request_repaint_after(left),
+            _ => {
+                self.update_due = Some(now + update::INTERVAL);
+                self.check_for_update(false);
+            }
         }
     }
 
@@ -1999,7 +2018,7 @@ impl RegaApp {
     /// One library thumbnail; returns its response and whether its hover
     /// delete button was clicked.
     fn tray_thumb(&mut self, ui: &mut egui::Ui, item: &Item, selected: bool, checked: bool) -> (egui::Response, bool) {
-        let size = Vec2::new(156.0, 100.0);
+        let size = CARD;
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         if !ui.is_rect_visible(rect) {
             return (resp, false);
@@ -2012,8 +2031,19 @@ impl RegaApp {
         let p = ui.painter();
         p.rect_filled(thumb, 10.0, Color32::from_rgb(11, 13, 17));
 
-        let fresh = self.thumbs.get(&item.path).filter(|(m, _)| *m == item.modified).map(|(_, t)| t.clone());
-        match (&item.kind, fresh) {
+        // After an edit, the last picture stays up until the new one is made:
+        // no blank card in between.
+        let (shown, current) = match self.thumbs.get(&item.path) {
+            Some((modified, tex)) => (Some(tex.clone()), *modified == item.modified),
+            None => (None, false),
+        };
+        if shown.is_some() && !current {
+            let key = (item.path.clone(), item.modified);
+            if self.thumbs_requested.insert(key.clone()) {
+                let _ = self.thumb_jobs.send(key);
+            }
+        }
+        match (&item.kind, shown) {
             (ItemKind::Image | ItemKind::Guide, Some(tex)) => {
                 // Cover-fit into the rounded frame.
                 let ts = tex.size_vec2();
@@ -2961,7 +2991,9 @@ impl eframe::App for RegaApp {
         }
         self.sync_capture_zoom(ctx);
         while let Ok((path, modified, img)) = self.thumb_results.try_recv() {
-            let tex = ctx.load_texture(path.to_string_lossy(), img, egui::TextureOptions::LINEAR);
+            // Mipmapped: drawn smaller than it's made, it stays smooth.
+            let options = egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear));
+            let tex = ctx.load_texture(path.to_string_lossy(), img, options);
             self.thumbs.insert(path, (modified, tex));
         }
         self.report_background_saves();
@@ -2993,17 +3025,8 @@ impl eframe::App for RegaApp {
                 self.min_size = Vec2::new(fit.x.min(1300.0), fit.y.min(640.0));
             }
         }
-        let moved_screen = match &mut self.activity {
-            Activity::Selecting(overlay) => overlay.follow_pointer(&ctx),
-            _ => false,
-        };
-        if moved_screen {
-            // Hidden while it moves, so the new screen's picture never shows
-            // for a frame where the old one was.
-            platform::set_window_alpha(frame, 0.0);
-            self.hide_until_painted(&ctx, 1);
-        }
         if let Activity::Selecting(overlay) = &mut self.activity {
+            overlay.take_arrivals(&ctx);
             // The overlay must cover the whole monitor, Dock and menu bar included.
             let (ox, oy) = (overlay.snap.origin.0 as f32, overlay.snap.origin.1 as f32);
             let (sw, sh) = (overlay.snap.size.0 as f32, overlay.snap.size.1 as f32);
@@ -3017,18 +3040,51 @@ impl eframe::App for RegaApp {
                     ctx.send_viewport_cmd(ViewportCommand::OuterPosition(want.min));
                 }
             }
-            let outcome = egui::CentralPanel::no_frame().show(ui, |ui| overlay.ui(ui)).inner;
-            match outcome {
-                Outcome::Pending => {}
-                Outcome::Cancel => {
+            let mut outcome = egui::CentralPanel::no_frame().show(ui, |ui| overlay.ui(ui)).inner;
+            // Every other screen has an overlay of its own, in a window of its
+            // own: nothing moves between screens, so nothing flashes or lags.
+            let mut chosen = None;
+            for (i, extra) in overlay.extras.iter_mut().enumerate() {
+                let (o, s) = (extra.snap.origin, extra.snap.size);
+                let title = format!("{APP_NAME} overlay {}", i + 2);
+                let builder = egui::ViewportBuilder::default()
+                    .with_title(title.clone())
+                    .with_decorations(false)
+                    .with_resizable(false)
+                    .with_position(Pos2::new(o.0 as f32, o.1 as f32))
+                    .with_inner_size(Vec2::new(s.0 as f32, s.1 as f32))
+                    .with_always_on_top()
+                    .with_taskbar(false)
+                    .with_active(false);
+                let id = egui::ViewportId::from_hash_of(("rega-overlay", o));
+                let extra_outcome = ctx.show_viewport_immediate(id, builder, |ui, _| egui::CentralPanel::no_frame().show(ui, |ui| extra.ui(ui)).inner);
+                if !extra.presented {
+                    // macOS: above the menu bar and Dock, on the Space in use, like the main one.
+                    extra.presented = platform::present_extra_overlay(&title, o.0 as f32, o.1 as f32, s.0 as f32, s.1 as f32);
+                }
+                match extra_outcome {
+                    Outcome::Pending => {}
+                    Outcome::Cancel => outcome = Outcome::Cancel,
+                    Outcome::Selected(rect) => chosen = Some((i, rect)),
+                }
+            }
+            match (outcome, chosen) {
+                (Outcome::Cancel, _) => {
                     self.activity = Activity::Idle;
                     self.return_to_rest(&ctx, frame);
                 }
-                Outcome::Selected(rect) => {
+                (Outcome::Selected(rect), _) => {
                     if let Activity::Selecting(overlay) = std::mem::replace(&mut self.activity, Activity::Idle) {
                         self.on_selection(&ctx, frame, &overlay, rect);
                     }
                 }
+                (Outcome::Pending, Some((i, rect))) => {
+                    if let Activity::Selecting(mut overlay) = std::mem::replace(&mut self.activity, Activity::Idle) {
+                        let picked = overlay.extras.swap_remove(i);
+                        self.on_selection(&ctx, frame, &picked, rect);
+                    }
+                }
+                (Outcome::Pending, None) => {}
             }
             return;
         }
@@ -3234,6 +3290,28 @@ fn setup_menus(
 
 type ThumbResult = (PathBuf, SystemTime, egui::ColorImage);
 
+/// A library card's picture, in points.
+const CARD: Vec2 = Vec2::new(156.0, 100.0);
+
+/// What a library card shows: the part of `img` with the card's shape (the
+/// top of a tall capture, the middle of a wide one), at 3× the card so it's
+/// sharp on any screen, scaled smoothly. A small image isn't enlarged.
+fn card_picture(img: &image::DynamicImage) -> RgbaImage {
+    let (cw, ch) = ((CARD.x * 3.0) as u32, (CARD.y * 3.0) as u32);
+    let (w, h) = (img.width().max(1), img.height().max(1));
+    let (crop_w, crop_h) = if w as u64 * ch as u64 > h as u64 * cw as u64 {
+        (((h as u64 * cw as u64) / ch as u64).max(1) as u32, h)
+    } else {
+        (w, ((w as u64 * ch as u64) / cw as u64).max(1) as u32)
+    };
+    let part = img.crop_imm((w - crop_w) / 2, 0, crop_w, crop_h);
+    if crop_w <= cw {
+        part.to_rgba8()
+    } else {
+        part.resize_exact(cw, ch, image::imageops::FilterType::CatmullRom).to_rgba8()
+    }
+}
+
 fn spawn_thumbnailer(ctx: egui::Context) -> (Sender<(PathBuf, SystemTime)>, Receiver<ThumbResult>) {
     let (job_tx, job_rx) = mpsc::channel::<(PathBuf, SystemTime)>();
     let (res_tx, res_rx) = mpsc::channel();
@@ -3255,7 +3333,7 @@ fn spawn_thumbnailer(ctx: egui::Context) -> (Sender<(PathBuf, SystemTime)>, Rece
                 let Ok(img) = image::open(&path) else { continue };
                 img
             };
-            let thumb = img.thumbnail(400, 270).to_rgba8();
+            let thumb = card_picture(&img);
             let color = egui::ColorImage::from_rgba_unmultiplied([thumb.width() as usize, thumb.height() as usize], thumb.as_raw());
             if res_tx.send((path, modified, color)).is_err() {
                 break;
@@ -3375,6 +3453,27 @@ mod tests {
         h.state_mut().settings.dismissed_update = Some("9.0.0".into());
         h.step();
         assert!(h.query_by_label(title).is_none());
+    }
+
+    /// A card's picture has the card's shape at 3× its size: the middle of a
+    /// wide screenshot, the top of a tall scrolling capture, a small image as is.
+    #[test]
+    fn card_pictures_are_sharp_and_card_shaped() {
+        use super::{CARD, card_picture};
+        let (cw, ch) = ((CARD.x * 3.0) as u32, (CARD.y * 3.0) as u32);
+        let wide = image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(3024, 1964, |x, _| image::Rgba([(x / 12) as u8, 0, 0, 255])));
+        let pic = card_picture(&wide);
+        assert_eq!(pic.dimensions(), (cw, ch));
+        // A tall capture: red on top, blue below; the card shows the top.
+        let tall = image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(1200, 20000, |_, y| {
+            image::Rgba(if y < 400 { [255, 0, 0, 255] } else { [0, 0, 255, 255] })
+        }));
+        let pic = card_picture(&tall);
+        assert_eq!(pic.dimensions(), (cw, ch));
+        assert_eq!(pic.get_pixel(cw / 2, 10).0, [255, 0, 0, 255], "the top of the page");
+        assert!(pic.height() < 20000 / 10, "not squeezed into a strip");
+        let small = image::DynamicImage::ImageRgba8(image::RgbaImage::new(120, 80));
+        assert_eq!(card_picture(&small).dimensions(), (120, 76), "cropped to the card's shape, not enlarged");
     }
 
     /// The New form: a preset sets both sides; with the padlock shut, typing

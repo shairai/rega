@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::config::SITE_URL;
 
-/// How often a running Rega looks again.
+/// How often a running Rega looks again, by the clock (time asleep counts).
 pub const INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The parts of `latest.json` the app uses.

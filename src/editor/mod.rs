@@ -6,6 +6,8 @@ pub mod render;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use eframe::egui::{
@@ -58,6 +60,16 @@ impl Tool {
         Tool::Eraser,
         Tool::Crop,
     ];
+
+    /// A stable name for the settings file ("Highlight").
+    pub fn key(self) -> String {
+        format!("{self:?}")
+    }
+
+    /// The tool `key` names; `None` for a name this version doesn't know.
+    pub fn from_key(key: &str) -> Option<Tool> {
+        Tool::ALL.into_iter().find(|t| t.key() == key)
+    }
 
     /// (icon, tooltip, shortcut)
     fn info(self) -> (&'static str, &'static str, Key) {
@@ -272,6 +284,11 @@ const PALETTE: [Rgba; 8] = [
 
 /// The highlighter's colour until another is picked for it: the palette's yellow.
 const HIGHLIGHT_COLOR: Rgba = PALETTE[2];
+/// The highlighter's thickness until another is picked for it.
+const HIGHLIGHT_WIDTH: f32 = 8.0;
+
+/// Edits are saved (and the library's preview updated) once they pause this long.
+const AUTOSAVE_AFTER: Duration = Duration::from_millis(1200);
 
 /// The last step number placed this session, and on which image: another
 /// image can carry on from it ("Continue at 4").
@@ -289,6 +306,8 @@ pub enum EditorAction {
     None,
     Ocr(RgbaImage),
     Toast(String),
+    /// A background save finished: the library's preview can catch up.
+    Saved,
 }
 
 pub struct Editor {
@@ -308,6 +327,9 @@ pub struct Editor {
     /// isn't current; `change_tool` swaps them.
     parked_color: Color32,
     width: f32,
+    /// Likewise the thickness: the highlighter's own (8 to start), or the
+    /// other tools' while the highlighter is current.
+    parked_width: f32,
     font_size: f32,
     filled: bool,
     text_bg: bool,
@@ -355,6 +377,10 @@ pub struct Editor {
     /// The mark right-clicked to open the canvas menu.
     menu_target: Option<usize>,
     dirty: bool,
+    /// When the last change was made, for autosaving once edits pause.
+    changed_at: Instant,
+    /// A save under way on a background thread, and how it went.
+    saving: Option<(std::thread::JoinHandle<()>, Receiver<Result<()>>)>,
 }
 
 fn to_c32(c: Rgba) -> Color32 {
@@ -393,6 +419,7 @@ impl Editor {
             color: to_c32(PALETTE[0]),
             parked_color: to_c32(HIGHLIGHT_COLOR),
             width: unit,
+            parked_width: HIGHLIGHT_WIDTH,
             font_size: (unit * 7.0).round(),
             filled: false,
             text_bg: false,
@@ -424,6 +451,8 @@ impl Editor {
             layer_textures: HashMap::new(),
             resizing: None,
             dirty: false,
+            changed_at: Instant::now(),
+            saving: None,
         }
     }
 
@@ -452,8 +481,24 @@ impl Editor {
         self.commit_text();
     }
 
+    /// Unsaved changes, or a save still under way.
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.dirty || self.saving.is_some()
+    }
+
+    fn mark_changed(&mut self) {
+        self.dirty = true;
+        self.changed_at = Instant::now();
+    }
+
+    /// The tool in use.
+    pub fn tool(&self) -> Tool {
+        self.tool
+    }
+
+    /// Start on `tool` (the one picked last time) rather than the arrow.
+    pub fn start_with(&mut self, tool: Tool) {
+        self.change_tool(tool);
     }
 
     /// Where an image pixel is on screen as of the last frame, for driving the
@@ -467,27 +512,64 @@ impl Editor {
         render::render(&self.base, &self.anns, &self.effects)
     }
 
-    /// Write the flattened image plus the editable sidecar.
+    /// Write the flattened image plus the editable sidecar now (closing,
+    /// switching): after a background save under way, so it can't land last.
     pub fn save(&mut self) -> Result<()> {
+        if let Some((thread, done)) = self.saving.take() {
+            let _ = thread.join();
+            if !matches!(done.try_recv(), Ok(Ok(()))) {
+                self.dirty = true;
+                self.base_changed = true;
+            }
+        }
         self.commit_text();
-        let flat = self.flatten();
-        write_image(&flat, &self.path)?;
-        let (json, orig) = library::project_paths(&self.path);
-        if let Some(dir) = json.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        if self.base_changed || !orig.exists() {
-            self.base.save(&orig)?;
-            self.base_changed = false;
-        }
-        let project = Project {
-            annotations: self.anns.clone(),
-            effects: self.effects,
-            next_step: self.next_step,
-        };
-        std::fs::write(&json, serde_json::to_string(&project)?)?;
+        write_files(&self.path, &self.base, &self.anns, self.effects, self.next_step, self.base_changed)?;
+        self.base_changed = false;
         self.dirty = false;
         Ok(())
+    }
+
+    /// Save on a background thread once edits have paused (not mid-drag or
+    /// while typing), so the library's preview follows every change. Says
+    /// when a save finished, or failed.
+    pub fn autosave(&mut self, ctx: &egui::Context) -> EditorAction {
+        if let Some((_, done)) = &self.saving {
+            match done.try_recv() {
+                Err(TryRecvError::Empty) => return EditorAction::None,
+                result => {
+                    self.saving = None;
+                    return match result {
+                        Ok(Ok(())) => EditorAction::Saved,
+                        Ok(Err(e)) => {
+                            self.dirty = true;
+                            self.base_changed = true;
+                            EditorAction::Toast(format!("Couldn't save: {e:#}"))
+                        }
+                        Err(_) => EditorAction::None,
+                    };
+                }
+            }
+        }
+        let busy = self.editing_text.is_some() || self.drawing.is_some() || ctx.input(|i| i.pointer.any_down());
+        if !self.dirty || busy {
+            return EditorAction::None;
+        }
+        let wait = AUTOSAVE_AFTER.saturating_sub(self.changed_at.elapsed());
+        if !wait.is_zero() {
+            ctx.request_repaint_after(wait);
+            return EditorAction::None;
+        }
+        let (path, base, anns, effects, next_step) = (self.path.clone(), self.base.clone(), self.anns.clone(), self.effects, self.next_step);
+        let with_base = std::mem::take(&mut self.base_changed);
+        let (tx, rx) = mpsc::channel();
+        let repaint = ctx.clone();
+        let thread = std::thread::spawn(move || {
+            let _ = tx.send(write_files(&path, &base, &anns, effects, next_step, with_base));
+            repaint.request_repaint();
+        });
+        self.saving = Some((thread, rx));
+        self.dirty = false;
+        EditorAction::None
     }
 
     fn state(&self) -> State {
@@ -515,7 +597,7 @@ impl Editor {
         self.next_step = s.next_step;
         self.selected = None;
         self.editing_text = None;
-        self.dirty = true;
+        self.mark_changed();
     }
 
     fn push_undo(&mut self) {
@@ -524,7 +606,7 @@ impl Editor {
             self.undo.remove(0);
         }
         self.redo.clear();
-        self.dirty = true;
+        self.mark_changed();
     }
 
     /// One undo step per continuous gesture (slider drag, color pick…).
@@ -596,6 +678,7 @@ impl Editor {
     fn change_tool(&mut self, tool: Tool) {
         if (self.tool == Tool::Highlight) != (tool == Tool::Highlight) {
             std::mem::swap(&mut self.color, &mut self.parked_color);
+            std::mem::swap(&mut self.width, &mut self.parked_width);
         }
         self.tool = tool;
     }
@@ -691,7 +774,7 @@ impl Editor {
             a.translate(-x0, -y0);
         }
         self.texture_dirty = true;
-        self.dirty = true;
+        self.mark_changed();
     }
 
     /// The canvas colour when all four corners agree (a blank canvas), else transparent,
@@ -847,7 +930,7 @@ impl Editor {
                 }
                 _ => return,
             }
-            self.dirty = true;
+            self.mark_changed();
             return;
         }
         if let (Some(last), Some(i)) = (self.moving, self.selected) {
@@ -877,6 +960,13 @@ impl Editor {
             }
             // A loupe is always round.
             Kind::Magnify { a, b, .. } => *b = square(*a, p),
+            // On the line it started on: level, or plumb when dragged mostly up
+            // or down (a column), however the hand drifts.
+            Kind::Highlight { pts } if constrain => {
+                let first = pts[0];
+                let level = (p.x - first.x).abs() >= (p.y - first.y).abs();
+                *pts = vec![first, if level { P::new(p.x, first.y) } else { P::new(first.x, p.y) }];
+            }
             Kind::Pen { pts } | Kind::Highlight { pts } => {
                 if constrain {
                     // Straight stroke from the first point.
@@ -1295,12 +1385,7 @@ impl Editor {
                     }
                 }
             });
-            if theme::toolbar_item(ui, icon::SAVE, "Save", ItemStyle::Normal, true)
-                .on_hover_text(format!("Save to library ({}S)", crate::platform::CMD))
-                .clicked()
-            {
-                action = self.save_action();
-            }
+            // No Save: every change is saved a moment after it's made (⌘S still saves at once).
             if theme::toolbar_item(ui, icon::COPY, "Copy", ItemStyle::Primary, true)
                 .on_hover_text(format!("Copy image ({}C)", crate::platform::CMD))
                 .clicked()
@@ -1755,6 +1840,8 @@ impl Editor {
             Tool::Magnify => "Drag a circle over a detail to enlarge it",
             Tool::Fill => "Click an area to fill it with the color",
             Tool::Eraser => "Click or drag over marks to erase them",
+            Tool::Highlight if cfg!(target_os = "macos") => "Drag over text · hold ⇧ to stay on the line",
+            Tool::Highlight => "Drag over text · hold Shift to stay on the line",
             _ if cfg!(target_os = "macos") => "Drag to draw · hold ⇧ to constrain",
             _ => "Drag to draw · hold Shift to constrain",
         };
@@ -2006,7 +2093,7 @@ impl Editor {
                 }
             });
         self.focus_text = focus;
-        self.dirty = true;
+        self.mark_changed();
         if finished {
             ui.ctx().memory_mut(|m| m.stop_text_input());
             self.commit_text();
@@ -2128,7 +2215,7 @@ impl Editor {
         self.anns.push(ann);
         self.selected = Some(self.anns.len() - 1);
         self.texture_dirty = true;
-        self.dirty = true;
+        self.mark_changed();
         self.change_tool(Tool::Select);
         true
     }
@@ -2212,6 +2299,22 @@ fn flatten_on_white(img: &RgbaImage) -> image::RgbImage {
 }
 
 /// Save by extension; formats without alpha are flattened onto white.
+/// Write an editor's files: the flattened image at `path`, the original
+/// beside it (when `with_base`, or missing) and the editable sidecar.
+fn write_files(path: &std::path::Path, base: &RgbaImage, anns: &[Annotation], effects: Effects, next_step: u32, with_base: bool) -> Result<()> {
+    write_image(&render::render(base, anns, &effects), path)?;
+    let (json, orig) = library::project_paths(path);
+    if let Some(dir) = json.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if with_base || !orig.exists() {
+        base.save(&orig)?;
+    }
+    let project = Project { annotations: anns.to_vec(), effects, next_step };
+    std::fs::write(&json, serde_json::to_string(&project)?)?;
+    Ok(())
+}
+
 pub fn write_image(img: &RgbaImage, path: &std::path::Path) -> Result<()> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
     match ext.as_str() {
@@ -2676,6 +2779,29 @@ mod tests {
         assert!(pts[1].y - pts[0].y > 80.0);
     }
 
+    /// With Shift the highlighter stays on the line it started on, however
+    /// the hand drifts: level along a row, plumb down a column.
+    #[test]
+    fn shift_keeps_the_highlight_on_its_line() {
+        let shift_highlight = |path: &[P]| {
+            let mut ed = blank_editor();
+            ed.set_tool(Tool::Highlight);
+            ed.drag_begin(path[0]);
+            for &p in &path[1..] {
+                ed.drag_update(p, true);
+            }
+            ed.drag_end();
+            let Some(Kind::Highlight { pts }) = ed.anns.last().map(|a| a.kind.clone()) else { panic!("no highlight") };
+            pts
+        };
+        // Along a row, sinking 30 px by the end.
+        let row: Vec<P> = (0..=30).map(|k| P::new(100.0 + k as f32 * 10.0, 150.0 + k as f32)).collect();
+        assert_eq!(shift_highlight(&row), [P::new(100.0, 150.0), P::new(400.0, 150.0)]);
+        // Down a column, drifting right.
+        let column: Vec<P> = (0..=20).map(|k| P::new(200.0 + k as f32, 50.0 + k as f32 * 10.0)).collect();
+        assert_eq!(shift_highlight(&column), [P::new(200.0, 50.0), P::new(200.0, 250.0)]);
+    }
+
     /// The highlighter starts yellow and keeps a colour of its own: picking
     /// one for it leaves the other tools' colour alone, and both are back
     /// when their tools are.
@@ -2693,6 +2819,85 @@ mod tests {
         assert_eq!(ed.color, blue, "the other tools keep their colour");
         ed.set_tool(Tool::Highlight);
         assert_eq!(ed.color, green, "the highlighter remembers its own");
+    }
+
+    /// The highlighter starts 8 thick and keeps a thickness of its own, as it
+    /// does a colour; the other tools keep theirs.
+    #[test]
+    fn the_highlighter_keeps_its_own_thickness() {
+        let mut ed = blank_editor();
+        let others = ed.width;
+        ed.set_tool(Tool::Highlight);
+        assert_eq!(ed.width, 8.0, "the highlighter starts at 8");
+        ed.width = 14.0;
+        ed.set_tool(Tool::Pen);
+        assert_eq!(ed.width, others, "the other tools keep theirs");
+        ed.set_tool(Tool::Highlight);
+        assert_eq!(ed.width, 14.0, "the highlighter remembers its own");
+        // Starting on the highlighter (picked last time) starts at 8 too.
+        let mut fresh = blank_editor();
+        fresh.start_with(Tool::Highlight);
+        assert_eq!((fresh.tool(), fresh.width, fresh.color), (Tool::Highlight, 8.0, to_c32(HIGHLIGHT_COLOR)));
+    }
+
+    /// Tools are kept in the settings by name; a name this version doesn't
+    /// know (a newer one's tool) is no tool, not a broken settings file.
+    #[test]
+    fn tools_round_trip_by_name() {
+        for tool in Tool::ALL {
+            assert_eq!(Tool::from_key(&tool.key()), Some(tool));
+        }
+        assert_eq!(Tool::key(Tool::Highlight), "Highlight");
+        assert_eq!(Tool::from_key("Lasso"), None);
+    }
+
+    /// Every change is saved on its own a moment after editing pauses (not
+    /// mid-drag), so the library's preview shows it; saving by hand waits for
+    /// a save under way, so an older picture can't land last.
+    #[test]
+    fn edits_save_themselves_once_they_pause() {
+        let dir = std::env::temp_dir().join(format!("rega-autosave-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("capture.png");
+        let mut ed = Editor::new(path.clone(), RgbaImage::from_pixel(80, 60, image::Rgba([255, 255, 255, 255])), None, false);
+        ed.save().unwrap();
+        let ctx = egui::Context::default();
+        let saved_pixel = || *image::open(&path).unwrap().to_rgba8().get_pixel(40, 30);
+        assert_eq!(saved_pixel(), image::Rgba([255, 255, 255, 255]));
+
+        // A filled rectangle over the middle.
+        ed.set_tool(Tool::Rect);
+        ed.filled = true;
+        ed.drag_begin(P::new(10.0, 10.0));
+        ed.drag_update(P::new(70.0, 50.0), false);
+        assert!(matches!(ed.autosave(&ctx), EditorAction::None) && ed.saving.is_none(), "mid-drag: not yet");
+        ed.drag_end();
+        assert!(ed.is_dirty());
+        assert!(matches!(ed.autosave(&ctx), EditorAction::None) && ed.saving.is_none(), "just changed: wait");
+
+        ed.changed_at = Instant::now() - AUTOSAVE_AFTER;
+        assert!(matches!(ed.autosave(&ctx), EditorAction::None));
+        assert!(ed.saving.is_some() && ed.is_dirty(), "saving in the background");
+        let mut saved = false;
+        for _ in 0..200 {
+            if matches!(ed.autosave(&ctx), EditorAction::Saved) {
+                saved = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(saved, "the save finished");
+        assert!(!ed.is_dirty());
+        assert_ne!(saved_pixel(), image::Rgba([255, 255, 255, 255]), "the file shows the rectangle");
+
+        // Another change, saved by hand while a background save is under way.
+        ed.undo();
+        ed.changed_at = Instant::now() - AUTOSAVE_AFTER;
+        let _ = ed.autosave(&ctx);
+        ed.save().unwrap();
+        assert!(ed.saving.is_none() && !ed.is_dirty());
+        assert_eq!(saved_pixel(), image::Rgba([255, 255, 255, 255]), "the undo is what's on disk");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A thick highlight behaves as the band you see: copies and exports end

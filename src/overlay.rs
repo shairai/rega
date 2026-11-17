@@ -52,16 +52,18 @@ pub struct Overlay {
     /// Turn the outline's gradient; off when the user asked the OS for
     /// reduced motion.
     animate: bool,
-    /// Every screen, when there are several: the overlay moves to whichever
-    /// one the pointer is on.
+    /// Every screen, when there are several (each gets an overlay of its own).
     screens: Vec<Screen>,
-    /// Frozen pictures of the other screens.
-    others: Vec<Snapshot>,
+    /// The overlays of the other screens, each in a window of its own (see
+    /// `RegaApp`), added as their pictures arrive.
+    pub extras: Vec<Overlay>,
     /// Where those pictures arrive as the background capture takes them.
     incoming: Option<Receiver<Snapshot>>,
     /// Take a whole screen with a click (Screen capture with several screens)
     /// rather than drag a region.
     pick_screen: bool,
+    /// macOS: this extra overlay's window has been made an overlay panel.
+    pub presented: bool,
 }
 
 /// A color along the logo gradient (0 = top-left coral, 1 = bottom-right violet).
@@ -92,7 +94,7 @@ fn gradient_line(painter: &egui::Painter, a: Pos2, b: Pos2, area: Rect) {
 fn snapshot_texture(ctx: &egui::Context, snap: &Snapshot) -> TextureHandle {
     let img = &snap.image;
     let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
-    ctx.load_texture("overlay-snapshot", color, egui::TextureOptions::NEAREST)
+    ctx.load_texture(format!("overlay-snapshot-{:?}", snap.origin), color, egui::TextureOptions::NEAREST)
 }
 
 impl Overlay {
@@ -110,9 +112,10 @@ impl Overlay {
             initial_pointer,
             animate: !crate::platform::reduce_motion(),
             screens: Vec::new(),
-            others: Vec::new(),
+            extras: Vec::new(),
             incoming: None,
             pick_screen: false,
+            presented: false,
         }
     }
 
@@ -129,51 +132,26 @@ impl Overlay {
         self
     }
 
-    /// Move to the screen the pointer is on, once its picture is ready (not
-    /// mid-drag). Call before placing the window; true when it switched.
-    pub fn follow_pointer(&mut self, ctx: &egui::Context) -> bool {
-        if self.screens.len() < 2 {
-            return false;
+    /// Turn the other screens' pictures that have arrived into overlays of
+    /// their own. Call every frame before showing them.
+    pub fn take_arrivals(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.incoming else { return };
+        let arrived: Vec<Snapshot> = rx.try_iter().collect();
+        for snap in arrived {
+            let mut extra = Overlay::new(ctx, snap, self.purpose);
+            extra.animate = self.animate;
+            extra.pick_screen = self.pick_screen;
+            extra.screens = self.screens.clone();
+            // egui only hears the pointer over the window it's in: read the
+            // real cursor, to show the crosshair as soon as it gets here.
+            extra.track_cursor = true;
+            self.extras.push(extra);
         }
-        let Some(p) = crate::capture::try_cursor_position().map(crate::capture::to_logical) else { return false };
-        let switched = self.switch_to_screen_at(ctx, p);
-        if switched {
-            self.track_cursor = true;
-        }
-        switched
     }
 
-    /// Show the screen holding global point `p` instead, if it's another one
-    /// and its picture has arrived.
-    fn switch_to_screen_at(&mut self, ctx: &egui::Context, p: (i32, i32)) -> bool {
-        if let Some(rx) = &self.incoming {
-            self.others.extend(rx.try_iter());
-        }
-        if self.drag_from.is_some() {
-            return false;
-        }
-        let Some(screen) = self.screens.iter().find(|s| s.contains(p)) else { return false };
-        if screen.origin == self.snap.origin {
-            return false;
-        }
-        let Some(i) = self.others.iter().position(|s| s.origin == screen.origin) else {
-            // Still being captured: look again next frame.
-            ctx.request_repaint();
-            return false;
-        };
-        let next = self.others.swap_remove(i);
-        let previous = std::mem::replace(&mut self.snap, next);
-        self.others.push(previous);
-        self.texture = snapshot_texture(ctx, &self.snap);
-        self.drag_to = None;
-        self.initial_pointer = Some(Pos2::new((p.0 - self.snap.origin.0) as f32, (p.1 - self.snap.origin.1) as f32));
-        true
-    }
-
-    /// Which of the screens this is ("Screen 2 of 3"), when there are several.
-    fn screen_number(&self) -> Option<(usize, usize)> {
-        let i = self.screens.iter().position(|s| s.origin == self.snap.origin)?;
-        (self.screens.len() > 1).then_some((i + 1, self.screens.len()))
+    /// Several screens: this is one of them, not the whole picture.
+    fn several_screens(&self) -> bool {
+        self.screens.len() > 1
     }
 
     /// How far the outline's gradient has turned at egui time `time` (still
@@ -217,8 +195,11 @@ impl Overlay {
         if ctx.input(|i| i.key_pressed(Key::Enter)) {
             return Outcome::Selected(screen);
         }
+        // Only the screen the pointer is on shows the crosshair and the
+        // magnifier: a guide line mustn't run on across a neighbouring screen.
+        let pointer = pointer.filter(|p| screen.contains(*p));
         if self.pick_screen {
-            return self.pick_screen_ui(&ctx, &painter, &resp, full, screen);
+            return self.pick_screen_ui(&ctx, &painter, &resp, full, screen, pointer.is_some());
         }
         if resp.drag_started() {
             self.drag_from = ctx.input(|i| i.pointer.press_origin()).map(to_local);
@@ -288,7 +269,7 @@ impl Overlay {
             self.magnifier(&painter, p, pw, full);
         }
 
-        let whole = if self.screen_number().is_some() { "this screen" } else { "full screen" };
+        let whole = if self.several_screens() { "this screen" } else { "full screen" };
         let hint = format!(
             "{}  ·  drag to select  ·  click a window  ·  Enter = {whole}  ·  Esc = cancel",
             self.purpose.title()
@@ -301,13 +282,16 @@ impl Overlay {
 
     /// Screen capture with several screens: the whole screen under the
     /// pointer is outlined, and a click takes it.
-    fn pick_screen_ui(&self, ctx: &egui::Context, painter: &egui::Painter, resp: &egui::Response, full: Rect, screen: Rect) -> Outcome {
+    fn pick_screen_ui(&self, ctx: &egui::Context, painter: &egui::Painter, resp: &egui::Response, full: Rect, screen: Rect, here: bool) -> Outcome {
         if resp.clicked() {
             return Outcome::Selected(screen);
         }
         ctx.set_cursor_icon(CursorIcon::PointingHand);
-        painter.rect_filled(full, 0.0, Color32::from_black_alpha(60));
-        painter.add(border::ring(full.shrink(border::WIDTH + 4.0), self.border_phase(ctx.input(|i| i.time))));
+        // The screen under the pointer is lit and outlined; the others wait, dimmed.
+        painter.rect_filled(full, 0.0, Color32::from_black_alpha(if here { 40 } else { 130 }));
+        if here {
+            painter.add(border::ring(full.shrink(border::WIDTH + 4.0), self.border_phase(ctx.input(|i| i.time))));
+        }
 
         let name = self.screens.iter().find(|s| s.origin == self.snap.origin).map(|s| s.name.as_str()).unwrap_or_default();
         let s = self.snap.scale;
@@ -316,7 +300,7 @@ impl Overlay {
         let lines = [
             painter.layout_no_wrap("Click to capture this screen".into(), FontId::proportional(24.0), Color32::WHITE),
             painter.layout_no_wrap(detail, FontId::proportional(14.0), Color32::from_white_alpha(200)),
-            painter.layout_no_wrap("Or move the pointer to another screen".into(), FontId::proportional(13.0), Color32::from_white_alpha(140)),
+            painter.layout_no_wrap("Or click another screen".into(), FontId::proportional(13.0), Color32::from_white_alpha(140)),
         ];
         let gaps = [10.0, 14.0];
         let height = lines.iter().map(|g| g.size().y).sum::<f32>() + gaps.iter().sum::<f32>();
@@ -335,59 +319,12 @@ impl Overlay {
         Outcome::Pending
     }
 
-    /// The instructions along the top; with several screens, a map of them
-    /// (this one lit) and how to switch.
+    /// The instructions along the top.
     fn hint(&self, painter: &egui::Painter, full: Rect, text: String) {
-        let several = self.screen_number();
-        let title = painter.layout_no_wrap(text, FontId::proportional(15.0), Color32::WHITE);
-        let sub = several.filter(|_| !self.pick_screen).map(|(n, of)| {
-            let text = format!("Screen {n} of {of}  ·  move the pointer to another screen to capture there");
-            painter.layout_no_wrap(text, FontId::proportional(12.5), Color32::from_white_alpha(170))
-        });
-        let title_h = title.size().y;
-        let text_size = Vec2::new(
-            title.size().x.max(sub.as_ref().map_or(0.0, |g| g.size().x)),
-            title_h + sub.as_ref().map_or(0.0, |g| g.size().y + 2.0),
-        );
-        let map_size = if several.is_some() { self.map_size() } else { Vec2::ZERO };
-        let gap = if several.is_some() { 12.0 } else { 0.0 };
-        let content = Vec2::new(map_size.x + gap + text_size.x, text_size.y.max(map_size.y));
-        let rect = Align2::CENTER_TOP.anchor_size(Pos2::new(full.center().x, full.min.y + 40.0 - title_h / 2.0), content);
+        let galley = painter.layout_no_wrap(text, FontId::proportional(15.0), Color32::WHITE);
+        let rect = Align2::CENTER_CENTER.anchor_size(Pos2::new(full.center().x, full.min.y + 40.0), galley.size());
         painter.rect_filled(rect.expand2(Vec2::new(14.0, 8.0)), 8.0, Color32::from_black_alpha(190));
-        if several.is_some() {
-            self.paint_map(painter, Rect::from_center_size(Pos2::new(rect.min.x + map_size.x / 2.0, rect.center().y), map_size));
-        }
-        let text_at = Pos2::new(rect.min.x + map_size.x + gap, rect.center().y - text_size.y / 2.0);
-        painter.galley(text_at, title, Color32::WHITE);
-        if let Some(sub) = sub {
-            painter.galley(text_at + Vec2::new(0.0, title_h + 2.0), sub, Color32::WHITE);
-        }
-    }
-
-    /// All the screens, in global logical points.
-    fn screens_bounds(&self) -> Rect {
-        self.screens.iter().fold(Rect::NOTHING, |r, s| r.union(screen_rect(s)))
-    }
-
-    /// The screen map's size: the screens' arrangement, at most 30 × 64 points.
-    fn map_size(&self) -> Vec2 {
-        let b = self.screens_bounds();
-        b.size() * (30.0 / b.height()).min(64.0 / b.width())
-    }
-
-    fn paint_map(&self, painter: &egui::Painter, area: Rect) {
-        let b = self.screens_bounds();
-        let k = area.width() / b.width();
-        for s in &self.screens {
-            let r = screen_rect(s);
-            let r = Rect::from_min_size(area.min + (r.min - b.min) * k, r.size() * k).shrink(1.0);
-            if s.origin == self.snap.origin {
-                painter.rect_filled(r, 2.0, logo_color(0.5));
-            } else {
-                painter.rect_filled(r, 2.0, Color32::from_white_alpha(25));
-                painter.rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_white_alpha(140)), StrokeKind::Inside);
-            }
-        }
+        painter.galley(rect.min, galley, Color32::WHITE);
     }
 
     /// Zoomed loupe with the pixel grid and the color under the cursor.
@@ -425,10 +362,6 @@ impl Overlay {
         let text = format!("#{:02X}{:02X}{:02X}   {:.0}, {:.0}", c[0], c[1], c[2], px, py);
         label_box(painter, Pos2::new(r.min.x, r.max.y + 6.0), &text);
     }
-}
-
-fn screen_rect(s: &Screen) -> Rect {
-    Rect::from_min_size(Pos2::new(s.origin.0 as f32, s.origin.1 as f32), Vec2::new(s.size.0 as f32, s.size.1 as f32))
 }
 
 fn label_box(painter: &egui::Painter, at: Pos2, text: &str) {
@@ -584,35 +517,30 @@ mod tests {
         (h, tx, right)
     }
 
-    /// With several screens the overlay goes where the pointer goes, once
-    /// that screen's picture is in, and never in the middle of a drag. Set
-    /// `BORDER_PREVIEW_DIR` to save it with its map of the screens.
+    /// With several screens, each other screen's picture becomes an overlay
+    /// of its own as it arrives (shown in its own window by the app), in the
+    /// same mode, following the real cursor. Set `BORDER_PREVIEW_DIR` to save
+    /// the first screen as the pointer leaves it.
     #[test]
-    fn the_overlay_follows_the_pointer_to_another_screen() {
-        let (mut h, tx, right) = on_two_screens(|o| o);
+    fn other_screens_get_overlays_of_their_own() {
+        let (mut h, tx, right) = on_two_screens(Overlay::picking_screen);
         h.step();
         let ctx = h.ctx.clone();
-        let (here, there) = ((300, 200), (1000, 200));
-        assert!(!h.state_mut().overlay().switch_to_screen_at(&ctx, there), "not frozen yet: stay");
+        h.state_mut().overlay().take_arrivals(&ctx);
+        assert!(h.state_mut().overlay().extras.is_empty(), "not frozen yet");
 
         tx.send(right).unwrap();
-        assert!(!h.state_mut().overlay().switch_to_screen_at(&ctx, here), "the pointer is still here");
-        h.state_mut().overlay().drag_from = Some(Pos2::new(10.0, 10.0));
-        assert!(!h.state_mut().overlay().switch_to_screen_at(&ctx, there), "mid-drag: stay");
-        h.state_mut().overlay().drag_from = None;
-
-        assert!(h.state_mut().overlay().switch_to_screen_at(&ctx, there));
+        h.state_mut().overlay().take_arrivals(&ctx);
         let o = h.state_mut().overlay();
-        assert_eq!((o.snap.origin, o.snap.size), ((800, 50), (600, 400)));
-        assert_eq!(o.initial_pointer, Some(Pos2::new(200.0, 150.0)), "the pointer, on the new screen");
-        assert_eq!(o.screen_number(), Some((2, 2)));
-        assert!(h.state_mut().overlay().switch_to_screen_at(&ctx, here), "and back, its picture kept");
-        assert_eq!(h.state_mut().overlay().snap.origin, (0, 0));
+        assert_eq!(o.extras.len(), 1);
+        let extra = &o.extras[0];
+        assert_eq!((extra.snap.origin, extra.snap.size), ((800, 50), (600, 400)));
+        assert!(extra.pick_screen && extra.track_cursor && extra.several_screens() && !extra.presented);
 
         if let Ok(dir) = std::env::var("BORDER_PREVIEW_DIR") {
-            h.hover_at(Pos2::new(470.0, 300.0));
+            h.hover_at(Pos2::new(799.0, 300.0));
             h.step();
-            h.render().unwrap().save(std::path::Path::new(&dir).join("overlay-two-screens.png")).unwrap();
+            h.render().unwrap().save(std::path::Path::new(&dir).join("overlay-pick-other-screen.png")).unwrap();
         }
     }
 

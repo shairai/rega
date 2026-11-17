@@ -154,13 +154,6 @@ pub struct Screen {
     pub name: String,
 }
 
-impl Screen {
-    pub fn contains(&self, p: (i32, i32)) -> bool {
-        let (x, y) = (p.0 - self.origin.0, p.1 - self.origin.1);
-        x >= 0 && y >= 0 && (x as u32) < self.size.0 && (y as u32) < self.size.1
-    }
-}
-
 /// Every screen, left to right (then top to bottom).
 pub fn screens() -> Vec<Screen> {
     let mut out: Vec<Screen> = Monitor::all()

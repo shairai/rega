@@ -83,6 +83,8 @@ main { flex: 1; min-height: 0; display: flex; align-items: center; justify-conte
 .nav:disabled { opacity: .35; cursor: default; }
 .nav svg { width: 18px; height: 18px; fill: currentColor; }
 .brand { padding: 0 16px 12px; text-align: center; font-size: 11px; color: var(--muted); }
+.brand a { color: inherit; font-weight: 600; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); text-underline-offset: 2px; }
+.brand a:hover { color: var(--text); }
 @media (max-width: 640px) {
   .nav span { display: none; }
   .nav { width: 42px; padding: 0; justify-content: center; }
@@ -121,7 +123,7 @@ main { flex: 1; min-height: 0; display: flex; align-items: center; justify-conte
   </div>
   <button class="nav primary" id="next" type="button"><span>Next</span><svg viewBox="0 0 24 24"><path d="M8.6 17.6 10 19l7-7-7-7-1.4 1.4 5.6 5.6z"/></svg></button>
 </div>
-<div class="brand" id="brand">Made with Rega</div>
+<div class="brand" id="brand">Made with <a href="{{SITE}}" target="_blank" rel="noopener">Rega</a></div>
 <script type="application/json" id="guide-data">{{DATA}}</script>
 <script>
 (() => {

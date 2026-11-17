@@ -1,22 +1,23 @@
 {
-  "version": "0.4.5",
+  "version": "0.4.6",
   "date": "2026-11-17",
-  "title": "Capture on any screen, and copy several captures at once.",
+  "title": "Every screen at once, and edits that save themselves.",
   "notes": [
-    "More than one screen: the capture overlay follows the mouse, so move it to the screen you want and select there. Screen asks which screen to take: click the one you want.",
-    "Library: select several captures (⌘-click or Shift-click) and copy them all with Copy, the right-click menu or ⌘C / Ctrl+C. They paste into chats, emails and folders as files.",
-    "New image: clearer sizes, width and height boxes you can type in, and a padlock that keeps the ratio.",
-    "Guides: the page settings fit their panel again, and Marker size no longer hides behind its buttons."
+    "More than one screen: the capture overlay now covers every screen at once. Select, click a window or press Enter on whichever screen you like; Screen lets you click the screen to take.",
+    "Edits save themselves a moment after you stop, and the library's preview follows, sharper than before. The Save button is gone (⌘S / Ctrl+S still saves at once).",
+    "The editor opens with the tool you used last.",
+    "Highlighter: starts 8 thick and keeps its own thickness; hold Shift to stay on the line you started on.",
+    "Guides: \"Made with Rega\" links to the Rega website."
   ],
   "url": "https://rega-capture.vercel.app/#download",
   "downloads": {
     "macos": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.5-macos-universal.dmg",
-      "size": 15833451
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.6-macos-universal.dmg",
+      "size": 15858965
     },
     "windows": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.5-windows-x64-setup.exe",
-      "size": 6577326
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.6-windows-x64-setup.exe",
+      "size": 6580732
     }
   }
 }

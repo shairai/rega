@@ -116,6 +116,8 @@ pub struct Settings {
     pub check_for_updates: bool,
     /// The version whose update notice the user closed; it isn't shown again.
     pub dismissed_update: Option<String>,
+    /// The editor tool picked last (`Tool::key`); the editor starts with it.
+    pub editor_tool: Option<String>,
 }
 
 impl Default for Settings {
@@ -142,6 +144,7 @@ impl Default for Settings {
             guide: Default::default(),
             check_for_updates: true,
             dismissed_update: None,
+            editor_tool: None,
         }
     }
 }

@@ -324,15 +324,7 @@ impl GuideEditor {
             {
                 action = self.export_copy();
             }
-            if theme::toolbar_item(ui, icon::SAVE, "Save", ItemStyle::Normal, true)
-                .on_hover_text(format!("Save now ({}S) — changes also save by themselves", crate::platform::CMD))
-                .clicked()
-            {
-                action = match self.save_now() {
-                    Ok(()) => GuideAction::Saved,
-                    Err(e) => GuideAction::Toast(format!("Couldn't save the guide: {e:#}")),
-                };
-            }
+            // No Save: changes save by themselves (⌘S still saves at once).
             if theme::toolbar_item(ui, icon::OPEN_EXTERNAL, "Preview", ItemStyle::Primary, true)
                 .on_hover_text("Open the shared page in your browser")
                 .clicked()

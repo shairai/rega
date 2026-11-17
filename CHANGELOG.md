@@ -10,6 +10,21 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.6 — 2026-11-17
+
+Every screen at once, and edits that save themselves.
+
+- More than one screen: the capture overlay now covers every screen at
+  once. Select, click a window or press Enter on whichever screen you like;
+  **Screen** lets you click the screen to take.
+- Edits save themselves a moment after you stop, and the library's
+  preview follows, sharper than before. The **Save** button is gone (`⌘S` /
+  `Ctrl+S` still saves at once).
+- The editor opens with the tool you used last.
+- Highlighter: starts 8 thick and keeps its own thickness; hold Shift to
+  stay on the line you started on.
+- Guides: "Made with Rega" links to the Rega website.
+
 ## 0.4.5 — 2026-11-17
 
 Capture on any screen, and copy several captures at once.
