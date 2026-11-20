@@ -343,6 +343,20 @@ pub const TOOLBAR_HEIGHT: f32 = 50.0;
 
 /// Top-bar tile: icon above a short label.
 pub fn toolbar_item(ui: &mut Ui, glyph: &str, label: &str, style: ItemStyle, enabled: bool) -> Response {
+    toolbar_item_painted(ui, label, style, enabled, |p, c, color| {
+        p.text(c, Align2::CENTER_CENTER, glyph, icon_font(22.0), color);
+    })
+}
+
+/// [`toolbar_item`] with an icon painted by `icon` (painter, centre, color)
+/// instead of a glyph from the icon font.
+pub fn toolbar_item_painted(
+    ui: &mut Ui,
+    label: &str,
+    style: ItemStyle,
+    enabled: bool,
+    icon: impl FnOnce(&egui::Painter, egui::Pos2, Color32),
+) -> Response {
     let label_galley = ui.painter().layout_no_wrap(label.to_owned(), medium(11.0), TEXT);
     let size = Vec2::new((label_galley.size().x + 16.0).max(50.0), TOOLBAR_HEIGHT);
     let sense = if enabled { Sense::click() } else { Sense::hover() };
@@ -368,7 +382,7 @@ pub fn toolbar_item(ui: &mut Ui, glyph: &str, label: &str, style: ItemStyle, ena
         }
     };
     let lift = if pressed { 1.0 } else { 0.0 };
-    p.text(rect.center_top() + Vec2::new(0.0, 17.0 + lift), Align2::CENTER_CENTER, glyph, icon_font(22.0), icon_color);
+    icon(p, rect.center_top() + Vec2::new(0.0, 17.0 + lift), icon_color);
     p.galley(
         egui::pos2(rect.center().x - label_galley.size().x / 2.0, rect.max.y - label_galley.size().y - 5.0 + lift),
         label_galley,

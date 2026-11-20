@@ -18,6 +18,25 @@ impl P {
     pub fn dist(self, o: P) -> f32 {
         ((self.x - o.x).powi(2) + (self.y - o.y).powi(2)).sqrt()
     }
+
+    /// Turned `angle` radians about `c`, clockwise on screen (y points down).
+    pub fn rotated(self, c: P, angle: f32) -> P {
+        if angle == 0.0 {
+            return self;
+        }
+        let (sin, cos) = angle.sin_cos();
+        let (dx, dy) = (self.x - c.x, self.y - c.y);
+        P::new(c.x + dx * cos - dy * sin, c.y + dx * sin + dy * cos)
+    }
+}
+
+/// `angle` brought into (−π, π], and exactly 0 when it's a whole turn away
+/// from it (four quarter turns of the canvas add up to 2π, give or take).
+pub fn wrap_angle(angle: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let a = angle.rem_euclid(TAU);
+    let a = if a > PI { a - TAU } else { a };
+    if a.abs() < 1e-4 { 0.0 } else { a }
 }
 
 pub type Rgba = [u8; 4];
@@ -382,6 +401,15 @@ pub struct Annotation {
     pub color: Rgba,
     pub width: f32,
     pub filled: bool,
+    /// How far the mark is turned, in radians clockwise, about the middle of
+    /// its [`frame`](Self::frame). Only marks that [`can_rotate`](Self::can_rotate)
+    /// turn; for the rest it stays 0. Left out of the file when 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f32,
+}
+
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
 }
 
 /// Normalized rect corners (min, max).
@@ -395,7 +423,52 @@ impl Annotation {
         matches!(self.kind, Kind::Blur { .. } | Kind::Spotlight { .. } | Kind::Magnify { .. } | Kind::Fill { .. })
     }
 
+    /// Shapes, lines, strokes, text, pictures and stamps turn. Steps keep their
+    /// number upright, and the pixel tools (blur, spotlight, magnifier, fill)
+    /// work on the screenshot's rows and columns.
+    pub fn can_rotate(&self) -> bool {
+        matches!(
+            self.kind,
+            Kind::Arrow { .. }
+                | Kind::Line { .. }
+                | Kind::Rect { .. }
+                | Kind::Ellipse { .. }
+                | Kind::Pen { .. }
+                | Kind::Highlight { .. }
+                | Kind::Text { .. }
+                | Kind::Image { .. }
+                | Kind::Stamp { .. }
+        )
+    }
+
+    /// What the mark turns about: the middle of its [`frame`](Self::frame).
+    pub fn pivot(&self) -> P {
+        let (a, b) = self.frame();
+        P::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+    }
+
+    /// The corners of the [`frame`](Self::frame) grown by `pad`, turned with
+    /// the mark: clockwise from its own top-left.
+    pub fn corners(&self, pad: f32) -> [P; 4] {
+        let (a, b) = self.frame();
+        let (a, b) = (P::new(a.x - pad, a.y - pad), P::new(b.x + pad, b.y + pad));
+        let c = self.pivot();
+        [a, P::new(b.x, a.y), b, P::new(a.x, b.y)].map(|p| p.rotated(c, self.rotation))
+    }
+
+    /// The upright box around the mark as drawn, turned or not.
     pub fn bounds(&self) -> (P, P) {
+        if self.rotation == 0.0 {
+            return self.frame();
+        }
+        let corners = self.corners(0.0);
+        let min = corners.iter().fold(P::new(f32::MAX, f32::MAX), |m, p| P::new(m.x.min(p.x), m.y.min(p.y)));
+        let max = corners.iter().fold(P::new(f32::MIN, f32::MIN), |m, p| P::new(m.x.max(p.x), m.y.max(p.y)));
+        (min, max)
+    }
+
+    /// The mark's box before it is turned.
+    pub fn frame(&self) -> (P, P) {
         match &self.kind {
             Kind::Arrow { a, b }
             | Kind::Line { a, b }
@@ -440,6 +513,8 @@ impl Annotation {
     }
 
     pub fn hit(&self, p: P, tol: f32) -> bool {
+        // Test in the mark's own, upright frame.
+        let p = p.rotated(self.pivot(), -self.rotation);
         let tol = tol + self.width / 2.0;
         match &self.kind {
             Kind::Arrow { a, b } | Kind::Line { a, b } => seg_dist(p, *a, *b) <= tol,
@@ -469,9 +544,44 @@ impl Annotation {
                 ((p.x - cx) / (rx + tol)).powi(2) + ((p.y - cy) / (ry + tol)).powi(2) <= 1.0
             }
             _ => {
-                let (min, max) = self.bounds();
+                let (min, max) = self.frame();
                 p.x >= min.x - tol && p.x <= max.x + tol && p.y >= min.y - tol && p.y <= max.y + tol
             }
+        }
+    }
+
+    /// Follow the canvas turning a quarter: `map` says where a point of the
+    /// old canvas lands on the new one, `angle` is the turn (±π/2). Shapes,
+    /// lines and the pixel tools' areas are remapped exactly, staying upright
+    /// boxes; text, pictures and stamps can't be, so they turn with it.
+    pub fn turn_with_canvas(&mut self, map: impl Fn(P) -> P, angle: f32) {
+        if matches!(self.kind, Kind::Text { .. } | Kind::Image { .. } | Kind::Stamp { .. }) {
+            let (from, to) = (self.pivot(), map(self.pivot()));
+            self.translate(to.x - from.x, to.y - from.y);
+            self.rotation = wrap_angle(self.rotation + angle);
+            return;
+        }
+        let m = |p: &mut P| *p = map(*p);
+        match &mut self.kind {
+            Kind::Arrow { a, b }
+            | Kind::Line { a, b }
+            | Kind::Rect { a, b }
+            | Kind::Ellipse { a, b }
+            | Kind::Blur { a, b, .. }
+            | Kind::Spotlight { a, b }
+            | Kind::Magnify { a, b, .. } => {
+                m(a);
+                m(b);
+            }
+            Kind::Fill { seed, area, .. } => {
+                m(seed);
+                m(&mut area.0);
+                m(&mut area.1);
+            }
+            Kind::Pen { pts } | Kind::Highlight { pts } => pts.iter_mut().for_each(m),
+            Kind::Step { pos, .. } => m(pos),
+            // Turned above.
+            Kind::Text { .. } | Kind::Image { .. } | Kind::Stamp { .. } => {}
         }
     }
 
@@ -552,7 +662,7 @@ impl Annotation {
             Kind::Text { text, .. } => text.trim().is_empty(),
             Kind::Step { .. } | Kind::Stamp { .. } | Kind::Fill { .. } => false,
             _ => {
-                let (min, max) = self.bounds();
+                let (min, max) = self.frame();
                 (max.x - min.x).max(max.y - min.y) < 3.0
             }
         }

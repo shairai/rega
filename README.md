@@ -106,7 +106,9 @@ Sixteen tools in the right-hand panel, each with a one-key shortcut:
 - **Every mark stays editable** — select it to move, recolor, resize or delete. A freshly drawn mark stays selected, so you can tweak its color right away. With any drawing tool, a click on an existing mark selects it for moving.
 - **The properties panel follows what you're doing**: it shows only what applies to the current tool or the selected mark — line width and *Fill shape* for rectangles and ellipses, size and callout box for text, the symbol and size for stamps, zoom for the magnifier, tolerance for the fill.
 - **Eyedropper** (`I`) picks any color straight from the image.
-- **Paste images onto the canvas** (`⌘V` / `Ctrl+V`) as movable, resizable layers. Right-click one → **Flatten image** to merge it into the picture so blur, fill and the magnifier work on it too (**Flatten all** merges every mark).
+- **Rotate marks**: drag the round handle above a selected mark (hold `⇧` for 15° steps), or type an angle, turn it 90° or reset it under **Rotation** in the side panel. Shapes, lines, strokes, text, pasted pictures and stamps turn.
+- **Paste images onto the canvas** (`⌘V` / `Ctrl+V`) as movable, resizable layers — copied pixels, or image files copied in Finder / Explorer (all of them at once) — or drag image files onto the canvas. Right-click one → **Flatten image** to merge it into the picture so blur, fill and the magnifier work on it too (**Flatten all** merges every mark).
+- **Rotate the whole image** a quarter turn left or right (**Rotate** in the top bar); every mark turns with it.
 - Undo/redo, resize, zoom, `⇧` to snap lines to 45° and keep shapes square.
 
 ### Export & share
@@ -127,7 +129,9 @@ Every capture is saved automatically and appears in the **library tray** along t
 
 ### Start from a blank canvas
 
-**New** (`⌘N`) creates an empty canvas — pick a preset or a custom size and a white, transparent or dark background — then paste screenshots onto it, arrange, crop and export. Handy for before/after comparisons and quick collages.
+**New** (`⌘N`) creates an empty canvas — pick a preset or a custom size and a white, transparent or dark background — then paste or drag screenshots onto it, arrange, crop and export. Handy for before/after comparisons and quick collages.
+
+To open image files as new captures, drag them onto the library, paste them (`⌘V` on the welcome screen) or use **Open image…** (`⌘O`).
 
 <p align="center">
   <img src="docs/images/new-canvas.png" alt="New image dialog with size presets and background options" width="100%">

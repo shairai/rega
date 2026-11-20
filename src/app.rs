@@ -549,12 +549,14 @@ impl RegaApp {
             }
             AppEvent::CloseItem => self.close_current(ctx),
             AppEvent::DeleteItem => self.delete_current(),
-            AppEvent::Quit => {
-                self.prepare_to_quit();
-                ctx.send_viewport_cmd(ViewportCommand::Close);
-                std::process::exit(0);
-            }
+            AppEvent::Quit => self.quit(ctx),
         }
+    }
+
+    fn quit(&mut self, ctx: &egui::Context) -> ! {
+        self.prepare_to_quit();
+        ctx.send_viewport_cmd(ViewportCommand::Close);
+        std::process::exit(0);
     }
 
     /// Leave nothing half-written on quitting: save the open image, finish a
@@ -1069,6 +1071,17 @@ impl RegaApp {
         }
     }
 
+    /// Each image becomes its own library item; the last one opens.
+    fn import_images(&mut self, imgs: Vec<RgbaImage>) {
+        let n = imgs.len();
+        for img in imgs {
+            self.import_image(img);
+        }
+        if n > 1 {
+            self.toast(format!("{n} images added to the library"));
+        }
+    }
+
     fn import_image(&mut self, img: RgbaImage) {
         let path = library::new_capture_path(&self.settings.save_dir, self.settings.image_format.ext());
         let mut ed = Editor::new(path, img, None, false);
@@ -1099,16 +1112,24 @@ impl RegaApp {
         }
     }
 
-    /// ⌘N everywhere (the File menu covers macOS), ⌘W closes and ⌘D deletes the
-    /// open item, ⌘V on the welcome screen.
+    /// The File menu's shortcuts — ⌘N, ⌘O, ⌘W (close the open item), ⌘D
+    /// (delete it) and on macOS ⌘Q — plus ⌘V on the welcome screen.
     fn home_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
+        // On macOS the menu catches these first, except with a layout that
+        // types something else there (Hebrew has ' on W and / on Q, see
+        // `latin_shortcuts`); this covers that, and Windows, which has no menu.
+        let cmd = egui::Modifiers::COMMAND;
+        let [new, open, close, delete, quit] =
+            ctx.input_mut(|i| [egui::Key::N, egui::Key::O, egui::Key::W, egui::Key::D, egui::Key::Q].map(|k| i.consume_key(cmd, k)));
+        if quit && cfg!(target_os = "macos") {
+            self.quit(ctx);
+        }
+        if new {
             self.show_new_dialog = true;
         }
-        // On macOS the File menu catches these first; this covers Windows.
-        let (close, delete) = ctx.input_mut(|i| {
-            (i.consume_key(egui::Modifiers::COMMAND, egui::Key::W), i.consume_key(egui::Modifiers::COMMAND, egui::Key::D))
-        });
+        if open {
+            self.import_from_dialog();
+        }
         if delete {
             self.delete_current();
         } else if close {
@@ -1122,7 +1143,12 @@ impl RegaApp {
                 })
             });
             if let Some(img) = pasted {
-                self.import_image(img);
+                // Files copied in Finder arrive as an icon; open the files instead.
+                let mut imgs = platform::clipboard_file_images();
+                if imgs.is_empty() {
+                    imgs.push(img);
+                }
+                self.import_images(imgs);
             } else if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))) {
                 self.import_from_clipboard();
             }
@@ -2240,8 +2266,52 @@ impl RegaApp {
         (resp, delete_clicked)
     }
 
+    /// Images dragged from Finder / Explorer onto the window: a new item from
+    /// the library, a layer on the canvas in the editor. Other screens (a
+    /// video, a guide) leave drops alone rather than lose what's open.
+    fn handle_drops(&mut self, ctx: &egui::Context) {
+        let editable = matches!(self.mode, Mode::Home | Mode::Editor(_));
+        if editable && ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+            let screen = ctx.content_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("drop_hint")));
+            painter.rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+            painter.text(
+                screen.center(),
+                Align2::CENTER_CENTER,
+                "Drop an image to open it",
+                egui::FontId::proportional(22.0),
+                Color32::WHITE,
+            );
+        }
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if dropped.is_empty() || !editable {
+            return;
+        }
+        let mut imgs = Vec::new();
+        for file in dropped {
+            let path = file.path();
+            match image::open(path) {
+                Ok(img) => imgs.push(img.to_rgba8()),
+                Err(e) => self.toast(format!("Cannot open {}: {e}", path.file_name().unwrap_or_default().to_string_lossy())),
+            }
+        }
+        if imgs.is_empty() {
+            return;
+        }
+        if let Mode::Editor(ed) = &mut self.mode {
+            let toast = crate::editor::pasted_toast(imgs.len());
+            ed.paste_images(imgs);
+            self.toast(toast);
+        } else {
+            self.import_images(imgs);
+        }
+    }
+
     fn import_from_dialog(&mut self) {
-        if let Some(p) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "webp"]).pick_file() {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "ico"])
+            .pick_file()
+        {
             match image::open(&p) {
                 Ok(img) => self.import_image(img.to_rgba8()),
                 Err(e) => self.toast(format!("Cannot open: {e}")),
@@ -2250,9 +2320,11 @@ impl RegaApp {
     }
 
     fn import_from_clipboard(&mut self) {
-        match platform::clipboard_image() {
-            Some(img) => self.import_image(img),
-            None => self.toast("No image on the clipboard"),
+        let imgs = platform::clipboard_images();
+        if imgs.is_empty() {
+            self.toast("No image on the clipboard");
+        } else {
+            self.import_images(imgs);
         }
     }
 
@@ -3109,7 +3181,29 @@ fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
+/// ⌘-shortcuts by the key's place, when the keyboard layout types something
+/// other than a letter there: the Hebrew layout has ' on W and / on Q, so ⌘W
+/// would arrive as ⌘' and close nothing. (Keys that type a non-Latin letter
+/// already arrive by their place; layouts that move letters about, such as
+/// French AZERTY, keep their own letters.)
+fn latin_shortcuts(raw: &mut egui::RawInput) {
+    let is_letter = |k: egui::Key| matches!(k.name().as_bytes(), [b'A'..=b'Z']);
+    for event in &mut raw.events {
+        if let egui::Event::Key { key, physical_key: Some(place), modifiers, .. } = event
+            && modifiers.command
+            && is_letter(*place)
+            && !is_letter(*key)
+        {
+            *key = *place;
+        }
+    }
+}
+
 impl eframe::App for RegaApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        latin_shortcuts(raw);
+    }
+
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Before `advance_activity`, so it runs a pass after `show_overlay`.
         self.present_overlay(ctx, frame);
@@ -3245,6 +3339,7 @@ impl eframe::App for RegaApp {
         self.workspace_ui(ui);
         self.permissions_window(&ctx);
         self.home_shortcuts(&ctx);
+        self.handle_drops(&ctx);
         self.new_canvas_dialog(&ctx);
         self.settings_window(&ctx);
         self.about_window(&ctx);
@@ -3494,6 +3589,30 @@ mod tests {
 
     use super::{Activity, RegaApp, Win};
     use crate::recorder::{Finished, Recorder};
+
+    /// ⌘W and ⌘Q work with the Hebrew layout, which types ' and / on those
+    /// keys; other layouts' letters, and keys pressed without ⌘, are left alone.
+    #[test]
+    fn shortcuts_follow_the_key_with_a_hebrew_layout() {
+        use egui::{Event, Key, Modifiers};
+        let press = |key, place, modifiers| Event::Key { key, physical_key: Some(place), pressed: true, repeat: false, modifiers };
+        let mut raw = egui::RawInput {
+            events: vec![
+                press(Key::Quote, Key::W, Modifiers::COMMAND),
+                press(Key::Slash, Key::Q, Modifiers::COMMAND),
+                // French AZERTY: ⌘Q is where QWERTY has A, and stays ⌘Q.
+                press(Key::Q, Key::A, Modifiers::COMMAND),
+                // Without ⌘, a ' is a '.
+                press(Key::Quote, Key::W, Modifiers::NONE),
+                // ⌘/ on a US keyboard stays ⌘/.
+                press(Key::Slash, Key::Slash, Modifiers::COMMAND),
+            ],
+            ..Default::default()
+        };
+        super::latin_shortcuts(&mut raw);
+        let keys: Vec<Key> = raw.events.iter().filter_map(|e| if let Event::Key { key, .. } = e { Some(*key) } else { None }).collect();
+        assert_eq!(keys, [Key::W, Key::Q, Key::Q, Key::Quote, Key::Slash]);
+    }
 
     /// Which hover check works for a card inside the bottom tray's scroll area?
     #[test]

@@ -239,6 +239,14 @@ struct CopiedElement {
     pastes: u32,
 }
 
+/// What the editor says after pasting or dropping `n` images onto the canvas.
+pub fn pasted_toast(n: usize) -> String {
+    match n {
+        1 => "Image pasted — drag to move, pull the corner to resize".into(),
+        n => format!("{n} images pasted — drag to move, pull a corner to resize"),
+    }
+}
+
 fn clipboard_fingerprint() -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let img = crate::platform::clipboard_image()?;
@@ -257,6 +265,138 @@ fn paint_resize_handle(painter: &egui::Painter, c: Pos2, hot: bool) {
     painter.rect_filled(r.translate(Vec2::new(0.0, 0.5)).expand(1.0), 3.0, Color32::from_black_alpha(35));
     painter.rect_filled(r, 2.0, if hot { crate::theme::ACCENT } else { Color32::WHITE });
     painter.rect_stroke(r, 2.0, Stroke::new(1.5, if hot { Color32::WHITE } else { crate::theme::ACCENT }), StrokeKind::Inside);
+}
+
+/// How far (screen points) the rotate handle sits above a selected mark's outline.
+const ROTATE_HANDLE_GAP: f32 = 24.0;
+/// Shift-dragging the rotate handle turns in steps of this many degrees.
+const ROTATE_SNAP_DEGREES: f32 = 15.0;
+
+/// A turn of the selected mark under way: the mark, the point it turns
+/// about, where the pointer started (as an angle about that point) and the
+/// mark's rotation then.
+#[derive(Clone, Copy)]
+struct Turning {
+    index: usize,
+    pivot: P,
+    grab: f32,
+    from: f32,
+}
+
+/// A circular arrow, 3/4 of a turn, for "rotate". `clockwise` picks the way
+/// the head points.
+fn paint_rotate_icon(painter: &egui::Painter, c: Pos2, radius: f32, color: Color32, clockwise: bool) {
+    use std::f32::consts::PI;
+    // Ending at the top, the head pointing the way it turns, the gap beside it.
+    let (end, sweep) = if clockwise { (-PI / 2.0 - 0.2, 1.5 * PI) } else { (-PI / 2.0 + 0.2, -1.5 * PI) };
+    let start = end - sweep;
+    let at = |a: f32| c + Vec2::new(a.cos(), a.sin()) * radius;
+    let pts: Vec<Pos2> = (0..=24).map(|i| at(start + sweep * i as f32 / 24.0)).collect();
+    let width = (radius * 0.28).max(1.4);
+    painter.add(Shape::line(pts, Stroke::new(width, color)));
+    // The head, at the end of the arc, pointing along it.
+    let tip = at(end);
+    let along = Vec2::new(-end.sin(), end.cos()) * sweep.signum();
+    let side = Vec2::new(end.cos(), end.sin());
+    let size = radius * 0.62;
+    painter.add(Shape::convex_polygon(
+        vec![tip + along * size * 0.9, tip + side * size * 0.75, tip - side * size * 0.75],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+/// The round handle above a selected mark that turns it.
+fn paint_rotate_handle(painter: &egui::Painter, c: Pos2, hot: bool) {
+    let r = if hot { 10.0 } else { 9.0 };
+    painter.circle_filled(c + Vec2::new(0.0, 0.5), r + 1.0, Color32::from_black_alpha(35));
+    painter.circle_filled(c, r, if hot { crate::theme::ACCENT } else { Color32::WHITE });
+    painter.circle_stroke(c, r, Stroke::new(1.5, if hot { Color32::WHITE } else { crate::theme::ACCENT }));
+    paint_rotate_icon(painter, c, r * 0.52, if hot { Color32::WHITE } else { crate::theme::ACCENT }, true);
+}
+
+/// A small square button with a painted rotate arrow.
+fn rotate_button(ui: &mut egui::Ui, clockwise: bool, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(34.0, 30.0), Sense::click());
+    let hot = resp.hovered();
+    let p = ui.painter();
+    p.rect_filled(rect, 8.0, if hot { crate::theme::SURFACE_3 } else { crate::theme::SURFACE_2 });
+    p.rect_stroke(rect, 8.0, Stroke::new(1.0, crate::theme::BORDER), StrokeKind::Inside);
+    paint_rotate_icon(p, rect.center(), 7.0, if hot { crate::theme::TEXT } else { crate::theme::TEXT_MUTED }, clockwise);
+    resp.on_hover_text(tip).on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// Run `paint`, then turn everything it drew by `angle` about `pivot`. egui
+/// shapes can't be drawn turned (text can, the rest can't), so they are
+/// turned in place in the paint list.
+fn paint_turned(painter: &egui::Painter, pivot: Pos2, angle: f32, paint: impl FnOnce()) {
+    if angle == 0.0 {
+        return paint();
+    }
+    let layer = painter.layer_id();
+    let ctx = painter.ctx();
+    let start = ctx.graphics(|g| g.get(layer).map_or(0, |list| list.next_idx().0));
+    paint();
+    ctx.graphics_mut(|g| {
+        let list = g.entry(layer);
+        for i in start..list.next_idx().0 {
+            list.mutate_shape(egui::layers::ShapeIdx(i), |s| turn_shape(&mut s.shape, pivot, angle));
+        }
+    });
+}
+
+/// Turn a painted shape by `angle` (radians, clockwise) about `c`.
+fn turn_shape(shape: &mut Shape, c: Pos2, angle: f32) {
+    let rot = egui::emath::Rot2::from_angle(angle);
+    let turn = |p: &mut Pos2| *p = c + rot * (*p - c);
+    match shape {
+        Shape::Noop | Shape::Callback(_) | Shape::Band(_) => {}
+        Shape::Vec(shapes) => shapes.iter_mut().for_each(|s| turn_shape(s, c, angle)),
+        Shape::Circle(s) => turn(&mut s.center),
+        Shape::Ellipse(s) => {
+            turn(&mut s.center);
+            s.angle += angle;
+        }
+        Shape::LineSegment { points, .. } => points.iter_mut().for_each(turn),
+        Shape::Path(s) => s.points.iter_mut().for_each(turn),
+        Shape::QuadraticBezier(s) => s.points.iter_mut().for_each(turn),
+        Shape::CubicBezier(s) => s.points.iter_mut().for_each(turn),
+        // Text turns about its top-left corner, which turns with the rest.
+        Shape::Text(s) => {
+            turn(&mut s.pos);
+            s.angle += angle;
+        }
+        Shape::Mesh(mesh) => Arc::make_mut(mesh).vertices.iter_mut().for_each(|v| turn(&mut v.pos)),
+        // An upright box can't be turned: redraw it as its outline.
+        Shape::Rect(r) => {
+            let mut pts = rounded_rect_points(r.rect, r.corner_radius.nw as f32);
+            pts.iter_mut().for_each(turn);
+            *shape = if r.fill == Color32::TRANSPARENT {
+                Shape::closed_line(pts, r.stroke)
+            } else {
+                Shape::convex_polygon(pts, r.fill, r.stroke)
+            };
+        }
+    }
+}
+
+/// The outline of `r` with corners rounded by `radius`, clockwise.
+fn rounded_rect_points(r: Rect, radius: f32) -> Vec<Pos2> {
+    use std::f32::consts::FRAC_PI_2;
+    let radius = radius.min(r.width() / 2.0).min(r.height() / 2.0).max(0.0);
+    if radius < 0.5 {
+        return vec![r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()];
+    }
+    let centers = [
+        (Pos2::new(r.max.x - radius, r.min.y + radius), -FRAC_PI_2),
+        (Pos2::new(r.max.x - radius, r.max.y - radius), 0.0),
+        (Pos2::new(r.min.x + radius, r.max.y - radius), FRAC_PI_2),
+        (Pos2::new(r.min.x + radius, r.min.y + radius), 2.0 * FRAC_PI_2),
+    ];
+    centers
+        .iter()
+        .flat_map(|&(c, from)| (0..=6).map(move |i| c + Vec2::angled(from + FRAC_PI_2 * i as f32 / 6.0) * radius))
+        .collect()
 }
 
 /// Above this many pixels, moving a blur/spotlight re-rasters on release only.
@@ -374,6 +514,8 @@ pub struct Editor {
     /// The mark whose corner handle is being dragged, and which corner
     /// (0–3 clockwise from top-left, as in `resize_handles`).
     resizing: Option<(usize, usize)>,
+    /// The selected mark being turned by its rotate handle.
+    turning: Option<Turning>,
     /// The mark right-clicked to open the canvas menu.
     menu_target: Option<usize>,
     dirty: bool,
@@ -450,6 +592,7 @@ impl Editor {
             picking: None,
             layer_textures: HashMap::new(),
             resizing: None,
+            turning: None,
             dirty: false,
             changed_at: Instant::now(),
             saving: None,
@@ -751,13 +894,15 @@ impl Editor {
     /// Enlarge the canvas so the image layer `i`, just dragged past its edge, stays fully visible.
     /// Only the dragged layer counts, so layers the user deliberately cropped stay cropped.
     fn grow_canvas_to_layer(&mut self, i: usize) {
-        let Some(Kind::Image { pos, w, h, .. }) = self.anns.get(i).map(|a| &a.kind) else { return };
+        let Some(ann) = self.anns.get(i).filter(|a| matches!(a.kind, Kind::Image { .. })) else { return };
+        // All of it as drawn, turned or not.
+        let (lo, hi) = ann.bounds();
         let (cw, ch) = (self.base.width() as f32, self.base.height() as f32);
         // Round rather than floor/ceil: a sub-pixel overhang is not worth a new base image.
-        let x0 = pos.x.round().min(0.0);
-        let y0 = pos.y.round().min(0.0);
-        let x1 = (pos.x + w).round().max(cw);
-        let y1 = (pos.y + h).round().max(ch);
+        let x0 = lo.x.round().min(0.0);
+        let y0 = lo.y.round().min(0.0);
+        let x1 = hi.x.round().max(cw);
+        let y1 = hi.y.round().max(ch);
         let (nw, nh) = ((x1 - x0) as u32, (y1 - y0) as u32);
         if nw == self.base.width() && nh == self.base.height() {
             return;
@@ -810,6 +955,49 @@ impl Editor {
         self.texture_dirty = true;
         self.fit = true;
         Some((w, h))
+    }
+
+    /// Turn the whole image a quarter, clockwise or back, with every mark on it.
+    fn rotate_canvas(&mut self, clockwise: bool) {
+        use std::f32::consts::FRAC_PI_2;
+        self.commit_text();
+        self.push_undo();
+        let (w, h) = (self.base.width() as f32, self.base.height() as f32);
+        // Where a point of the old image lands on the turned one.
+        let (turned, map, angle): (RgbaImage, &dyn Fn(P) -> P, f32) = if clockwise {
+            (image::imageops::rotate90(&*self.base), &|p: P| P::new(h - p.y, p.x), FRAC_PI_2)
+        } else {
+            (image::imageops::rotate270(&*self.base), &|p: P| P::new(p.y, w - p.x), -FRAC_PI_2)
+        };
+        self.base = Arc::new(turned);
+        self.base_changed = true;
+        for a in &mut self.anns {
+            a.turn_with_canvas(map, angle);
+        }
+        self.texture_dirty = true;
+        self.fit = true;
+    }
+
+    /// Turn mark `i` to `angle` radians (the caller takes care of undo).
+    fn set_rotation(&mut self, i: usize, angle: f32) {
+        if let Some(ann) = self.anns.get_mut(i) {
+            ann.rotation = model::wrap_angle(angle);
+            self.mark_changed();
+        }
+    }
+
+    /// The selected mark's rotate handle, and the middle of the top edge of
+    /// its outline that it hangs from, in image coordinates.
+    fn rotate_handle(&self) -> Option<(usize, P, P)> {
+        let i = self.selected.filter(|&i| i < self.anns.len())?;
+        let ann = &self.anns[i];
+        if !ann.can_rotate() || self.editing_text == Some(i) {
+            return None;
+        }
+        let c = ann.corners(SELECTION_PAD / self.zoom);
+        let top = P::new((c[0].x + c[1].x) / 2.0, (c[0].y + c[1].y) / 2.0);
+        let up = P::new(0.0, -ROTATE_HANDLE_GAP / self.zoom).rotated(P::default(), ann.rotation);
+        Some((i, P::new(top.x + up.x, top.y + up.y), top))
     }
 
     /// Right-click menu on the canvas.
@@ -866,12 +1054,22 @@ impl Editor {
             color: from_c32(self.color),
             width: self.width,
             filled: self.filled,
+            rotation: 0.0,
         })
     }
 
     fn drag_begin(&mut self, p: P) {
         self.commit_text();
-        // Resize handles work with any tool, e.g. right after placing a stamp.
+        // The rotate and resize handles work with any tool, e.g. right after placing a stamp.
+        if let Some((i, handle, _)) = self.rotate_handle()
+            && handle.dist(p) <= HANDLE_GRAB / self.zoom
+        {
+            self.push_undo();
+            let pivot = self.anns[i].pivot();
+            let grab = (p.y - pivot.y).atan2(p.x - pivot.x);
+            self.turning = Some(Turning { index: i, pivot, grab, from: self.anns[i].rotation });
+            return;
+        }
         if let Some((i, corners)) = self.resize_handles()
             && let Some(k) = (0..4).find(|&k| corners[k].dist(p) <= HANDLE_GRAB / self.zoom)
         {
@@ -902,13 +1100,29 @@ impl Editor {
             self.erase_at(p);
             return;
         }
+        if let Some(t) = self.turning {
+            let Some(ann) = self.anns.get_mut(t.index) else { return };
+            let mut angle = t.from + (p.y - t.pivot.y).atan2(p.x - t.pivot.x) - t.grab;
+            if constrain {
+                let step = ROTATE_SNAP_DEGREES.to_radians();
+                angle = (angle / step).round() * step;
+            }
+            ann.rotation = model::wrap_angle(angle);
+            self.mark_changed();
+            return;
+        }
         if let Some((i, k)) = self.resizing {
             let large = self.base.width() as u64 * self.base.height() as u64 > LIVE_RASTER_PIXELS;
             let Some(ann) = self.anns.get_mut(i) else { return };
-            // The opposite corner stays put; `left`/`top` say which way the dragged corner lies.
-            let (lo, hi) = ann.bounds();
+            // The opposite corner stays put, where it is on screen; `left`/`top`
+            // say which way the dragged corner lies in the mark's own frame.
+            let (lo, hi) = ann.frame();
             let (left, top) = (k == 0 || k == 3, k < 2);
-            let anchor = P::new(if left { hi.x } else { lo.x }, if top { hi.y } else { lo.y });
+            let turn = ann.rotation;
+            let anchor = P::new(if left { hi.x } else { lo.x }, if top { hi.y } else { lo.y }).rotated(ann.pivot(), turn);
+            // The pointer in the mark's upright frame, about that corner.
+            let pointer = p;
+            let p = p.rotated(anchor, -turn);
             let toward = |len: f32, left_or_top: bool| if left_or_top { -len } else { len };
             match &mut ann.kind {
                 Kind::Image { pos, w, h, img } => {
@@ -916,10 +1130,16 @@ impl Editor {
                     let aspect = img.height() as f32 / img.width().max(1) as f32;
                     *w = (p.x - anchor.x).abs().max((p.y - anchor.y).abs() / aspect).max(8.0);
                     *h = *w * aspect;
-                    *pos = P::new(anchor.x + toward(*w, left).min(0.0), anchor.y + toward(*h, top).min(0.0));
+                    // The new box, upright about the anchor; turned, its middle is the picture's.
+                    let min = P::new(anchor.x + toward(*w, left).min(0.0), anchor.y + toward(*h, top).min(0.0));
+                    let mid = P::new(min.x + *w / 2.0, min.y + *h / 2.0).rotated(anchor, turn);
+                    *pos = P::new(mid.x - *w / 2.0, mid.y - *h / 2.0);
                 }
                 // Grows or shrinks around its centre.
-                Kind::Stamp { pos, size, .. } => *size = (2.0 * (p.x - pos.x).abs().max((p.y - pos.y).abs())).max(12.0),
+                Kind::Stamp { pos, size, .. } => {
+                    let q = pointer.rotated(*pos, -turn);
+                    *size = (2.0 * (q.x - pos.x).abs().max((q.y - pos.y).abs())).max(12.0);
+                }
                 Kind::Magnify { a, b, .. } => {
                     let side = (p.x - anchor.x).abs().max((p.y - anchor.y).abs()).max(8.0);
                     (*a, *b) = norm(anchor, P::new(anchor.x + toward(side, left), anchor.y + toward(side, top)));
@@ -981,7 +1201,11 @@ impl Editor {
     }
 
     fn drag_end(&mut self) {
-        let dragged = self.resizing.map(|(i, _)| i).or(self.selected.filter(|_| self.moved && self.moving.is_some()));
+        let dragged = self
+            .resizing
+            .map(|(i, _)| i)
+            .or(self.turning.take().map(|t| t.index))
+            .or(self.selected.filter(|_| self.moved && self.moving.is_some()));
         if let Some(i) = dragged
             && self.anns.get(i).is_some_and(|a| a.is_raster())
         {
@@ -1016,6 +1240,10 @@ impl Editor {
             self.commit_text();
             return;
         }
+        // A click that didn't turn the rotate handle leaves the selection be.
+        if self.rotate_handle().is_some_and(|(_, handle, _)| handle.dist(p) <= HANDLE_GRAB / self.zoom) {
+            return;
+        }
         let hit = self.hit_test(p);
         // A click on an existing mark selects it and switches to Select & move.
         // Click-to-place tools only do this for their own kind of mark, so new
@@ -1036,6 +1264,7 @@ impl Editor {
                     color: from_c32(self.color),
                     width: self.width,
                     filled: true,
+                    rotation: 0.0,
                 });
                 self.selected = Some(self.anns.len() - 1);
             }
@@ -1047,6 +1276,7 @@ impl Editor {
                     color: from_c32(self.color),
                     width: self.width,
                     filled: true,
+                    rotation: 0.0,
                 });
                 self.texture_dirty = true;
                 self.selected = Some(self.anns.len() - 1);
@@ -1067,6 +1297,7 @@ impl Editor {
                     color: from_c32(self.color),
                     width: self.width,
                     filled: false,
+                    rotation: 0.0,
                 });
                 self.editing_text = Some(self.anns.len() - 1);
                 self.selected = self.editing_text;
@@ -1083,6 +1314,7 @@ impl Editor {
                     color: from_c32(self.color),
                     width: self.width,
                     filled: true,
+                    rotation: 0.0,
                 });
                 self.selected = Some(self.anns.len() - 1);
                 self.next_step += 1;
@@ -1226,41 +1458,50 @@ impl Editor {
         };
     }
 
-    /// Drop an image onto the canvas as a movable, resizable layer.
-    pub fn paste_image(&mut self, img: RgbaImage) {
-        self.commit_text();
-        let (cw, ch) = (self.base.width() as f32, self.base.height() as f32);
-        let (iw, ih) = (img.width() as f32, img.height() as f32);
-        if iw < 1.0 || ih < 1.0 {
+    /// Drop images onto the canvas as movable, resizable layers, one undo step
+    /// for all of them.
+    /// Each one after the first sits a little lower and to the right, so none
+    /// hides another exactly. The last one is selected.
+    pub fn paste_images(&mut self, imgs: Vec<RgbaImage>) {
+        let imgs: Vec<RgbaImage> = imgs.into_iter().filter(|i| i.width() > 0 && i.height() > 0).collect();
+        if imgs.is_empty() {
             return;
         }
-        // Fit large pastes to 80% of the canvas; keep small ones at 1:1.
-        let fit = (cw * 0.8 / iw).min(ch * 0.8 / ih).min(1.0);
-        let (w, h) = (iw * fit, ih * fit);
+        self.commit_text();
         self.push_undo();
-        self.anns.push(Annotation {
-            kind: Kind::Image {
-                pos: P::new(((cw - w) / 2.0).round(), ((ch - h) / 2.0).round()),
-                w,
-                h,
-                img: Arc::new(img),
-            },
-            color: from_c32(self.color),
-            width: self.width,
-            filled: false,
-        });
+        let (cw, ch) = (self.base.width() as f32, self.base.height() as f32);
+        let step = (cw.min(ch) * 0.04).max(12.0).round();
+        for (n, img) in imgs.into_iter().enumerate() {
+            let (iw, ih) = (img.width() as f32, img.height() as f32);
+            // Fit large pastes to 80% of the canvas; keep small ones at 1:1.
+            let fit = (cw * 0.8 / iw).min(ch * 0.8 / ih).min(1.0);
+            let (w, h) = (iw * fit, ih * fit);
+            let shift = step * n as f32;
+            self.anns.push(Annotation {
+                kind: Kind::Image {
+                    pos: P::new(((cw - w) / 2.0).round() + shift, ((ch - h) / 2.0).round() + shift),
+                    w,
+                    h,
+                    img: Arc::new(img),
+                },
+                color: from_c32(self.color),
+                width: self.width,
+                filled: false,
+                rotation: 0.0,
+            });
+        }
         self.selected = Some(self.anns.len() - 1);
         self.change_tool(Tool::Select);
     }
 
     fn paste_from_clipboard(&mut self) -> EditorAction {
-        match crate::platform::clipboard_image() {
-            Some(img) => {
-                self.paste_image(img);
-                EditorAction::Toast("Image pasted — drag to move, pull the corner to resize".into())
-            }
-            None => EditorAction::Toast("No image on the clipboard".into()),
+        let imgs = crate::platform::clipboard_images();
+        if imgs.is_empty() {
+            return EditorAction::Toast("No image on the clipboard".into());
         }
+        let toast = pasted_toast(imgs.len());
+        self.paste_images(imgs);
+        EditorAction::Toast(toast)
     }
 
     /// Corner resize handles of a selected image layer, stamp or magnifier, in
@@ -1271,10 +1512,7 @@ impl Editor {
         if !matches!(self.anns[i].kind, Kind::Image { .. } | Kind::Stamp { .. } | Kind::Magnify { .. }) {
             return None;
         }
-        let (a, b) = self.anns[i].bounds();
-        let pad = SELECTION_PAD / self.zoom;
-        let (a, b) = (P::new(a.x - pad, a.y - pad), P::new(b.x + pad, b.y + pad));
-        Some((i, [a, P::new(b.x, a.y), b, P::new(a.x, b.y)]))
+        Some((i, self.anns[i].corners(SELECTION_PAD / self.zoom)))
     }
 
     fn ensure_layer_textures(&mut self, ctx: &egui::Context) {
@@ -1365,6 +1603,19 @@ impl Editor {
                         && let Some((w, h)) = self.resize(f)
                     {
                         action = EditorAction::Toast(format!("Resized to {w} × {h} px"));
+                        ui.close();
+                    }
+                }
+            });
+            let rotate = theme::toolbar_item_painted(ui, "Rotate", ItemStyle::Normal, true, |p, c, color| {
+                paint_rotate_icon(p, c, 8.0, color, true);
+            })
+            .on_hover_text("Turn the whole image a quarter turn, with everything on it");
+            egui::Popup::menu(&rotate).show(|ui| {
+                theme::section(ui, "Rotate image");
+                for (clockwise, name, hint) in [(false, "Rotate left", "90° counter-clockwise"), (true, "Rotate right", "90° clockwise")] {
+                    if menu_row(ui, name, hint, true).clicked() {
+                        self.rotate_canvas(clockwise);
                         ui.close();
                     }
                 }
@@ -1643,6 +1894,37 @@ impl Editor {
                     }
                     self.texture_dirty = true;
                 }
+            }
+        }
+        if let Some(i) = selected_idx.filter(|&i| self.anns[i].can_rotate()) {
+            ui.add_space(6.0);
+            let label = ui.label(egui::RichText::new("Rotation").color(theme::TEXT_MUTED));
+            let now = self.anns[i].rotation.to_degrees();
+            let mut deg = now;
+            let (mut turn, mut reset) = (0.0, false);
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut deg).range(-180.0..=180.0).speed(1.0).max_decimals(0).suffix("°"))
+                    .labelled_by(label.id)
+                    .on_hover_text("Or drag the round handle above it; hold Shift for 15° steps");
+                if rotate_button(ui, false, "Turn 90° left").clicked() {
+                    turn = -90.0;
+                }
+                if rotate_button(ui, true, "Turn 90° right").clicked() {
+                    turn = 90.0;
+                }
+                if now != 0.0 && theme::ghost_button(ui, None, "Reset").on_hover_text("Stand it upright again").clicked() {
+                    reset = true;
+                }
+            });
+            if reset {
+                self.push_undo();
+                self.set_rotation(i, 0.0);
+            } else if turn != 0.0 {
+                self.push_undo();
+                self.set_rotation(i, (now + turn).to_radians());
+            } else if (deg - now).abs() > 1e-3 {
+                self.gesture_undo();
+                self.set_rotation(i, deg.to_radians());
             }
         }
         if selected_idx.is_some() {
@@ -1973,7 +2255,11 @@ impl Editor {
             let layer_tex = |img: &Arc<RgbaImage>| layers.get(&(Arc::as_ptr(img) as usize)).map(|(_, t)| t.id());
             for (i, ann) in self.anns.iter().enumerate() {
                 let editing = self.editing_text == Some(i);
-                paint_annotation(&painter, ann, &to_screen, zoom, editing, &layer_tex);
+                // Text being typed into stands upright, as its text box does (see `text_editor`).
+                let angle = if editing { 0.0 } else { ann.rotation };
+                paint_turned(&painter, to_screen(ann.pivot()), angle, || {
+                    paint_annotation(&painter, ann, &to_screen, zoom, editing, &layer_tex);
+                });
             }
             if self.tool == Tool::Eraser
                 && let Some(h) = resp.hover_pos()
@@ -1990,8 +2276,14 @@ impl Editor {
                 }
             }
             if let Some(i) = self.selected.filter(|&i| i < self.anns.len()) {
-                let (a, b) = self.anns[i].bounds();
-                dashed_rect(&painter, Rect::from_two_pos(to_screen(a), to_screen(b)).expand(SELECTION_PAD));
+                let ann = &self.anns[i];
+                let pad = SELECTION_PAD / zoom;
+                let corners = if self.editing_text == Some(i) {
+                    Annotation { rotation: 0.0, ..ann.clone() }.corners(pad)
+                } else {
+                    ann.corners(pad)
+                };
+                dashed_outline(&painter, corners.map(to_screen));
             }
             if let Some((_, corners)) = self.resize_handles() {
                 let hover = resp.hover_pos().filter(|_| self.resizing.is_none());
@@ -2001,6 +2293,27 @@ impl Editor {
                     paint_resize_handle(&painter, c, hot);
                     if hot {
                         ui.ctx().set_cursor_icon(if k % 2 == 0 { CursorIcon::ResizeNwSe } else { CursorIcon::ResizeNeSw });
+                    }
+                }
+            }
+            if let Some((_, handle, top)) = self.rotate_handle() {
+                let (h, t) = (to_screen(handle), to_screen(top));
+                let turning = self.turning.is_some();
+                let hot = turning || resp.hover_pos().is_some_and(|p| p.distance(h) <= HANDLE_GRAB);
+                painter.line_segment([t, h], Stroke::new(1.5, crate::theme::ACCENT));
+                paint_rotate_handle(&painter, h, hot);
+                if hot {
+                    ui.ctx().set_cursor_icon(if turning { CursorIcon::Grabbing } else { CursorIcon::Grab });
+                }
+                if turning && let Some(i) = self.selected {
+                    // The angle, beside the pointer.
+                    let deg = self.anns[i].rotation.to_degrees().round() as i32;
+                    if let Some(at) = resp.hover_pos().or(resp.interact_pointer_pos()) {
+                        let label = format!("{deg}°");
+                        let galley = painter.layout_no_wrap(label, crate::theme::medium(12.0), Color32::WHITE);
+                        let r = Rect::from_min_size(at + Vec2::new(16.0, 14.0), galley.size()).expand2(Vec2::new(7.0, 4.0));
+                        painter.rect_filled(r, 6.0, Color32::from_black_alpha(200));
+                        painter.galley(r.min + Vec2::new(7.0, 4.0), galley, Color32::WHITE);
                     }
                 }
             }
@@ -2131,8 +2444,13 @@ impl Editor {
         if (pasted_image.is_some() || paste_requested) && self.paste_copied_element() {
             *action = EditorAction::Toast("Element pasted".into());
         } else if let Some(img) = pasted_image {
-            self.paste_image(img);
-            *action = EditorAction::Toast("Image pasted — drag to move, pull the corner to resize".into());
+            // Files copied in Finder arrive as an icon; paste the files instead.
+            let mut imgs = crate::platform::clipboard_file_images();
+            if imgs.is_empty() {
+                imgs.push(img);
+            }
+            *action = EditorAction::Toast(pasted_toast(imgs.len()));
+            self.paste_images(imgs);
         } else if paste_requested {
             *action = self.paste_from_clipboard();
         }
@@ -2423,7 +2741,12 @@ fn paint_backdrop(painter: &egui::Painter, rect: Rect) {
 }
 
 fn dashed_rect(painter: &egui::Painter, r: Rect) {
-    let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+    dashed_outline(painter, [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()]);
+}
+
+/// The selection's dashed outline through four corners, which may be turned.
+fn dashed_outline(painter: &egui::Painter, corners: [Pos2; 4]) {
+    let pts = [corners[0], corners[1], corners[2], corners[3], corners[0]];
     painter.extend(Shape::dashed_line(&pts, Stroke::new(1.5, crate::theme::ACCENT), 6.0, 4.0));
     painter.extend(Shape::dashed_line_with_offset(&pts, Stroke::new(1.5, Color32::WHITE), &[4.0], &[6.0], 6.0));
 }
@@ -2815,7 +3138,7 @@ mod tests {
     #[test]
     fn thick_highlights_act_as_the_band_you_see() {
         let (w, half) = (20.0, 20.0 * render::HIGHLIGHT_WIDTH_FACTOR / 2.0);
-        let mark = |pts: Vec<P>| Annotation { kind: Kind::Highlight { pts }, color: [235, 59, 52, 255], width: w, filled: false };
+        let mark = |pts: Vec<P>| Annotation { kind: Kind::Highlight { pts }, color: [235, 59, 52, 255], width: w, filled: false, rotation: 0.0 };
         let band = mark(vec![P::new(100.0, 150.0), P::new(300.0, 150.0)]);
         let base = RgbaImage::from_pixel(400, 300, image::Rgba([255, 255, 255, 255]));
         let out = render::render(&base, std::slice::from_ref(&band), &Effects::default());
@@ -2922,7 +3245,7 @@ mod tests {
         ed.tool = Tool::Stamp;
         ed.click(P::new(60.0, 60.0));
         let red = Arc::new(RgbaImage::from_pixel(40, 40, image::Rgba([255, 0, 0, 255])));
-        ed.anns.push(Annotation { kind: Kind::Image { pos: P::new(100.0, 100.0), w: 40.0, h: 40.0, img: red }, color: [0; 4], width: 0.0, filled: false });
+        ed.anns.push(Annotation { kind: Kind::Image { pos: P::new(100.0, 100.0), w: 40.0, h: 40.0, img: red }, color: [0; 4], width: 0.0, filled: false, rotation: 0.0 });
         ed.click(P::new(300.0, 60.0));
         let before = ed.flatten();
         ed.merge_down(1);
@@ -2950,7 +3273,7 @@ mod tests {
     fn images_resize_from_any_corner_keeping_the_opposite_one() {
         let mut ed = blank_editor();
         let img = Arc::new(RgbaImage::new(20, 10));
-        ed.anns.push(Annotation { kind: Kind::Image { pos: P::new(100.0, 100.0), w: 40.0, h: 20.0, img }, color: [0; 4], width: 0.0, filled: false });
+        ed.anns.push(Annotation { kind: Kind::Image { pos: P::new(100.0, 100.0), w: 40.0, h: 20.0, img }, color: [0; 4], width: 0.0, filled: false, rotation: 0.0 });
         ed.selected = Some(0);
         let (_, corners) = ed.resize_handles().unwrap();
         ed.drag_begin(corners[0]);
@@ -3007,6 +3330,7 @@ mod tests {
             color: [235, 40, 40, 255],
             width: 4.0,
             filled: false,
+            rotation: 0.0,
         });
         ed.editing_text = Some(0);
         ed.focus_text = true;
@@ -3066,6 +3390,23 @@ mod tests {
         assert_eq!((*w, *h), (20.0, 10.0)); // small pastes stay 1:1
         assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
         assert_eq!(ed.selected, Some(0));
+    }
+
+    /// Several files pasted (or dropped) at once: a layer each, cascaded so
+    /// none covers another exactly, undone together, the last one selected.
+    #[test]
+    fn pasting_several_images_adds_a_layer_each() {
+        let mut ed = Editor::new(PathBuf::from("unused.png"), RgbaImage::new(400, 300), None, true);
+        ed.paste_images(vec![RgbaImage::new(20, 10), RgbaImage::new(0, 5), RgbaImage::new(30, 30), RgbaImage::new(40, 20)]);
+        assert_eq!(ed.anns.len(), 3, "the empty image is skipped");
+        let pos: Vec<P> = ed.anns.iter().map(|a| match &a.kind {
+            Kind::Image { pos, w, h, .. } => P::new(pos.x + w / 2.0, pos.y + h / 2.0),
+            _ => panic!("expected image layers"),
+        }).collect();
+        assert!(pos.windows(2).all(|p| p[1].x > p[0].x && p[1].y > p[0].y), "{pos:?}");
+        assert_eq!(ed.selected, Some(2));
+        ed.undo();
+        assert!(ed.anns.is_empty(), "one undo removes them all");
     }
 
     /// Resize says what it does: the menu shows the image's size and what
@@ -3166,5 +3507,176 @@ mod tests {
         let corner = screen(Vec2::new(-(r - 3.0), r - 3.0));
         let half = crate::loupe::CELLS / 2;
         assert!(!close(corner, source(-half, half)), "the loupe is round: {corner:?}");
+    }
+
+    fn mark(kind: Kind) -> Annotation {
+        Annotation { kind, color: [235, 59, 52, 255], width: 4.0, filled: false, rotation: 0.0 }
+    }
+
+    /// One of every kind of mark, on a screenshot that isn't symmetric.
+    fn marked_up_editor() -> Editor {
+        let mut base = RgbaImage::from_pixel(400, 300, image::Rgba([255, 255, 255, 255]));
+        for (x, y, px) in base.enumerate_pixels_mut() {
+            if x < 120 && y < 60 {
+                *px = image::Rgba([(x * 2) as u8, 90, (y * 4) as u8, 255]);
+            }
+        }
+        let mut ed = Editor::new(PathBuf::from("unused.png"), base, None, true);
+        let pic = Arc::new(RgbaImage::from_fn(30, 10, |x, _| image::Rgba([0, (x * 8) as u8, 200, 255])));
+        ed.anns = vec![
+            mark(Kind::Blur { a: P::new(10.0, 10.0), b: P::new(60.0, 40.0), style: BlurStyle::Pixelate, strength: 50.0 }),
+            mark(Kind::Rect { a: P::new(150.0, 40.0), b: P::new(260.0, 90.0) }),
+            mark(Kind::Arrow { a: P::new(40.0, 250.0), b: P::new(180.0, 140.0) }),
+            mark(Kind::Text { pos: P::new(220.0, 200.0), text: "Turn".into(), size: 36.0, background: true }),
+            mark(Kind::Image { pos: P::new(300.0, 120.0), w: 60.0, h: 20.0, img: pic }),
+            mark(Kind::Stamp { pos: P::new(330.0, 60.0), size: 40.0, stamp: Stamp::Check }),
+            mark(Kind::Step { pos: P::new(80.0, 120.0), n: 3, radius: 16.0 }),
+        ];
+        ed
+    }
+
+    /// Turning the canvas turns the picture and everything on it with it: the
+    /// result is the old one turned, and four turns (or one back) undo it.
+    #[test]
+    fn rotating_the_canvas_turns_the_image_and_its_marks() {
+        let mut ed = marked_up_editor();
+        let before = ed.flatten();
+        let anns = ed.anns.clone();
+        ed.rotate_canvas(true);
+        assert_eq!(ed.size(), (300, 400));
+        let after = ed.flatten();
+        let expected = image::imageops::rotate90(&before);
+        // Text and pictures are resampled when turned; everything else lands on the same pixels.
+        let off = after.pixels().zip(expected.pixels()).filter(|(a, b)| a.0.iter().zip(b.0).any(|(x, y)| x.abs_diff(y) > 48)).count();
+        assert!(off * 200 < after.pixels().len(), "{off} pixels differ from the turned original");
+        assert_eq!(ed.anns[6].rotation, 0.0, "steps stay upright");
+        assert_eq!(ed.anns[1].rotation, 0.0, "a rectangle is remapped, not turned");
+
+        ed.rotate_canvas(false);
+        assert_eq!(ed.size(), (400, 300));
+        for (now, was) in ed.anns.iter().zip(&anns) {
+            assert_eq!(now.rotation, 0.0);
+            let ((a, b), (c, d)) = (now.frame(), was.frame());
+            assert!(a.dist(c) < 1e-3 && b.dist(d) < 1e-3, "{:?} moved", now.kind);
+        }
+        for _ in 0..4 {
+            ed.rotate_canvas(true);
+        }
+        assert!(ed.anns.iter().all(|a| a.rotation == 0.0), "four quarter turns are a whole one");
+        ed.undo();
+        assert_eq!(ed.size(), (300, 400), "each turn is one undo step");
+    }
+
+    /// The round handle above a selected mark turns it about its middle;
+    /// Shift turns in 15° steps, and it's one undo step.
+    #[test]
+    fn the_rotate_handle_turns_the_selected_mark() {
+        let mut ed = blank_editor();
+        ed.anns.push(mark(Kind::Rect { a: P::new(150.0, 130.0), b: P::new(250.0, 170.0) }));
+        ed.selected = Some(0);
+        let pivot = ed.anns[0].pivot();
+        let (_, handle, _) = ed.rotate_handle().expect("a rectangle can turn");
+        assert!(handle.y < 130.0 && (handle.x - 200.0).abs() < 0.01, "the handle sits above the middle: {handle:?}");
+        ed.drag_begin(handle);
+        // From straight above the middle to straight right of it: a quarter turn clockwise.
+        ed.drag_update(P::new(pivot.x + 80.0, pivot.y), false);
+        assert!((ed.anns[0].rotation - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+        // With Shift, 37° snaps to 30°.
+        let a = (-90.0f32 + 37.0).to_radians();
+        ed.drag_update(P::new(pivot.x + 80.0 * a.cos(), pivot.y + 80.0 * a.sin()), true);
+        assert!((ed.anns[0].rotation.to_degrees() - 30.0).abs() < 1e-3, "{}", ed.anns[0].rotation.to_degrees());
+        ed.drag_end();
+        assert_eq!(ed.anns[0].pivot(), pivot, "it turned in place");
+        ed.undo();
+        assert_eq!(ed.anns[0].rotation, 0.0);
+    }
+
+    /// A turned mark is clicked where it is drawn, not where it was.
+    #[test]
+    fn turned_marks_are_hit_where_they_are_drawn() {
+        let mut bar = mark(Kind::Rect { a: P::new(150.0, 145.0), b: P::new(250.0, 155.0) });
+        bar.filled = true;
+        bar.rotation = std::f32::consts::FRAC_PI_2;
+        assert!(bar.hit(P::new(200.0, 190.0), 1.0));
+        assert!(!bar.hit(P::new(240.0, 150.0), 1.0));
+        let (lo, hi) = bar.bounds();
+        assert!((hi.y - lo.y - 100.0).abs() < 0.01 && (hi.x - lo.x - 10.0).abs() < 0.01, "bounds {lo:?}–{hi:?}");
+    }
+
+    /// The canvas shows turned marks where Copy and Save put them.
+    #[test]
+    fn turned_marks_show_on_screen_as_they_export() {
+        let mut ed = blank_editor();
+        let mut bar = mark(Kind::Rect { a: P::new(150.0, 145.0), b: P::new(250.0, 155.0) });
+        bar.filled = true;
+        bar.rotation = std::f32::consts::FRAC_PI_2;
+        let mut text = mark(Kind::Text { pos: P::new(30.0, 60.0), text: "Turned".into(), size: 40.0, background: true });
+        text.rotation = 0.5;
+        let pic = Arc::new(RgbaImage::from_fn(40, 10, |x, _| image::Rgba([0, (x * 6) as u8, 220, 255])));
+        let mut layer = mark(Kind::Image { pos: P::new(270.0, 210.0), w: 80.0, h: 20.0, img: pic });
+        layer.rotation = -0.4;
+        let mut arrow = mark(Kind::Arrow { a: P::new(40.0, 260.0), b: P::new(140.0, 200.0) });
+        arrow.rotation = 1.2;
+        ed.anns = vec![bar, text, layer, arrow];
+        let export = ed.flatten();
+
+        let ppp = 2.0;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(900.0, 700.0))
+            .with_pixels_per_point(ppp)
+            .with_accessibility_check(false)
+            .with_context_setup(crate::theme::install)
+            .wgpu()
+            .build_ui_state(|ui, ed: &mut Editor| ed.canvas(ui), ed);
+        h.step();
+        h.step();
+        let shot = h.render().expect("render");
+        let on_screen = |x: f32, y: f32| {
+            let p = h.state().image_to_screen(P::new(x, y)) * ppp;
+            shot.get_pixel(p.x as u32, p.y as u32).0
+        };
+        assert_eq!(&on_screen(200.5, 110.5)[..3], &[235, 59, 52], "the bar stands up");
+        assert_eq!(&on_screen(240.5, 150.5)[..3], &[255, 255, 255], "where it lay is empty");
+        // Everywhere else agrees too, but for anti-aliased edges.
+        let (mut samples, mut off) = (0, 0);
+        for y in (2..298).step_by(5) {
+            for x in (2..398).step_by(5) {
+                let (s, e) = (on_screen(x as f32 + 0.5, y as f32 + 0.5), export.get_pixel(x, y).0);
+                samples += 1;
+                if (0..3).any(|c| s[c].abs_diff(e[c]) > 60) {
+                    off += 1;
+                }
+            }
+        }
+        assert!(off * 25 < samples, "{off} of {samples} samples differ from the export");
+
+        if let Ok(dir) = std::env::var("ROTATE_PREVIEW_DIR") {
+            export.save(std::path::Path::new(&dir).join("rotate-export.png")).unwrap();
+            h.state_mut().selected = Some(1);
+            h.step();
+            h.render().unwrap().save(std::path::Path::new(&dir).join("rotate-canvas.png")).unwrap();
+        }
+    }
+
+    /// Resizing a turned picture keeps the opposite corner where it is on screen.
+    #[test]
+    fn turned_pictures_resize_from_the_opposite_corner() {
+        let mut ed = blank_editor();
+        let img = Arc::new(RgbaImage::new(20, 10));
+        let mut layer = mark(Kind::Image { pos: P::new(100.0, 100.0), w: 40.0, h: 20.0, img });
+        layer.rotation = 0.6;
+        ed.anns.push(layer);
+        ed.selected = Some(0);
+        let fixed = ed.anns[0].corners(0.0)[0];
+        let (_, corners) = ed.resize_handles().unwrap();
+        ed.drag_begin(corners[2]);
+        // Outward along the picture's own diagonal.
+        let out = P::new(corners[2].x + (corners[2].x - fixed.x) * 0.5, corners[2].y + (corners[2].y - fixed.y) * 0.5);
+        ed.drag_update(out, false);
+        ed.drag_end();
+        let Kind::Image { w, h, .. } = ed.anns[0].kind else { unreachable!() };
+        assert!(w > 55.0 && (h - w / 2.0).abs() < 0.01, "{w}×{h}");
+        assert!(ed.anns[0].corners(0.0)[0].dist(fixed) < 0.01, "the far corner moved");
+        assert_eq!(ed.anns[0].rotation, 0.6);
     }
 }

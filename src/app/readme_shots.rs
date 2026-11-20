@@ -284,7 +284,7 @@ fn green() -> [u8; 4] {
 }
 
 fn ann(kind: Kind, color: [u8; 4], width: f32) -> Annotation {
-    Annotation { kind, color, width, filled: false }
+    Annotation { kind, color, width, filled: false, rotation: 0.0 }
 }
 
 /// The marked-up dashboard used for the hero shot.

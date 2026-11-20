@@ -409,7 +409,13 @@ pub const HIGHLIGHT_ALPHA: u8 = 110;
 pub const HIGHLIGHT_WIDTH_FACTOR: f32 = 4.0;
 
 fn draw_vector(pm: &mut Pixmap, ann: &Annotation) {
-    let t = Transform::identity();
+    // Everything is drawn upright and turned by `t` about the mark's middle.
+    let t = if ann.rotation == 0.0 {
+        Transform::identity()
+    } else {
+        let c = ann.pivot();
+        Transform::from_rotate_at(ann.rotation.to_degrees(), c.x, c.y)
+    };
     let color = ann.color;
     match &ann.kind {
         Kind::Arrow { a, b } => {
@@ -478,7 +484,7 @@ fn draw_vector(pm: &mut Pixmap, ann: &Annotation) {
             } else {
                 color
             };
-            draw_text(pm, *pos, text, *size, text_color);
+            draw_text_turned(pm, *pos, text, *size, text_color, t);
         }
         Kind::Step { pos, n, radius } => {
             if let Some(path) = PathBuilder::from_circle(pos.x, pos.y, *radius) {
@@ -497,7 +503,7 @@ fn draw_vector(pm: &mut Pixmap, ann: &Annotation) {
             let sx = w / img.width() as f32;
             let sy = h / img.height() as f32;
             let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
-            pm.draw_pixmap(0, 0, src.as_ref(), &paint, Transform::from_row(sx, 0.0, 0.0, sy, pos.x, pos.y), None);
+            pm.draw_pixmap(0, 0, src.as_ref(), &paint, t.pre_concat(Transform::from_row(sx, 0.0, 0.0, sy, pos.x, pos.y)), None);
         }
         Kind::Magnify { a, b, .. } => {
             // The ring; the enlarged pixels come from `apply_raster`.
@@ -527,13 +533,28 @@ fn draw_vector(pm: &mut Pixmap, ann: &Annotation) {
                     }
                     StampSymbol::Glyph(g, size) => {
                         let (w, h) = measure_text(g, size);
-                        draw_text(pm, P::new(pos.x - w / 2.0, pos.y - h / 2.0), g, size, ink);
+                        draw_text_turned(pm, P::new(pos.x - w / 2.0, pos.y - h / 2.0), g, size, ink, t);
                     }
                 }
             }
         }
         Kind::Blur { .. } | Kind::Spotlight { .. } | Kind::Fill { .. } => {}
     }
+}
+
+/// [`draw_text`] turned by `t`: glyphs are drawn straight onto the pixels, so
+/// turned text is drawn upright on a scratch pixmap first and that is turned.
+fn draw_text_turned(pm: &mut Pixmap, pos: P, text: &str, size: f32, color: Rgba, t: Transform) {
+    if t.is_identity() {
+        return draw_text(pm, pos, text, size, color);
+    }
+    let (w, h) = measure_text(text, size);
+    // Room for glyphs that reach past their advance or line.
+    let m = (size * 0.5).ceil();
+    let Some(mut upright) = Pixmap::new((w + m * 2.0).ceil().max(1.0) as u32, (h + m * 2.0).ceil().max(1.0) as u32) else { return };
+    draw_text(&mut upright, P::new(m, m), text, size, color);
+    let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
+    pm.draw_pixmap(0, 0, upright.as_ref(), &paint, t.pre_translate(pos.x - m, pos.y - m), None);
 }
 
 pub(crate) fn draw_text(pm: &mut Pixmap, pos: P, text: &str, size: f32, color: Rgba) {
@@ -609,7 +630,7 @@ mod tests {
     use super::*;
 
     fn ann(kind: Kind) -> Annotation {
-        Annotation { kind, color: [235, 59, 52, 255], width: 6.0, filled: false }
+        Annotation { kind, color: [235, 59, 52, 255], width: 6.0, filled: false, rotation: 0.0 }
     }
 
     #[test]
@@ -621,6 +642,7 @@ mod tests {
             color: [30, 136, 229, 255],
             width: 1.0,
             filled: false,
+            rotation: 0.0,
         };
         for style in BlurStyle::ALL {
             let out = apply_raster(&img, &[blur(style, 50.0)]);
@@ -654,6 +676,7 @@ mod tests {
             color: [30, 136, 229, 255],
             width: 1.0,
             filled: true,
+            rotation: 0.0,
         };
         let out = render(&img, &[fill], &Effects::default());
         assert_eq!(out.get_pixel(30, 30).0, [30, 136, 229, 255], "inside filled");
@@ -673,7 +696,7 @@ mod tests {
         }
         let corner = Px([200, 0, 0, 255]);
         img.put_pixel(0, 0, corner);
-        let loupe = Annotation { kind: Kind::Magnify { a: P::new(20.0, 20.0), b: P::new(60.0, 60.0), zoom: 3.0 }, color: [0, 0, 0, 255], width: 0.5, filled: false };
+        let loupe = Annotation { kind: Kind::Magnify { a: P::new(20.0, 20.0), b: P::new(60.0, 60.0), zoom: 3.0 }, color: [0, 0, 0, 255], width: 0.5, filled: false, rotation: 0.0 };
         let out = apply_raster(&img, &[loupe]);
         let dark = |im: &RgbaImage| im.pixels().filter(|p| p.0 == [0, 0, 0, 255]).count();
         assert_eq!(dark(&img), 4);
@@ -747,6 +770,55 @@ mod tests {
         if let Ok(dir) = std::env::var("HEBREW_PREVIEW_DIR") {
             out.save(std::path::Path::new(&dir).join("hebrew.png")).unwrap();
         }
+    }
+
+    /// The ink's upright bounding box: (width, height).
+    fn ink_size(img: &RgbaImage) -> (u32, u32) {
+        let ink: Vec<(u32, u32)> = img.enumerate_pixels().filter(|(_, _, p)| p[0] < 200 || p[1] < 200 || p[2] < 200).map(|(x, y, _)| (x, y)).collect();
+        let (x0, x1) = (ink.iter().map(|p| p.0).min().unwrap(), ink.iter().map(|p| p.0).max().unwrap());
+        let (y0, y1) = (ink.iter().map(|p| p.1).min().unwrap(), ink.iter().map(|p| p.1).max().unwrap());
+        (x1 - x0 + 1, y1 - y0 + 1)
+    }
+
+    /// Shapes, text and pictures come out turned about their middles.
+    #[test]
+    fn turned_marks_render_turned() {
+        use std::f32::consts::FRAC_PI_2;
+        let base = RgbaImage::from_pixel(200, 200, Px([255, 255, 255, 255]));
+        let turned = |kind: Kind| {
+            let mut a = ann(kind);
+            a.filled = true;
+            a.rotation = FRAC_PI_2;
+            render(&base, &[a], &Effects::default())
+        };
+        // A wide bar stands up, still centred on (100, 100).
+        let bar = turned(Kind::Rect { a: P::new(50.0, 95.0), b: P::new(150.0, 105.0) });
+        assert_eq!(bar.get_pixel(100, 60).0, [235, 59, 52, 255]);
+        assert_eq!(bar.get_pixel(140, 100).0, [255, 255, 255, 255]);
+        let (w, h) = ink_size(&bar);
+        assert!(h > 90 && w < 20, "bar ink {w}×{h}");
+        // Text reads top to bottom.
+        let text = turned(Kind::Text { pos: P::new(40.0, 85.0), text: "Rotated".into(), size: 30.0, background: false });
+        let (w, h) = ink_size(&text);
+        assert!(h > w * 2, "text ink {w}×{h}");
+        // A wide picture stands up.
+        let pic = std::sync::Arc::new(RgbaImage::from_pixel(40, 10, Px([0, 0, 255, 255])));
+        let layer = turned(Kind::Image { pos: P::new(60.0, 90.0), w: 80.0, h: 20.0, img: pic });
+        assert_eq!(layer.get_pixel(100, 65).0, [0, 0, 255, 255]);
+        assert_eq!(layer.get_pixel(130, 100).0, [255, 255, 255, 255]);
+    }
+
+    /// Files only mention a rotation when there is one, so older projects
+    /// load upright and unturned marks save as before.
+    #[test]
+    fn rotation_is_saved_only_when_set() {
+        let mut a = ann(Kind::Rect { a: P::new(1.0, 2.0), b: P::new(30.0, 40.0) });
+        assert!(!serde_json::to_string(&a).unwrap().contains("rotation"));
+        a.rotation = 0.5;
+        let back: Annotation = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back.rotation, 0.5);
+        let old = r#"{"kind":{"Line":{"a":{"x":0.0,"y":0.0},"b":{"x":9.0,"y":9.0}}},"color":[0,0,0,255],"width":2.0,"filled":false}"#;
+        assert_eq!(serde_json::from_str::<Annotation>(old).unwrap().rotation, 0.0);
     }
 
     #[cfg(target_os = "macos")]

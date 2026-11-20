@@ -984,15 +984,37 @@ pub fn copy_files(paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An image from the clipboard: copied pixels, or an image file copied in
-/// Finder / Explorer.
-pub fn clipboard_image() -> Option<image::RgbaImage> {
-    let mut clipboard = arboard::Clipboard::new().ok()?;
-    if let Ok(img) = clipboard.get_image() {
-        return image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned());
+/// The images on the clipboard: every image file copied in Finder / Explorer,
+/// or else the copied pixels.
+pub fn clipboard_images() -> Vec<image::RgbaImage> {
+    let files = clipboard_file_images();
+    if !files.is_empty() {
+        return files;
     }
-    let files = clipboard.get().file_list().ok()?;
-    files.iter().find_map(|f| image::open(f).ok()).map(|img| img.to_rgba8())
+    clipboard_pixels().into_iter().collect()
+}
+
+/// The first of [`clipboard_images`].
+pub fn clipboard_image() -> Option<image::RgbaImage> {
+    clipboard_file_images().into_iter().next().or_else(clipboard_pixels)
+}
+
+fn clipboard_pixels() -> Option<image::RgbaImage> {
+    let img = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())
+}
+
+/// The images among files copied in Finder / Explorer, in their order. Files
+/// come before pixels: Finder puts the copied file's icon (a page with "PNG"
+/// on it) on the clipboard as a picture too, and that's not what anyone means
+/// to paste.
+pub fn clipboard_file_images() -> Vec<image::RgbaImage> {
+    // Tests paste their own images; whatever the user copied stays out of them.
+    if cfg!(test) {
+        return Vec::new();
+    }
+    let Ok(files) = arboard::Clipboard::new().and_then(|mut c| c.get().file_list()) else { return Vec::new() };
+    files.iter().filter_map(|f| image::open(f).ok()).map(|img| img.to_rgba8()).collect()
 }
 
 /// egui hands over pasted images as `ColorImage`s.

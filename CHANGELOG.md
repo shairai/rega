@@ -10,6 +10,23 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.9 — 2026-11-20
+
+Rotate anything, and bring images in however you like.
+
+- **Rotate** a selected mark: drag the round handle above it (hold Shift
+  for 15° steps), or use **Rotation** in the side panel to type an angle,
+  turn it 90° or stand it upright again. Shapes, lines, pen strokes, text,
+  pasted pictures and stamps turn.
+- **Rotate the whole image** a quarter turn left or right from the new
+  **Rotate** button; everything on it turns along.
+- **Drag images from Finder or Explorer** onto Rega: onto the library to
+  open them, onto an open image to add them as layers.
+- Pasting files copied in Finder now pastes the pictures, not their file
+  icons, and pastes every one you copied, not only the first. **Open
+  image…** also opens TIFF and ICO files.
+- `⌘W`, `⌘Q` and the other shortcuts work with a Hebrew keyboard layout.
+
 ## 0.4.8 — 2026-11-17
 
 Pick a color from anything on screen.
