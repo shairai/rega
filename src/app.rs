@@ -374,7 +374,11 @@ impl RegaApp {
             self.normal_outer = ctx.input(|i| i.viewport().outer_rect);
             self.normal_inner = ctx.input(|i| i.viewport().inner_rect);
         }
-        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        // A primed window (see `platform::prime_hidden_window`) is as good as
+        // hidden already, and must stay on screen to run without delay.
+        if !(self.win == Win::Hidden && platform::is_primed()) {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        }
         platform::set_dock_icon(false);
         self.win = Win::Hidden;
     }
@@ -3221,6 +3225,14 @@ impl eframe::App for RegaApp {
         self.tick_updates(ctx);
         self.tick_install(ctx);
         self.advance_activity(ctx, frame);
+        // Primed for a capture that isn't coming (no permission, a recording
+        // under way, a full-screen shot that needed no overlay): as it was.
+        if platform::is_primed() && !matches!(self.activity, Activity::Pending { .. }) && self.overlay_to_present.is_none() {
+            platform::unprime_window(frame, self.win == Win::Hidden);
+            if self.win == Win::Normal && self.reveal_in.is_none() {
+                platform::set_window_alpha(frame, 1.0);
+            }
+        }
         self.sync_capture_zoom(ctx);
 
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -3384,6 +3396,10 @@ fn setup_hotkeys(ctx: &egui::Context, tx: Sender<AppEvent>) -> (Option<GlobalHot
         if e.state() == HotKeyState::Pressed
             && let Some(ev) = lookup.lock().ok().and_then(|m| m.get(&e.id()).copied())
         {
+            if matches!(ev, AppEvent::Capture(_) | AppEvent::FullScreen) {
+                // From the menu bar, start at once (see the function).
+                platform::prime_hidden_window();
+            }
             let _ = tx.send(ev);
             ctx.request_repaint();
         }

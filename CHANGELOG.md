@@ -10,6 +10,16 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.10 — 2026-11-23
+
+Captures start sooner, and Windows updates install.
+
+- Mac: the capture overlay comes up about twice as fast when Rega is
+  waiting in the menu bar — no more pause after the shortcut.
+- Windows: the installer now closes every running copy of Rega first, so
+  **Update now** isn't stopped by a second copy left in the tray (the
+  update could end with the old version starting again).
+
 ## 0.4.9 — 2026-11-20
 
 Rotate anything, and bring images in however you like.

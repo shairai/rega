@@ -209,12 +209,73 @@ pub fn set_overlay_level(_ctx: &eframe::egui::Context, frame: &eframe::Frame, ov
 #[cfg(target_os = "macos")]
 pub fn present_overlay(frame: &eframe::Frame) {
     if let Some(window) = ns_window(frame) {
+        if PRIMED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            // Out first, as it was before priming: ordered in afresh as a
+            // panel, it lands on the Space in use.
+            window.orderOut(None);
+            window.setIgnoresMouseEvents(false);
+        }
         overlay_panel::enter(&window);
         window.setAlphaValue(0.0);
         window.orderFrontRegardless();
         window.makeKeyWindow();
     }
 }
+
+/// The hidden main window has been brought on screen unseen, see [`prime_hidden_window`].
+#[cfg(target_os = "macos")]
+static PRIMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A capture shortcut was pressed while Rega's window is hidden. eframe waits
+/// 100 ms before it runs a hidden window (twice on the way to the overlay),
+/// which is most of the pause before a capture. So the window is put on
+/// screen where nobody sees or touches it — fully transparent, behind
+/// everything, ignoring the mouse — and eframe runs it at once. The overlay
+/// takes it from there ([`present_overlay`]); anything else puts it back
+/// ([`unprime_window`]). Main thread only (where the shortcut's handler runs).
+#[cfg(target_os = "macos")]
+pub fn prime_hidden_window() {
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        if !window.isVisible() && window.title().to_string() == crate::config::APP_NAME {
+            window.setAlphaValue(0.0);
+            window.setIgnoresMouseEvents(true);
+            window.orderBack(None);
+            PRIMED.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn prime_hidden_window() {}
+
+pub fn is_primed() -> bool {
+    #[cfg(target_os = "macos")]
+    return PRIMED.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+/// The primed window isn't becoming an overlay after all: give it the mouse
+/// back, and with `hide`, take it off screen again, opaque for its next showing.
+#[cfg(target_os = "macos")]
+pub fn unprime_window(frame: &eframe::Frame, hide: bool) {
+    if !PRIMED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(window) = ns_window(frame) {
+        window.setIgnoresMouseEvents(false);
+        if hide {
+            window.orderOut(None);
+            window.setAlphaValue(1.0);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn unprime_window(_frame: &eframe::Frame, _hide: bool) {}
 
 /// Make the window titled `title` (another screen's overlay, an extra egui
 /// window) an overlay panel like the main one, covering the screen at `x`,

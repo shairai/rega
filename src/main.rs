@@ -28,7 +28,7 @@ use std::sync::Arc;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("rega=info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("rega=info")).format_timestamp_millis().init();
 
     // Used by scripts/bundle-macos.sh to produce the .icns.
     // Used by the packaging scripts: `--write-icon <png|ico> <size>` (an .ico

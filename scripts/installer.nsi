@@ -3,6 +3,7 @@
 ; dist\installer-*.bmp artwork (rega --write-branding dist) to exist.
 Unicode true
 !include "MUI2.nsh"
+!include "LogicLib.nsh"
 
 !ifndef EXE
   !define EXE "..\target\release\rega.exe"
@@ -38,7 +39,27 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
+; A running Rega keeps Rega.exe locked, and a locked file ends a silent
+; install (an in-app update) without replacing it. Rega hides in the tray, so
+; a second copy is easily left running: close every copy, then wait until the
+; file can be replaced.
+!macro CloseRega
+  nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM Rega.exe'
+  Pop $0
+  StrCpy $1 0
+  ${Do}
+    ClearErrors
+    Delete "$INSTDIR\Rega.exe"
+    ${IfNot} ${Errors}
+      ${ExitDo}
+    ${EndIf}
+    Sleep 250
+    IntOp $1 $1 + 1
+  ${LoopUntil} $1 >= 40
+!macroend
+
 Section "Install"
+  !insertmacro CloseRega
   SetOutPath "$INSTDIR"
   File /oname=Rega.exe "${EXE}"
   File "..\LICENSE"
@@ -55,7 +76,7 @@ SectionEnd
 Section "Uninstall"
   ; Also remove the launch-at-login entry the app registers.
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Rega"
-  Delete "$INSTDIR\Rega.exe"
+  !insertmacro CloseRega
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

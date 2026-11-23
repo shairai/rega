@@ -1,25 +1,22 @@
 {
-  "version": "0.4.9",
-  "date": "2026-11-20",
-  "title": "Rotate anything, and bring images in however you like.",
+  "version": "0.4.10",
+  "date": "2026-11-23",
+  "title": "Captures start sooner, and Windows updates install.",
   "notes": [
-    "Rotate a selected mark: drag the round handle above it (hold Shift for 15° steps), or use Rotation in the side panel to type an angle, turn it 90° or stand it upright again. Shapes, lines, pen strokes, text, pasted pictures and stamps turn.",
-    "Rotate the whole image a quarter turn left or right from the new Rotate button; everything on it turns along.",
-    "Drag images from Finder or Explorer onto Rega: onto the library to open them, onto an open image to add them as layers.",
-    "Pasting files copied in Finder now pastes the pictures, not their file icons, and pastes every one you copied, not only the first. Open image… also opens TIFF and ICO files.",
-    "⌘W, ⌘Q and the other shortcuts work with a Hebrew keyboard layout."
+    "Mac: the capture overlay comes up about twice as fast when Rega is waiting in the menu bar — no more pause after the shortcut.",
+    "Windows: the installer now closes every running copy of Rega first, so Update now isn't stopped by a second copy left in the tray (the update could end with the old version starting again)."
   ],
   "url": "https://rega-capture.vercel.app/#download",
   "downloads": {
     "macos": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.9-macos-universal.dmg",
-      "size": 15963304,
-      "sha256": "b33b8658fec5a8f2aab0bc523122e8a801fe2ed783c6786d6c8935e430d9a689"
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.10-macos-universal.dmg",
+      "size": 15969030,
+      "sha256": "98406dd1c1eca3f2f974635fc4dfa8d85110df0d1acef9deaddd95057e63949a"
     },
     "windows": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.9-windows-x64-setup.exe",
-      "size": 6627030,
-      "sha256": "7de18e3ee294cfecc07a19d8f82eadc8f48b1347eda6b95768d57dc843b1c168"
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.10-windows-x64-setup.exe",
+      "size": 6637848,
+      "sha256": "c7f63ea23d1129ff6ca5247aa0063330670accebefa71b11bc0e8b8b252e33df"
     }
   }
 }
