@@ -299,6 +299,28 @@ pub fn present_extra_overlay(title: &str, x: f32, y: f32, w: f32, h: f32) -> boo
     true
 }
 
+/// The capture is over: turn the other screens' overlay windows back into
+/// what winit made, before they close. winit's window delegate stops
+/// observing its window when it goes, and AppKit throws (which ends Rega) if
+/// the window is still the panel class it was swapped to.
+#[cfg(target_os = "macos")]
+pub fn release_extra_overlays() {
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let prefix = format!("{} overlay ", crate::config::APP_NAME);
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        if window.title().to_string().starts_with(&prefix) {
+            window.orderOut(None);
+            overlay_panel::leave(&window);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn release_extra_overlays() {}
+
 /// Windows: the extra overlay windows are created always on top already.
 #[cfg(not(target_os = "macos"))]
 pub fn present_extra_overlay(_title: &str, _x: f32, _y: f32, _w: f32, _h: f32) -> bool {

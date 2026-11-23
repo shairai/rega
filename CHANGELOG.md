@@ -10,6 +10,15 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.11 — 2026-11-23
+
+Fixes a crash with more than one screen.
+
+- Mac: with two or more screens, Rega 0.4.10 could quit when a capture
+  ended or was cancelled. Fixed.
+- If Rega ever does quit unexpectedly, it now notes why in `crash.log` in
+  its settings folder, to send along with a bug report.
+
 ## 0.4.10 — 2026-11-23
 
 Captures start sooner, and Windows updates install.

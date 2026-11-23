@@ -30,6 +30,8 @@ use eframe::egui;
 fn main() -> eframe::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("rega=info")).format_timestamp_millis().init();
 
+    log_panics();
+
     // Used by scripts/bundle-macos.sh to produce the .icns.
     // Used by the packaging scripts: `--write-icon <png|ico> <size>` (an .ico
     // gets every size) and `--write-branding <dir>` (DMG / installer artwork).
@@ -93,4 +95,29 @@ fn prefer_native_renderer(options: &mut eframe::egui_wgpu::WgpuConfiguration) {
         setup.instance_descriptor.backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::DX12 | wgpu::Backends::GL);
         setup.power_preference = wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::LowPower);
     }
+}
+
+/// Keep what a panic says. A panic while macOS is calling into Rega (a redraw,
+/// say) ends as an abort, and the system's crash report has neither the
+/// message nor the line. Appended to `crash.log` next to the settings, on top
+/// of the usual message on stderr.
+fn log_panics() {
+    let usual = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = dirs::config_dir().map(|d| d.join(config::APP_NAME)) {
+            use std::io::Write;
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+                let thread = std::thread::current();
+                let _ = writeln!(
+                    f,
+                    "{} Rega {} on thread {:?}: {info}",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                    env!("CARGO_PKG_VERSION"),
+                    thread.name().unwrap_or("unnamed"),
+                );
+            }
+        }
+        usual(info);
+    }));
 }

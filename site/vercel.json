@@ -59,12 +59,12 @@
   "redirects": [
     {
       "source": "/download/mac",
-      "destination": "/downloads/Rega-0.4.10-macos-universal.dmg",
+      "destination": "/downloads/Rega-0.4.11-macos-universal.dmg",
       "permanent": false
     },
     {
       "source": "/download/windows",
-      "destination": "/downloads/Rega-0.4.10-windows-x64-setup.exe",
+      "destination": "/downloads/Rega-0.4.11-windows-x64-setup.exe",
       "permanent": false
     },
     {
