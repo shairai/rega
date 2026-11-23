@@ -84,7 +84,13 @@ if [[ "$LIVE" != "$VERSION" ]]; then
   echo "matches the project's domain in the Vercel dashboard."
   exit 1
 fi
+# The installers can take a few seconds longer than latest.json to be served.
 for slug in mac windows; do
-  curl -fsSIL -o /dev/null "${SITE_URL}/download/${slug}" || { echo "${SITE_URL}/download/${slug} doesn't download"; exit 1; }
+  ok=""
+  for _ in $(seq 12); do
+    curl -fsSIL -o /dev/null "${SITE_URL}/download/${slug}" 2>/dev/null && { ok=1; break; }
+    sleep 5
+  done
+  [[ -n "$ok" ]] || { echo "${SITE_URL}/download/${slug} doesn't download"; exit 1; }
 done
 echo "Live: ${SITE_URL} — Rega ${VERSION}"

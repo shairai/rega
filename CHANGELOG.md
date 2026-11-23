@@ -10,6 +10,29 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.13 — 2026-11-23
+
+Select and move part of a picture, resize the canvas, one Shape tool.
+
+- **Select area**, a new tool (`G`): drag over part of the picture, then
+  drag it somewhere else. It lifts off as a picture you can move, resize,
+  turn or delete; hold `⌥` / `Alt` to drag a copy. `⌘X` cuts the area,
+  `⌘C` copies it, `⌫` deletes it.
+- **Change the canvas size** by dragging the handles on the image's edge:
+  outward to add space around the picture, inward to trim it.
+- Rectangle and Ellipse are one tool now, **Shape**: pick which in the
+  side panel, where a selected shape can also be turned into the other.
+  `R` and `E` still pick them.
+- **New** starts at the size of the image on the clipboard, when there is
+  one, so it can be pasted onto a canvas that fits it.
+- A pasted image keeps its own size whenever the canvas can hold it; it
+  used to shrink to 80% of the canvas.
+- Marks reaching past the canvas edge are cut off there on screen, as they
+  are in the saved image.
+- A copied mark also goes on the clipboard as a picture, so it can be
+  pasted into a new image (which opens at its size) or another app.
+- `⌘X` / `Ctrl+X` also cuts a selected mark.
+
 ## 0.4.12 — 2026-11-23
 
 Fixes a crash with more than one screen.

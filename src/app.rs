@@ -545,7 +545,7 @@ impl RegaApp {
             }
             AppEvent::NewImage => {
                 self.show_normal(ctx, frame);
-                self.show_new_dialog = true;
+                self.open_new_dialog();
             }
             AppEvent::OpenImage => {
                 self.show_normal(ctx, frame);
@@ -1129,7 +1129,7 @@ impl RegaApp {
             self.quit(ctx);
         }
         if new {
-            self.show_new_dialog = true;
+            self.open_new_dialog();
         }
         if open {
             self.import_from_dialog();
@@ -1195,8 +1195,29 @@ impl RegaApp {
         create
     }
 
+    /// Open the New form as a dialog (⌘N).
+    fn open_new_dialog(&mut self) {
+        self.show_new_dialog = true;
+        self.size_new_canvas_from_clipboard();
+    }
+
+    /// As the New form opens: with an image on the clipboard, offer a canvas
+    /// its size (under Custom size), ready to paste it onto.
+    fn size_new_canvas_from_clipboard(&mut self) {
+        // Tests don't read the real clipboard.
+        if cfg!(test) {
+            return;
+        }
+        if let Some(img) = platform::clipboard_image() {
+            self.new_canvas.fit(img.width(), img.height());
+        }
+    }
+
     /// The New form as a dropdown under a button.
     fn new_canvas_popup(&mut self, anchor: &egui::Response) {
+        if anchor.clicked() {
+            self.size_new_canvas_from_clipboard();
+        }
         let mut create = false;
         egui::Popup::menu(anchor).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             if self.new_canvas_form(ui) {
@@ -1359,9 +1380,9 @@ impl RegaApp {
                 actions.push(ed.end_frame(&ctx));
                 actions.push(ed.autosave(&ctx));
                 // The tool picked becomes the one new captures open with (not
-                // Crop: that's a one-off).
+                // Crop or Select area: those are one-offs).
                 let tool = ed.tool();
-                if tool != Tool::Crop && self.settings.editor_tool.as_deref() != Some(tool.key().as_str()) {
+                if !matches!(tool, Tool::Crop | Tool::Marquee) && self.settings.editor_tool.as_deref() != Some(tool.key().as_str()) {
                     self.settings.editor_tool = Some(tool.key());
                     self.settings.save();
                 }
@@ -2919,6 +2940,18 @@ impl Default for NewCanvas {
     }
 }
 
+impl NewCanvas {
+    /// Take the size `width` × `height` (an image's), as near as a canvas
+    /// can be. A kept ratio becomes that size's.
+    fn fit(&mut self, width: u32, height: u32) {
+        self.width = width.clamp(*CANVAS_SIDES.start(), *CANVAS_SIDES.end());
+        self.height = height.clamp(*CANVAS_SIDES.start(), *CANVAS_SIDES.end());
+        if self.ratio.is_some() {
+            self.ratio = Some((self.width, self.height));
+        }
+    }
+}
+
 /// Sides a new canvas can have, in pixels.
 const CANVAS_SIDES: std::ops::RangeInclusive<u32> = 16..=8000;
 
@@ -3782,6 +3815,16 @@ mod tests {
     /// one side scales the other; open, each side is its own; a size out of
     /// range comes back in range when its box loses focus. Set
     /// `NEW_FORM_PREVIEW_DIR` to save the form.
+    /// With an image on the clipboard, the New form offers its size.
+    #[test]
+    fn a_new_canvas_takes_the_copied_images_size() {
+        let mut nc = super::NewCanvas { ratio: Some((1280, 800)), ..Default::default() };
+        nc.fit(1512, 867);
+        assert_eq!((nc.width, nc.height, nc.ratio), (1512, 867, Some((1512, 867))));
+        nc.fit(4, 20_000);
+        assert_eq!((nc.width, nc.height), (16, 8000), "within what a canvas can be");
+    }
+
     #[test]
     fn new_canvas_sizes_and_kept_ratio() {
         use egui::accesskit::Role;

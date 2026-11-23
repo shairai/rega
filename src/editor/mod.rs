@@ -24,10 +24,12 @@ pub const ANNOT_FONT: &str = "annot";
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
     Select,
+    /// Select an area of the picture, to move, cut, copy or delete it.
+    Marquee,
     Arrow,
     Line,
-    Rect,
-    Ellipse,
+    /// A rectangle or an ellipse, as picked in the side panel.
+    Shape,
     Pen,
     Highlight,
     Text,
@@ -44,10 +46,10 @@ pub enum Tool {
 impl Tool {
     const ALL: [Tool; 16] = [
         Tool::Select,
+        Tool::Marquee,
         Tool::Arrow,
         Tool::Line,
-        Tool::Rect,
-        Tool::Ellipse,
+        Tool::Shape,
         Tool::Pen,
         Tool::Highlight,
         Tool::Text,
@@ -68,6 +70,10 @@ impl Tool {
 
     /// The tool `key` names; `None` for a name this version doesn't know.
     pub fn from_key(key: &str) -> Option<Tool> {
+        // Rectangle and ellipse were tools of their own before they became Shape.
+        if matches!(key, "Rect" | "Ellipse") {
+            return Some(Tool::Shape);
+        }
         Tool::ALL.into_iter().find(|t| t.key() == key)
     }
 
@@ -76,10 +82,11 @@ impl Tool {
         use crate::theme::icon;
         match self {
             Tool::Select => (icon::SELECT, "Select & move", Key::V),
+            Tool::Marquee => ("", "Select area", Key::G),
             Tool::Arrow => (icon::ARROW, "Arrow", Key::A),
             Tool::Line => (icon::LINE, "Line", Key::L),
-            Tool::Rect => (icon::RECT, "Rectangle", Key::R),
-            Tool::Ellipse => (icon::ELLIPSE, "Ellipse", Key::E),
+            // `R` picks it as a rectangle; `E` picks it as an ellipse (see `shortcuts`).
+            Tool::Shape => ("", "Shape", Key::R),
             Tool::Pen => (icon::PEN, "Pen", Key::P),
             Tool::Highlight => (icon::MARKER, "Highlighter", Key::H),
             Tool::Text => (icon::TEXT, "Text & callout", Key::T),
@@ -100,8 +107,7 @@ impl Tool {
         Some(match kind {
             Kind::Arrow { .. } => Tool::Arrow,
             Kind::Line { .. } => Tool::Line,
-            Kind::Rect { .. } => Tool::Rect,
-            Kind::Ellipse { .. } => Tool::Ellipse,
+            Kind::Rect { .. } | Kind::Ellipse { .. } => Tool::Shape,
             Kind::Pen { .. } => Tool::Pen,
             Kind::Highlight { .. } => Tool::Highlight,
             Kind::Text { .. } => Tool::Text,
@@ -119,7 +125,7 @@ impl Tool {
     fn draws_by_drag(self) -> bool {
         matches!(
             self,
-            Tool::Arrow | Tool::Line | Tool::Rect | Tool::Ellipse | Tool::Pen | Tool::Highlight | Tool::Magnify | Tool::Blur | Tool::Spotlight
+            Tool::Arrow | Tool::Line | Tool::Shape | Tool::Pen | Tool::Highlight | Tool::Magnify | Tool::Blur | Tool::Spotlight
         )
     }
 }
@@ -130,6 +136,8 @@ struct Props {
     color: bool,
     width: Option<&'static str>,
     fill: bool,
+    /// Rectangle or ellipse.
+    shape: bool,
     text: bool,
     step: bool,
     stamp: bool,
@@ -144,8 +152,9 @@ impl Props {
         let color = true;
         match tool {
             Tool::Select => Props { hint: Some("Click a mark to see and change its properties."), ..Default::default() },
+            Tool::Marquee => Props { hint: Some("Drag over part of the picture, then drag it somewhere else, or cut, copy or delete it."), ..Default::default() },
             Tool::Arrow | Tool::Line | Tool::Pen => Props { color, width: Some("Line width"), ..Default::default() },
-            Tool::Rect | Tool::Ellipse => Props { color, width: Some("Line width"), fill: true, ..Default::default() },
+            Tool::Shape => Props { color, width: Some("Line width"), fill: true, shape: true, ..Default::default() },
             Tool::Highlight => Props { color, width: Some("Thickness"), ..Default::default() },
             Tool::Text => Props { color, text: true, ..Default::default() },
             Tool::Step => Props { color, step: true, ..Default::default() },
@@ -166,6 +175,17 @@ fn paint_tool_icon(tool: Tool, p: &egui::Painter, c: Pos2, color: Color32) {
     let s = Stroke::new(2.0, color);
     let v = Vec2::new;
     match tool {
+        Tool::Marquee => {
+            // A dashed box: each 17 pt side is dash, gap, dash, gap, dash.
+            let r = Rect::from_center_size(c, Vec2::splat(17.0));
+            let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            p.extend(Shape::dashed_line(&pts, s, 4.0, 2.5));
+        }
+        Tool::Shape => {
+            // A rectangle with an ellipse over its corner: the tool draws both.
+            p.rect_stroke(Rect::from_min_max(c + v(-10.0, -9.5), c + v(3.5, 3.0)), 1.5, s, StrokeKind::Middle);
+            p.circle_stroke(c + v(3.5, 3.5), 6.5, s);
+        }
         Tool::Stamp => {
             p.circle_stroke(c, 9.5, s);
             p.add(Shape::line(vec![c + v(-4.5, 0.5), c + v(-1.2, 3.8), c + v(4.8, -3.2)], s));
@@ -265,6 +285,18 @@ fn paint_resize_handle(painter: &egui::Painter, c: Pos2, hot: bool) {
     painter.rect_filled(r.translate(Vec2::new(0.0, 0.5)).expand(1.0), 3.0, Color32::from_black_alpha(35));
     painter.rect_filled(r, 2.0, if hot { crate::theme::ACCENT } else { Color32::WHITE });
     painter.rect_stroke(r, 2.0, Stroke::new(1.5, if hot { Color32::WHITE } else { crate::theme::ACCENT }), StrokeKind::Inside);
+}
+
+/// Where the canvas-size handles sit on the image, as fractions of its width
+/// and height.
+const CANVAS_HANDLES: [(f32, f32); 8] =
+    [(0.0, 0.0), (0.5, 0.0), (1.0, 0.0), (0.0, 0.5), (1.0, 0.5), (0.0, 1.0), (0.5, 1.0), (1.0, 1.0)];
+
+/// A canvas-size handle: smaller and quieter than a mark's, until hovered.
+fn paint_canvas_handle(painter: &egui::Painter, c: Pos2, hot: bool) {
+    let r = Rect::from_center_size(c, Vec2::splat(if hot { 10.0 } else { 7.0 }));
+    painter.rect_filled(r.expand(1.0), 2.0, Color32::from_black_alpha(90));
+    painter.rect_filled(r, 1.5, if hot { crate::theme::ACCENT } else { Color32::from_gray(225) });
 }
 
 /// How far (screen points) the rotate handle sits above a selected mark's outline.
@@ -472,6 +504,8 @@ pub struct Editor {
     parked_width: f32,
     font_size: f32,
     filled: bool,
+    /// The Shape tool draws ellipses rather than rectangles.
+    ellipse: bool,
     text_bg: bool,
     stamp: Stamp,
     stamp_size: f32,
@@ -498,6 +532,24 @@ pub struct Editor {
 
     drawing: Option<Annotation>,
     crop_drag: Option<(P, P)>,
+    /// The area picked with the Select area tool: two opposite corners, as
+    /// dragged. `marquee_rect` gives it in whole pixels inside the canvas.
+    marquee: Option<(P, P)>,
+    /// That area is still being dragged out.
+    marquee_drag: bool,
+    /// ⌥ / Alt is held: dragging the area moves a copy of it.
+    alt_down: bool,
+    /// Fill the hole an area leaves with the colour around it (else leave it
+    /// see-through).
+    auto_fill: bool,
+    /// A handle on the image's edge being dragged to change the canvas size:
+    /// which one (see `canvas_handles`) and where the pointer is.
+    canvas_drag: Option<(usize, P)>,
+    /// Something to tell the user, from a button or menu that can't return it.
+    notice: Option<String>,
+    /// Whether the image has see-through pixels, and for which image that was
+    /// worked out (the `Weak` keeps its address from being reused).
+    transparent: (std::sync::Weak<RgbaImage>, bool),
     selected: Option<usize>,
     /// The mark copied with ⌘C, for ⌘V to duplicate.
     copied: Option<CopiedElement>,
@@ -564,6 +616,7 @@ impl Editor {
             parked_width: HIGHLIGHT_WIDTH,
             font_size: (unit * 7.0).round(),
             filled: false,
+            ellipse: false,
             text_bg: false,
             stamp: Stamp::Check,
             stamp_size: (unit * 14.0).round(),
@@ -581,6 +634,13 @@ impl Editor {
             texture_dirty: true,
             drawing: None,
             crop_drag: None,
+            marquee: None,
+            marquee_drag: false,
+            alt_down: false,
+            auto_fill: true,
+            canvas_drag: None,
+            notice: None,
+            transparent: (std::sync::Weak::new(), false),
             selected: None,
             copied: None,
             moving: None,
@@ -740,10 +800,13 @@ impl Editor {
         self.next_step = s.next_step;
         self.selected = None;
         self.editing_text = None;
+        self.marquee = None;
         self.mark_changed();
     }
 
     fn push_undo(&mut self) {
+        // The picked area was of the picture as it was.
+        self.marquee = None;
         self.undo.push(self.state());
         if self.undo.len() > 100 {
             self.undo.remove(0);
@@ -823,6 +886,9 @@ impl Editor {
             std::mem::swap(&mut self.color, &mut self.parked_color);
             std::mem::swap(&mut self.width, &mut self.parked_width);
         }
+        if tool != Tool::Marquee {
+            self.marquee = None;
+        }
         self.tool = tool;
     }
 
@@ -834,6 +900,16 @@ impl Editor {
         if tool != Tool::Select
             && self.selected.and_then(|i| self.anns.get(i)).is_some_and(|a| Tool::for_kind(&a.kind) != Some(tool))
         {
+            self.selected = None;
+        }
+    }
+
+    /// Have the Shape tool draw ellipses, or rectangles (from the keyboard).
+    /// A selected shape of the other sort is let go, so the panel shows the
+    /// one about to be drawn.
+    fn pick_shape(&mut self, ellipse: bool) {
+        if self.ellipse != ellipse {
+            self.ellipse = ellipse;
             self.selected = None;
         }
     }
@@ -869,6 +945,234 @@ impl Editor {
         self.base = Arc::new(render::render(&self.base, &merged, &Effects::default()));
         self.base_changed = true;
         self.selected = None;
+        self.texture_dirty = true;
+    }
+
+    /// The picked area in whole pixels inside the canvas, (x, y, width,
+    /// height); `None` when there is none or it is under two pixels a side.
+    fn marquee_rect(&self) -> Option<(u32, u32, u32, u32)> {
+        let (a, b) = self.marquee?;
+        let (min, max) = norm(a, b);
+        let (w, h) = (self.base.width() as f32, self.base.height() as f32);
+        let (x0, y0) = (min.x.clamp(0.0, w).round(), min.y.clamp(0.0, h).round());
+        let (x1, y1) = (max.x.clamp(0.0, w).round(), max.y.clamp(0.0, h).round());
+        (x1 - x0 >= 2.0 && y1 - y0 >= 2.0).then_some((x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
+    }
+
+    /// `p` is inside the picked area (once it has been dragged out).
+    fn in_marquee(&self, p: P) -> bool {
+        !self.marquee_drag
+            && self.marquee_rect().is_some_and(|(x, y, w, h)| {
+                p.x >= x as f32 && p.y >= y as f32 && p.x <= (x + w) as f32 && p.y <= (y + h) as f32
+            })
+    }
+
+    /// The area as it looks, every mark included.
+    fn area_view(&self, (x, y, w, h): (u32, u32, u32, u32)) -> RgbaImage {
+        let view = render::render(&self.base, &self.anns, &Effects::default());
+        image::imageops::crop_imm(&view, x, y, w, h).to_image()
+    }
+
+    /// What a hole at this place is filled with. With auto-fill, the colour
+    /// around it when that is one colour (a word lifted off a page leaves
+    /// page); otherwise nothing, so the hole is see-through.
+    fn hole_fill(&self, (x, y, w, h): (u32, u32, u32, u32)) -> image::Rgba<u8> {
+        let clear = image::Rgba([0, 0, 0, 0]);
+        if !self.auto_fill {
+            return clear;
+        }
+        let (bw, bh) = self.base.dimensions();
+        let mut ring = Vec::new();
+        for row in [y.checked_sub(1), (y + h < bh).then_some(y + h)].into_iter().flatten() {
+            ring.extend((x.saturating_sub(1)..(x + w + 1).min(bw)).map(|col| *self.base.get_pixel(col, row)));
+        }
+        for col in [x.checked_sub(1), (x + w < bw).then_some(x + w)].into_iter().flatten() {
+            ring.extend((y..y + h).map(|row| *self.base.get_pixel(col, row)));
+        }
+        // Near-equal colours count as one (a JPEG's page is never one white).
+        let shade = |p: &image::Rgba<u8>| p.0.map(|c| c >> 3);
+        let mut counts: HashMap<[u8; 4], usize> = HashMap::new();
+        for p in &ring {
+            *counts.entry(shade(p)).or_default() += 1;
+        }
+        match counts.into_iter().max_by_key(|&(_, n)| n) {
+            Some((most, n)) if n * 100 >= ring.len() * 85 => ring.into_iter().find(|p| shade(p) == most).unwrap_or(clear),
+            _ => clear,
+        }
+    }
+
+    /// Take the area out of the picture, leaving a hole (see `hole_fill`).
+    /// Returns what was there, and where among the marks it belongs if it is
+    /// put back as a picture so the canvas looks as it did.
+    ///
+    /// What was there is the screenshot as it shows (blurs, fills and the like
+    /// included) and the marks lying wholly inside the area, which go with it.
+    /// Marks that only reach into the area stay where they are, on top. A
+    /// pasted picture that reaches into it is merged into the screenshot
+    /// first, with what is under it, so that a piece of it can be taken.
+    fn take_area(&mut self, area: (u32, u32, u32, u32)) -> (RgbaImage, usize) {
+        let (x, y, w, h) = area;
+        self.commit_text();
+        self.push_undo();
+        let (lo, hi) = (P::new(x as f32, y as f32), P::new((x + w) as f32, (y + h) as f32));
+        // A mark's box, with half the line's thickness for outlines.
+        let reach = |a: &Annotation| {
+            let m = match a.kind {
+                Kind::Arrow { .. } | Kind::Line { .. } | Kind::Rect { .. } | Kind::Ellipse { .. } | Kind::Magnify { .. } => a.width / 2.0,
+                _ => 0.0,
+            };
+            let (min, max) = a.bounds();
+            (P::new(min.x - m, min.y - m), P::new(max.x + m, max.y + m))
+        };
+        // A spotlight dims the whole picture around its box, so it never goes along.
+        let inside = |a: &Annotation| {
+            let (min, max) = reach(a);
+            !matches!(a.kind, Kind::Spotlight { .. }) && min.x >= lo.x - 0.5 && min.y >= lo.y - 0.5 && max.x <= hi.x + 0.5 && max.y <= hi.y + 0.5
+        };
+        let touches = |a: &Annotation| {
+            let (min, max) = reach(a);
+            min.x < hi.x && max.x > lo.x && min.y < hi.y && max.y > lo.y
+        };
+        if let Some(i) = self.anns.iter().rposition(|a| matches!(a.kind, Kind::Image { .. }) && touches(a) && !inside(a)) {
+            let merged: Vec<Annotation> = self.anns.drain(..=i).collect();
+            self.base = Arc::new(render::render(&self.base, &merged, &Effects::default()));
+        }
+        let taken: Vec<bool> = self.anns.iter().map(inside).collect();
+        let shown: Vec<Annotation> = self.anns.iter().zip(&taken).filter(|(a, t)| **t || a.is_raster()).map(|(a, _)| a.clone()).collect();
+        let view = (!shown.is_empty()).then(|| render::render(&self.base, &shown, &Effects::default()));
+        let piece = image::imageops::crop_imm(view.as_ref().unwrap_or(&self.base), x, y, w, h).to_image();
+        let mut taken = taken.into_iter();
+        self.anns.retain(|_| !taken.next().unwrap_or(false));
+
+        let fill = self.hole_fill(area);
+        let mut base = (*self.base).clone();
+        for row in y..y + h {
+            for col in x..x + w {
+                base.put_pixel(col, row, fill);
+            }
+        }
+        self.base = Arc::new(base);
+        self.base_changed = true;
+        self.texture_dirty = true;
+        self.selected = None;
+        let at = self.anns.iter().position(|a| !a.is_raster() && touches(a)).unwrap_or(self.anns.len());
+        (piece, at)
+    }
+
+    /// Turn the picked area into a picture on the canvas, selected, to move,
+    /// resize or turn like a pasted one. It leaves a hole behind, unless
+    /// `copy`: then the picture is a copy and the screenshot stays whole.
+    fn lift_marquee(&mut self, copy: bool) -> Option<usize> {
+        let area @ (x, y, w, h) = self.marquee_rect()?;
+        let (piece, at) = if copy {
+            self.commit_text();
+            let piece = self.area_view(area);
+            self.push_undo();
+            (piece, self.anns.len())
+        } else {
+            self.take_area(area)
+        };
+        self.anns.insert(at, Annotation {
+            kind: Kind::Image { pos: P::new(x as f32, y as f32), w: w as f32, h: h as f32, img: Arc::new(piece) },
+            color: from_c32(self.color),
+            width: self.width,
+            filled: false,
+            rotation: 0.0,
+        });
+        self.selected = Some(at);
+        Some(at)
+    }
+
+    /// ⌘X on the picked area: onto the clipboard, leaving a hole.
+    fn cut_marquee(&mut self) -> EditorAction {
+        let Some(area) = self.marquee_rect() else { return EditorAction::None };
+        let (piece, _) = self.take_area(area);
+        self.copied = None;
+        match crate::platform::copy_image(&piece) {
+            Ok(()) => EditorAction::Toast("Area cut — paste to place it".into()),
+            Err(e) => {
+                self.undo();
+                EditorAction::Toast(format!("Cut failed: {e}"))
+            }
+        }
+    }
+
+    /// ⌘C on the picked area: as it looks, onto the clipboard.
+    fn copy_marquee(&mut self) -> EditorAction {
+        let Some(area) = self.marquee_rect() else { return EditorAction::None };
+        self.commit_text();
+        self.copied = None;
+        match crate::platform::copy_image(&self.area_view(area)) {
+            Ok(()) => EditorAction::Toast("Area copied to clipboard".into()),
+            Err(e) => EditorAction::Toast(format!("Copy failed: {e}")),
+        }
+    }
+
+    /// ⌫ on the picked area: leave a hole.
+    fn delete_marquee(&mut self) {
+        if let Some(area) = self.marquee_rect() {
+            self.take_area(area);
+        }
+    }
+
+    /// Say what a button or menu did, from where no `EditorAction` can be returned.
+    fn note(&mut self, action: EditorAction) {
+        if let EditorAction::Toast(text) = action {
+            self.notice = Some(text);
+        }
+    }
+
+    /// The eight handles on the image's edge that change the canvas size, in
+    /// image coordinates: by rows, top-left to bottom-right, without the middle.
+    fn canvas_handles(&self) -> [P; 8] {
+        let (w, h) = (self.base.width() as f32, self.base.height() as f32);
+        CANVAS_HANDLES.map(|(fx, fy)| P::new(w * fx, h * fy))
+    }
+
+    /// The canvas handle under `p`, if any.
+    fn canvas_handle_at(&self, p: P) -> Option<usize> {
+        self.canvas_handles().iter().position(|h| h.dist(p) <= HANDLE_GRAB / self.zoom)
+    }
+
+    /// The canvas the handle being dragged asks for, as (left, top, right,
+    /// bottom) in the image's pixels now: outside it to add space, inside to
+    /// trim. At least 8 px a side, at most [`MAX_RESIZE`].
+    fn canvas_drag_rect(&self) -> Option<(i64, i64, i64, i64)> {
+        let (k, p) = self.canvas_drag?;
+        let (fx, fy) = CANVAS_HANDLES[k];
+        let (w, h) = (self.base.width() as i64, self.base.height() as i64);
+        let (px, py) = (p.x.round() as i64, p.y.round() as i64);
+        let (mut x0, mut y0, mut x1, mut y1) = (0, 0, w, h);
+        if fx == 0.0 {
+            x0 = px.clamp(w - MAX_RESIZE.0 as i64, w - 8);
+        } else if fx == 1.0 {
+            x1 = px.clamp(8, MAX_RESIZE.0 as i64);
+        }
+        if fy == 0.0 {
+            y0 = py.clamp(h - MAX_RESIZE.1 as i64, h - 8);
+        } else if fy == 1.0 {
+            y1 = py.clamp(8, MAX_RESIZE.1 as i64);
+        }
+        Some((x0, y0, x1, y1))
+    }
+
+    /// Make the canvas the box (left, top, right, bottom) of the image's
+    /// pixels now. New space takes the canvas colour, or is see-through (see
+    /// `background_fill`); what falls outside is trimmed. Marks stay put.
+    fn set_canvas(&mut self, (x0, y0, x1, y1): (i64, i64, i64, i64)) {
+        let (w, h) = (self.base.width() as i64, self.base.height() as i64);
+        if (x0, y0, x1, y1) == (0, 0, w, h) || x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        self.commit_text();
+        self.push_undo();
+        let mut canvas = RgbaImage::from_pixel((x1 - x0) as u32, (y1 - y0) as u32, self.background_fill());
+        image::imageops::replace(&mut canvas, &*self.base, -x0, -y0);
+        self.base = Arc::new(canvas);
+        self.base_changed = true;
+        for a in &mut self.anns {
+            a.translate(-x0 as f32, -y0 as f32);
+        }
         self.texture_dirty = true;
     }
 
@@ -1004,6 +1308,23 @@ impl Editor {
     fn canvas_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(200.0);
         let target = self.menu_target.filter(|&i| i < self.anns.len());
+        if target.is_none() && self.marquee_rect().is_some() {
+            if ui.button("Cut area").clicked() {
+                let done = self.cut_marquee();
+                self.note(done);
+                ui.close();
+            }
+            if ui.button("Copy area").clicked() {
+                let done = self.copy_marquee();
+                self.note(done);
+                ui.close();
+            }
+            if ui.button(egui::RichText::new("Delete area").color(crate::theme::DANGER)).clicked() {
+                self.delete_marquee();
+                ui.close();
+            }
+            ui.separator();
+        }
         if let Some(i) = target
             && matches!(self.anns[i].kind, Kind::Image { .. })
             && ui
@@ -1040,8 +1361,8 @@ impl Editor {
         let kind = match self.tool {
             Tool::Arrow => Kind::Arrow { a: p, b: p },
             Tool::Line => Kind::Line { a: p, b: p },
-            Tool::Rect => Kind::Rect { a: p, b: p },
-            Tool::Ellipse => Kind::Ellipse { a: p, b: p },
+            Tool::Shape if self.ellipse => Kind::Ellipse { a: p, b: p },
+            Tool::Shape => Kind::Rect { a: p, b: p },
             Tool::Pen => Kind::Pen { pts: vec![p] },
             Tool::Highlight => Kind::Highlight { pts: vec![p] },
             Tool::Blur => Kind::Blur { a: p, b: p, style: self.blur_style, strength: self.blur_strength },
@@ -1077,12 +1398,34 @@ impl Editor {
             self.resizing = Some((i, k));
             return;
         }
+        if let Some(k) = self.canvas_handle_at(p) {
+            self.canvas_drag = Some((k, p));
+            return;
+        }
         match self.tool {
             Tool::Select => {
                 self.select(self.hit_test(p));
                 if self.selected.is_some() {
                     self.moving = Some(p);
                     self.moved = false;
+                }
+            }
+            Tool::Marquee => {
+                let tol = 4.0 / self.zoom;
+                if self.in_marquee(p) {
+                    // Dragging the area lifts it off the picture and moves it.
+                    if self.lift_marquee(self.alt_down).is_some() {
+                        self.moving = Some(p);
+                        self.moved = true;
+                    }
+                } else if self.selected.and_then(|i| self.anns.get(i)).is_some_and(|a| a.hit(p, tol)) {
+                    // What was lifted (or any selected mark) can be moved again.
+                    self.moving = Some(p);
+                    self.moved = false;
+                } else {
+                    self.selected = None;
+                    self.marquee = Some((p, p));
+                    self.marquee_drag = true;
                 }
             }
             Tool::Crop => self.crop_drag = Some((p, p)),
@@ -1096,6 +1439,10 @@ impl Editor {
     }
 
     fn drag_update(&mut self, p: P, constrain: bool) {
+        if let Some((k, _)) = self.canvas_drag {
+            self.canvas_drag = Some((k, p));
+            return;
+        }
         if self.tool == Tool::Eraser {
             self.erase_at(p);
             return;
@@ -1153,6 +1500,12 @@ impl Editor {
             self.mark_changed();
             return;
         }
+        if self.marquee_drag {
+            if let Some((a, _)) = self.marquee {
+                self.marquee = Some((a, if constrain { square(a, p) } else { p }));
+            }
+            return;
+        }
         if let (Some(last), Some(i)) = (self.moving, self.selected) {
             if !self.moved {
                 self.push_undo();
@@ -1201,6 +1554,11 @@ impl Editor {
     }
 
     fn drag_end(&mut self) {
+        if let Some(to) = self.canvas_drag_rect() {
+            self.canvas_drag = None;
+            self.set_canvas(to);
+            return;
+        }
         let dragged = self
             .resizing
             .map(|(i, _)| i)
@@ -1218,6 +1576,10 @@ impl Editor {
         }
         if let Some((a, b)) = self.crop_drag.take() {
             self.crop(a, b);
+        }
+        if std::mem::take(&mut self.marquee_drag) {
+            // Kept as the whole pixels it covers; a slip of the hand is dropped.
+            self.marquee = self.marquee_rect().map(|(x, y, w, h)| (P::new(x as f32, y as f32), P::new((x + w) as f32, (y + h) as f32)));
         }
         if let Some(mut ann) = self.drawing.take()
             && !ann.is_degenerate() {
@@ -1244,7 +1606,23 @@ impl Editor {
         if self.rotate_handle().is_some_and(|(_, handle, _)| handle.dist(p) <= HANDLE_GRAB / self.zoom) {
             return;
         }
+        // Nor does a click on a canvas handle draw anything.
+        if self.canvas_handle_at(p).is_some() {
+            return;
+        }
         let hit = self.hit_test(p);
+        if self.tool == Tool::Marquee {
+            // Inside the area a click changes nothing; outside it lets go of
+            // the area, and selects the mark clicked, if any, for moving.
+            if !self.in_marquee(p) {
+                self.marquee = None;
+                self.select(hit);
+                if hit.is_some() {
+                    self.set_tool(Tool::Select);
+                }
+            }
+            return;
+        }
         // A click on an existing mark selects it and switches to Select & move.
         // Click-to-place tools only do this for their own kind of mark, so new
         // steps, stamps and fills can still go on top of other marks.
@@ -1375,6 +1753,7 @@ impl Editor {
             Kind::Rect { .. } | Kind::Ellipse { .. } => {
                 self.width = ann.width;
                 self.filled = ann.filled;
+                self.ellipse = matches!(ann.kind, Kind::Ellipse { .. });
             }
             Kind::Step { radius, .. } => self.font_size = (radius / 0.75).round(),
             Kind::Stamp { size, stamp, .. } => {
@@ -1473,8 +1852,9 @@ impl Editor {
         let step = (cw.min(ch) * 0.04).max(12.0).round();
         for (n, img) in imgs.into_iter().enumerate() {
             let (iw, ih) = (img.width() as f32, img.height() as f32);
-            // Fit large pastes to 80% of the canvas; keep small ones at 1:1.
-            let fit = (cw * 0.8 / iw).min(ch * 0.8 / ih).min(1.0);
+            // At 1:1 when the canvas holds it (a canvas made its size is
+            // filled exactly); a larger one is fitted to 80% of the canvas.
+            let fit = if iw <= cw && ih <= ch { 1.0 } else { (cw * 0.8 / iw).min(ch * 0.8 / ih) };
             let (w, h) = (iw * fit, ih * fit);
             let shift = step * n as f32;
             self.anns.push(Annotation {
@@ -1549,6 +1929,11 @@ impl Editor {
         self.shortcuts(ctx, &mut action);
         if !ctx.input(|i| i.pointer.any_down()) {
             self.gesture_open = false;
+        }
+        if let Some(text) = self.notice.take()
+            && matches!(action, EditorAction::None)
+        {
+            action = EditorAction::Toast(text);
         }
         action
     }
@@ -1701,6 +2086,49 @@ impl Editor {
         if let Some(hint) = props.hint {
             ui.label(egui::RichText::new(hint).small().color(theme::TEXT_FAINT));
             ui.add_space(4.0);
+        }
+        if selected_idx.is_none() && self.tool == Tool::Marquee {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("What it leaves behind").color(theme::TEXT_MUTED));
+            theme::segmented(ui, &mut self.auto_fill, &[(true, "Auto-fill"), (false, "Transparent")]);
+            ui.add_space(6.0);
+        }
+        if selected_idx.is_none()
+            && self.tool == Tool::Marquee
+            && let Some((_, _, w, h)) = self.marquee_rect()
+        {
+            ui.label(egui::RichText::new(format!("{w} × {h} px")).color(theme::TEXT_MUTED));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if theme::secondary_button(ui, None, "Cut").on_hover_text(format!("Onto the clipboard, leaving a hole ({}X)", crate::platform::CMD)).clicked() {
+                    let done = self.cut_marquee();
+                    self.note(done);
+                }
+                if theme::secondary_button(ui, Some(theme::icon::COPY), "Copy").on_hover_text(format!("Onto the clipboard ({}C)", crate::platform::CMD)).clicked() {
+                    let done = self.copy_marquee();
+                    self.note(done);
+                }
+            });
+            ui.add_space(6.0);
+            if theme::danger_button(ui, Some(theme::icon::DELETE), "Delete").on_hover_text("Leave a hole (⌫)").clicked() {
+                self.delete_marquee();
+            }
+        }
+        if props.shape {
+            let mut ellipse = self.ellipse;
+            if theme::segmented(ui, &mut ellipse, &[(false, "Rectangle"), (true, "Ellipse")]) {
+                self.ellipse = ellipse;
+                // A selected shape becomes the other one, in the same box.
+                if let Some(i) = selected_idx {
+                    self.push_undo();
+                    self.anns[i].kind = match self.anns[i].kind.clone() {
+                        Kind::Rect { a, b } | Kind::Ellipse { a, b } if ellipse => Kind::Ellipse { a, b },
+                        Kind::Rect { a, b } | Kind::Ellipse { a, b } => Kind::Rect { a, b },
+                        other => other,
+                    };
+                }
+            }
+            ui.add_space(6.0);
         }
         // A filled shape has no outline to size.
         if let Some(label) = props.width.filter(|_| !(props.fill && self.filled)) {
@@ -2115,6 +2543,9 @@ impl Editor {
         ui.add_space(10.0);
         let hint = match self.tool {
             Tool::Select => "Click to select · drag to move · ⌫ deletes",
+            Tool::Marquee if self.marquee_rect().is_none() || self.marquee_drag => "Drag over the part to select",
+            Tool::Marquee if cfg!(target_os = "macos") => "Drag the area to move it · ⌥ drag moves a copy · ⌘X cuts · ⌫ deletes",
+            Tool::Marquee => "Drag the area to move it · Alt drag moves a copy · Ctrl+X cuts · Del deletes",
             Tool::Text => "Click to place text · Esc to finish",
             Tool::Step => "Click to drop the next number",
             Tool::Crop => "Drag over the area to keep",
@@ -2190,6 +2621,7 @@ impl Editor {
                 }
             } else {
                 let shift = ui.input(|i| i.modifiers.shift);
+                self.alt_down = ui.input(|i| i.modifiers.alt);
                 if resp.drag_started()
                     && let Some(p) = ui.input(|i| i.pointer.press_origin()) {
                         self.drag_begin(to_img(p));
@@ -2223,8 +2655,11 @@ impl Editor {
             if self.picking.is_none()
                 && let Some(hover) = resp.hover_pos()
             {
-                let over_mark = self.hit_test(to_img(hover)).is_some();
+                let at = to_img(hover);
+                let over_mark = self.hit_test(at).is_some();
+                let over_selected = self.selected.and_then(|i| self.anns.get(i)).is_some_and(|a| a.hit(at, 4.0 / self.zoom));
                 let icon = match self.tool {
+                    Tool::Marquee if self.in_marquee(at) || over_selected => CursorIcon::Move,
                     Tool::Select if over_mark => CursorIcon::Move,
                     Tool::Select => CursorIcon::Default,
                     Tool::Text => CursorIcon::Text,
@@ -2243,7 +2678,11 @@ impl Editor {
             let painter = ui.painter_at(outer);
             paint_backdrop(&painter, outer);
             painter.add(crate::theme::soft_shadow(img_rect, 4));
-            if self.base.get_pixel(0, 0)[3] < 255 {
+            // Worked out once per image: a hole cut into it is see-through too.
+            if !std::ptr::eq(self.transparent.0.as_ptr(), Arc::as_ptr(&self.base)) {
+                self.transparent = (Arc::downgrade(&self.base), self.base.pixels().any(|p| p[3] < 255));
+            }
+            if self.transparent.1 {
                 paint_checkerboard(&painter, img_rect);
             }
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
@@ -2253,12 +2692,19 @@ impl Editor {
             }
             let layers = &self.layer_textures;
             let layer_tex = |img: &Arc<RgbaImage>| layers.get(&(Arc::as_ptr(img) as usize)).map(|(_, t)| t.id());
+            // Marks show as far as the canvas goes, as they are saved: what
+            // sticks out past its edge is cut off. A picture being dragged is
+            // shown whole, since the canvas grows to hold it when let go.
+            let on_canvas = painter.with_clip_rect(img_rect.intersect(painter.clip_rect()));
+            let dragging = self.moving.is_some() || self.resizing.is_some() || self.turning.is_some();
             for (i, ann) in self.anns.iter().enumerate() {
                 let editing = self.editing_text == Some(i);
                 // Text being typed into stands upright, as its text box does (see `text_editor`).
                 let angle = if editing { 0.0 } else { ann.rotation };
-                paint_turned(&painter, to_screen(ann.pivot()), angle, || {
-                    paint_annotation(&painter, ann, &to_screen, zoom, editing, &layer_tex);
+                let whole = dragging && self.selected == Some(i) && matches!(ann.kind, Kind::Image { .. });
+                let painter = if whole { &painter } else { &on_canvas };
+                paint_turned(painter, to_screen(ann.pivot()), angle, || {
+                    paint_annotation(painter, ann, &to_screen, zoom, editing, &layer_tex);
                 });
             }
             if self.tool == Tool::Eraser
@@ -2269,7 +2715,7 @@ impl Editor {
                 painter.circle_stroke(h, r, Stroke::new(1.5, Color32::WHITE));
             }
             if let Some(ann) = &self.drawing {
-                paint_annotation(&painter, ann, &to_screen, zoom, false, &layer_tex);
+                paint_annotation(&on_canvas, ann, &to_screen, zoom, false, &layer_tex);
                 if ann.is_raster() {
                     let (a, b) = ann.bounds();
                     dashed_rect(&painter, Rect::from_two_pos(to_screen(a), to_screen(b)));
@@ -2315,6 +2761,63 @@ impl Editor {
                         painter.rect_filled(r, 6.0, Color32::from_black_alpha(200));
                         painter.galley(r.min + Vec2::new(7.0, 4.0), galley, Color32::WHITE);
                     }
+                }
+            }
+            if let Some((x, y, w, h)) = self.marquee_rect() {
+                let r = Rect::from_min_max(to_screen(P::new(x as f32, y as f32)), to_screen(P::new((x + w) as f32, (y + h) as f32)));
+                dashed_rect(&painter, r);
+                if self.marquee_drag {
+                    // Its size, under its corner.
+                    let galley = painter.layout_no_wrap(format!("{w} × {h}"), crate::theme::medium(12.0), Color32::WHITE);
+                    let label = Rect::from_min_size(r.right_bottom() + Vec2::new(-galley.size().x - 14.0, 8.0), galley.size()).expand2(Vec2::new(7.0, 4.0));
+                    painter.rect_filled(label, 6.0, Color32::from_black_alpha(200));
+                    painter.galley(label.min + Vec2::new(7.0, 4.0), galley, Color32::WHITE);
+                }
+            }
+            // The canvas-size handles, on the image's edge; while one is
+            // dragged, the canvas it will make and its size.
+            if self.picking.is_none() && self.editing_text.is_none() {
+                let busy = self.drawing.is_some() || self.resizing.is_some() || self.turning.is_some() || self.moving.is_some() || self.marquee_drag;
+                let hover = resp.hover_pos().filter(|_| !busy && self.canvas_drag.is_none());
+                let over_mark_handle = hover.is_some_and(|h| {
+                    self.resize_handles().is_some_and(|(_, c)| c.iter().any(|c| to_screen(*c).distance(h) <= HANDLE_GRAB))
+                        || self.rotate_handle().is_some_and(|(_, c, _)| to_screen(c).distance(h) <= HANDLE_GRAB)
+                });
+                for (k, handle) in self.canvas_handles().into_iter().enumerate() {
+                    let c = to_screen(handle);
+                    let hot = self.canvas_drag.is_some_and(|(d, _)| d == k) || (!over_mark_handle && hover.is_some_and(|h| h.distance(c) <= HANDLE_GRAB));
+                    if self.canvas_drag.is_none() {
+                        paint_canvas_handle(&painter, c, hot);
+                    }
+                    if hot {
+                        let (fx, fy) = CANVAS_HANDLES[k];
+                        ui.ctx().set_cursor_icon(match (fx == 0.5, fy == 0.5) {
+                            (true, _) => CursorIcon::ResizeVertical,
+                            (_, true) => CursorIcon::ResizeHorizontal,
+                            _ if (fx == fy) => CursorIcon::ResizeNwSe,
+                            _ => CursorIcon::ResizeNeSw,
+                        });
+                    }
+                }
+                if let Some((x0, y0, x1, y1)) = self.canvas_drag_rect() {
+                    let r = Rect::from_min_max(to_screen(P::new(x0 as f32, y0 as f32)), to_screen(P::new(x1 as f32, y1 as f32)));
+                    // What will be trimmed is dimmed; new space is outlined.
+                    let shade = Color32::from_black_alpha(140);
+                    for cut in [
+                        Rect::from_min_max(img_rect.min, Pos2::new(img_rect.max.x, r.min.y.max(img_rect.min.y))),
+                        Rect::from_min_max(Pos2::new(img_rect.min.x, r.max.y.min(img_rect.max.y)), img_rect.max),
+                        Rect::from_min_max(img_rect.min, Pos2::new(r.min.x.max(img_rect.min.x), img_rect.max.y)),
+                        Rect::from_min_max(Pos2::new(r.max.x.min(img_rect.max.x), img_rect.min.y), img_rect.max),
+                    ] {
+                        if cut.is_positive() {
+                            painter.rect_filled(cut, 0.0, shade);
+                        }
+                    }
+                    dashed_rect(&painter, r);
+                    let galley = painter.layout_no_wrap(format!("{} × {}", x1 - x0, y1 - y0), crate::theme::medium(12.0), Color32::WHITE);
+                    let label = Rect::from_center_size(r.center(), galley.size()).expand2(Vec2::new(7.0, 4.0));
+                    painter.rect_filled(label, 6.0, Color32::from_black_alpha(200));
+                    painter.galley(label.min + Vec2::new(7.0, 4.0), galley, Color32::WHITE);
                 }
             }
             if let Some((a, b)) = self.crop_drag {
@@ -2420,12 +2923,29 @@ impl Editor {
             i.events.iter().any(|e| matches!(e, egui::Event::Copy))
                 || (i.modifiers.command && i.key_pressed(Key::C))
         });
+        let cut_requested = ctx.input(|i| {
+            i.events.iter().any(|e| matches!(e, egui::Event::Cut))
+                || (i.modifiers.command && i.key_pressed(Key::X))
+        });
         if typing {
             return;
         }
-        if copy_requested {
-            *action = match self.selected.filter(|&i| i < self.anns.len()) {
+        let selected = self.selected.filter(|&i| i < self.anns.len());
+        let area = self.marquee_rect().is_some();
+        if cut_requested {
+            // A mark is cut as it is copied: ⌘V puts it back.
+            if let Some(i) = selected {
+                self.copy_element(i);
+                self.selected = Some(i);
+                self.delete_selected();
+                *action = EditorAction::Toast("Element cut — paste to place it".into());
+            } else if area {
+                *action = self.cut_marquee();
+            }
+        } else if copy_requested {
+            *action = match selected {
                 Some(i) => self.copy_element(i),
+                None if area => self.copy_marquee(),
                 None => self.copy_action(),
             };
         }
@@ -2475,7 +2995,11 @@ impl Editor {
             *action = self.save_action();
         }
         if delete || backspace {
-            self.delete_selected();
+            if self.selected.is_none() && self.marquee.is_some() {
+                self.delete_marquee();
+            } else {
+                self.delete_selected();
+            }
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::I)) {
             self.toggle_picking();
@@ -2486,13 +3010,23 @@ impl Editor {
         if escape {
             self.drawing = None;
             self.crop_drag = None;
+            self.marquee = None;
+            self.marquee_drag = false;
+            self.canvas_drag = None;
             self.selected = None;
         }
         for tool in Tool::ALL {
             let key = tool.info().2;
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
                 self.set_tool(tool);
+                if tool == Tool::Shape {
+                    self.pick_shape(false);
+                }
             }
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::E)) {
+            self.set_tool(Tool::Shape);
+            self.pick_shape(true);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Num0)) {
             self.fit = true;
@@ -2511,11 +3045,52 @@ impl Editor {
     fn copy_element(&mut self, i: usize) -> EditorAction {
         self.commit_text();
         let Some(ann) = self.anns.get(i).cloned() else { return self.copy_action() };
-        if let Kind::Image { img, .. } = &ann.kind {
-            let _ = crate::platform::copy_image(img);
+        // Its picture goes on the system clipboard too: for other apps, and
+        // for a new image, which opens at its size and takes it with ⌘V.
+        if let Some(picture) = self.element_picture(i) {
+            let _ = crate::platform::copy_image(&picture);
         }
         self.copied = Some(CopiedElement { ann, clipboard: clipboard_fingerprint(), pastes: 0 });
         EditorAction::Toast("Element copied — paste to duplicate it".into())
+    }
+
+    /// Mark `i` alone as a picture the size it shows at, on nothing. A mark
+    /// that changes the screenshot's pixels (blur, fill, magnifier,
+    /// spotlight) is the part of the picture it covers instead.
+    fn element_picture(&self, i: usize) -> Option<RgbaImage> {
+        let ann = self.anns.get(i)?;
+        // A pasted picture, unscaled and upright, is its own pixels.
+        if let Kind::Image { w, h, img, .. } = &ann.kind
+            && ann.rotation == 0.0
+            && (*w, *h) == (img.width() as f32, img.height() as f32)
+        {
+            return Some((**img).clone());
+        }
+        // Room for a line's thickness, and an arrow's head.
+        let margin = match ann.kind {
+            Kind::Arrow { .. } => ann.width * 2.2 + 5.0,
+            Kind::Line { .. } | Kind::Rect { .. } | Kind::Ellipse { .. } | Kind::Magnify { .. } => ann.width / 2.0 + 1.0,
+            _ => 0.0,
+        };
+        let (min, max) = ann.bounds();
+        let (x0, y0) = ((min.x - margin).floor(), (min.y - margin).floor());
+        let (x1, y1) = ((max.x + margin).ceil(), (max.y + margin).ceil());
+        if ann.is_raster() {
+            let (cw, ch) = (self.base.width() as f32, self.base.height() as f32);
+            let (x0, y0, x1, y1) = (x0.clamp(0.0, cw), y0.clamp(0.0, ch), x1.clamp(0.0, cw), y1.clamp(0.0, ch));
+            if x1 <= x0 || y1 <= y0 {
+                return None;
+            }
+            let view = render::render(&self.base, &self.anns, &Effects::default());
+            return Some(image::imageops::crop_imm(&view, x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32).to_image());
+        }
+        let (w, h) = ((x1 - x0).max(1.0) as u32, (y1 - y0).max(1.0) as u32);
+        if w > MAX_RESIZE.0 || h > MAX_RESIZE.1 {
+            return None;
+        }
+        let mut alone = ann.clone();
+        alone.translate(-x0, -y0);
+        Some(render::render(&RgbaImage::new(w, h), &[alone], &Effects::default()))
     }
 
     /// Duplicate the copied mark, unless something else has been copied since.
@@ -3047,7 +3622,7 @@ mod tests {
         assert_eq!(ed.color, to_c32(HIGHLIGHT_COLOR), "the highlighter starts yellow");
         assert_eq!(ed.new_annotation(P::new(10.0, 10.0)).map(|a| a.color), Some(HIGHLIGHT_COLOR));
         ed.set_color(green, true);
-        ed.set_tool(Tool::Rect);
+        ed.set_tool(Tool::Shape);
         assert_eq!(ed.color, blue, "the other tools keep their colour");
         ed.set_tool(Tool::Highlight);
         assert_eq!(ed.color, green, "the highlighter remembers its own");
@@ -3098,7 +3673,7 @@ mod tests {
         assert_eq!(saved_pixel(), image::Rgba([255, 255, 255, 255]));
 
         // A filled rectangle over the middle.
-        ed.set_tool(Tool::Rect);
+        ed.set_tool(Tool::Shape);
         ed.filled = true;
         ed.drag_begin(P::new(10.0, 10.0));
         ed.drag_update(P::new(70.0, 50.0), false);
@@ -3188,6 +3763,317 @@ mod tests {
         Editor::new(PathBuf::from("unused.png"), RgbaImage::from_pixel(400, 300, image::Rgba([255, 255, 255, 255])), None, true)
     }
 
+    /// A white page with a red block at (100, 100)–(150, 150).
+    fn page_with_block() -> Editor {
+        let mut img = RgbaImage::from_pixel(400, 300, image::Rgba([255, 255, 255, 255]));
+        for y in 100..150 {
+            for x in 100..150 {
+                img.put_pixel(x, y, image::Rgba([200, 0, 0, 255]));
+            }
+        }
+        Editor::new(PathBuf::from("unused.png"), img, None, true)
+    }
+
+    fn drag(ed: &mut Editor, from: (f32, f32), to: (f32, f32)) {
+        ed.drag_begin(P::new(from.0, from.1));
+        ed.drag_update(P::new(to.0, to.1), false);
+        ed.drag_end();
+    }
+
+    /// Select area: drag over part of the picture, then drag that part away.
+    /// It becomes a picture like a pasted one, and where it was is filled
+    /// with the page around it. One undo puts it back.
+    #[test]
+    fn a_selected_area_is_dragged_away_like_a_mark() {
+        let (red, white) = (image::Rgba([200, 0, 0, 255]), image::Rgba([255, 255, 255, 255]));
+        let mut ed = page_with_block();
+        ed.set_tool(Tool::Marquee);
+        drag(&mut ed, (90.2, 89.8), (160.0, 160.0));
+        assert_eq!(ed.marquee_rect(), Some((90, 90, 70, 70)));
+        assert!(ed.anns.is_empty() && ed.undo.is_empty(), "selecting changes nothing");
+
+        drag(&mut ed, (120.0, 120.0), (320.0, 140.0));
+        assert_eq!((ed.anns.len(), ed.selected, ed.marquee), (1, Some(0), None));
+        let Kind::Image { pos, w, h, .. } = &ed.anns[0].kind else { panic!("expected a picture") };
+        assert_eq!((*pos, *w, *h), (P::new(290.0, 110.0), 70.0, 70.0));
+        let out = ed.flatten();
+        assert_eq!(*out.get_pixel(125, 125), white, "the page closes over where it was");
+        assert_eq!(*out.get_pixel(325, 145), red, "and it is where it was dragged to");
+        assert_eq!(ed.tool, Tool::Marquee);
+
+        // Still selected, it moves again; elsewhere a new area starts.
+        drag(&mut ed, (325.0, 145.0), (325.0, 165.0));
+        assert_eq!(*ed.flatten().get_pixel(325, 185), red);
+        drag(&mut ed, (10.0, 10.0), (40.0, 40.0));
+        assert_eq!((ed.selected, ed.marquee_rect()), (None, Some((10, 10, 30, 30))));
+
+        ed.undo();
+        ed.undo();
+        assert!(ed.anns.is_empty());
+        assert_eq!(*ed.flatten().get_pixel(125, 125), red, "undone: back in place");
+    }
+
+    /// With no single colour around it, the hole is see-through. With ⌥ held
+    /// a copy is dragged and nothing is taken.
+    #[test]
+    fn the_hole_is_clear_on_a_busy_picture_and_alt_drags_a_copy() {
+        let busy = RgbaImage::from_fn(200, 200, |x, y| image::Rgba([x as u8, y as u8, (x * 7 + y * 3) as u8, 255]));
+        let mut ed = Editor::new(PathBuf::from("unused.png"), busy.clone(), None, true);
+        ed.set_tool(Tool::Marquee);
+        drag(&mut ed, (50.0, 50.0), (100.0, 100.0));
+        drag(&mut ed, (60.0, 60.0), (160.0, 60.0));
+        assert_eq!(ed.base.get_pixel(75, 75)[3], 0, "a see-through hole");
+        assert_eq!(ed.flatten().get_pixel(175, 75), busy.get_pixel(75, 75));
+
+        let mut ed = Editor::new(PathBuf::from("unused.png"), busy.clone(), None, true);
+        ed.set_tool(Tool::Marquee);
+        drag(&mut ed, (50.0, 50.0), (100.0, 100.0));
+        ed.alt_down = true;
+        drag(&mut ed, (60.0, 60.0), (160.0, 60.0));
+        assert_eq!(*ed.base, busy, "the screenshot is whole");
+        assert_eq!(ed.flatten().get_pixel(175, 75), busy.get_pixel(75, 75));
+    }
+
+    /// Marks wholly inside the area go with it; one that only reaches in
+    /// stays where it is, on top; and a blur over the area stays blurred in
+    /// what is taken, so nothing hidden comes back.
+    #[test]
+    fn marks_in_the_area_go_with_it_and_a_blur_stays_blurred() {
+        let mut ed = page_with_block();
+        let mark = |kind| Annotation { kind, color: [0, 0, 255, 255], width: 4.0, filled: true, rotation: 0.0 };
+        ed.anns.push(mark(Kind::Rect { a: P::new(110.0, 110.0), b: P::new(120.0, 120.0) }));
+        ed.anns.push(mark(Kind::Line { a: P::new(20.0, 130.0), b: P::new(300.0, 130.0) }));
+        ed.anns.push(mark(Kind::pixelate(P::new(140.0, 140.0), P::new(200.0, 200.0))));
+        let before = ed.flatten();
+        ed.set_tool(Tool::Marquee);
+        drag(&mut ed, (90.0, 90.0), (160.0, 160.0));
+        let at = ed.lift_marquee(false).expect("an area is selected");
+        assert_eq!(at, 0, "under the line that crosses it");
+        assert!(matches!(ed.anns[0].kind, Kind::Image { .. }) && matches!(ed.anns[1].kind, Kind::Line { .. }));
+        assert_eq!(ed.anns.len(), 3, "the small box went into the picture");
+        assert_eq!(ed.flatten(), before, "lifted but not yet moved, nothing looks different");
+        let Kind::Image { img, .. } = &ed.anns[0].kind else { unreachable!() };
+        assert_eq!(*img.get_pixel(25, 25), image::Rgba([0, 0, 255, 255]), "the box");
+        let blurred = render::apply_raster(&page_with_block().base, &[mark(Kind::pixelate(P::new(140.0, 140.0), P::new(200.0, 200.0)))]);
+        assert_ne!(*blurred.get_pixel(148, 148), image::Rgba([200, 0, 0, 255]), "the test's blur does blur");
+        assert_eq!(img.get_pixel(58, 58), blurred.get_pixel(148, 148), "blurred in the piece too");
+    }
+
+    /// A pasted picture reaching into the area is merged into the screenshot,
+    /// so a piece of it can be taken. ⌫ leaves a hole; ⌘X does too.
+    #[test]
+    fn an_area_can_be_taken_out_of_a_pasted_picture() {
+        let mut ed = blank_editor();
+        ed.paste_images(vec![RgbaImage::from_pixel(100, 100, image::Rgba([0, 120, 0, 255]))]);
+        let green = image::Rgba([0, 120, 0, 255]);
+        assert_eq!(*ed.flatten().get_pixel(200, 150), green);
+        ed.set_tool(Tool::Marquee);
+        drag(&mut ed, (180.0, 130.0), (220.0, 170.0));
+        ed.delete_marquee();
+        assert!(ed.anns.is_empty(), "the picture is part of the screenshot now");
+        let out = ed.flatten();
+        assert_eq!(out.get_pixel(200, 150), &green, "the hole takes the colour around it");
+        assert_eq!(out.get_pixel(155, 105), &green);
+        ed.undo();
+        assert_eq!(ed.anns.len(), 1, "undo brings the picture back as a picture");
+    }
+
+    /// The Select area tool on screen: its dashed box while an area is picked,
+    /// the Cut, Copy and Delete buttons in the panel, and the see-through
+    /// hole a cut leaves in a busy picture.
+    #[test]
+    fn the_selected_area_shows_on_screen() {
+        use egui_kittest::kittest::Queryable;
+        let busy = RgbaImage::from_fn(400, 300, |x, y| image::Rgba([(x / 2) as u8, (y / 2) as u8, 160, 255]));
+        let mut ed = Editor::new(PathBuf::from("unused.png"), busy, None, true);
+        ed.set_tool(Tool::Marquee);
+        drag(&mut ed, (100.0, 80.0), (220.0, 180.0));
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(900.0, 700.0))
+            .with_pixels_per_point(2.0)
+            .with_accessibility_check(false)
+            .with_context_setup(crate::theme::install)
+            .wgpu()
+            .build_ui_state(
+                |ui, ed: &mut Editor| {
+                    egui::Panel::right("tools")
+                        .resizable(false)
+                        .exact_size(256.0)
+                        .frame(crate::theme::panel_frame(crate::theme::SURFACE, egui::Margin::same(18)))
+                        .show(ui, |ui| ed.tools_panel(ui));
+                    egui::CentralPanel::default().show(ui, |ui| ed.canvas(ui));
+                },
+                ed,
+            );
+        h.step();
+        h.step();
+        // Cut, Copy and Delete, which answer to their tooltips.
+        for tip in ["leaving a hole", "Onto the clipboard (", "Leave a hole"] {
+            h.get_by_label_contains(tip);
+        }
+        h.get_by_label("120 × 100 px");
+        let save = |h: &mut egui_kittest::Harness<'_, Editor>, name: &str| {
+            if let Ok(dir) = std::env::var("MARQUEE_PREVIEW_DIR") {
+                h.render().expect("render").save(std::path::Path::new(&dir).join(name)).unwrap();
+            }
+        };
+        save(&mut h, "area.png");
+
+        h.get_by_label_contains("Leave a hole").click();
+        h.step();
+        h.step();
+        assert_eq!(h.state().base.get_pixel(150, 120)[3], 0);
+        let shot = h.render().expect("render");
+        let p = h.state().image_to_screen(P::new(150.5, 120.5)) * 2.0;
+        let px = shot.get_pixel(p.x as u32, p.y as u32).0;
+        assert!(px[0] == px[1] && px[1] == px[2] && px[0] >= 200, "the hole shows the checkerboard, not {px:?}");
+        save(&mut h, "hole.png");
+    }
+
+    /// The handles on the image's edge change the canvas: dragged outward
+    /// they add space in the canvas colour, inward they trim, and marks stay
+    /// where they are on the picture. Each drag is one undo.
+    #[test]
+    fn edge_handles_change_the_canvas_size() {
+        let mut ed = page_with_block();
+        ed.tool = Tool::Shape;
+        // Bottom-right corner, outward.
+        drag(&mut ed, (400.0, 300.0), (460.0, 350.0));
+        assert_eq!(ed.size(), (460, 350));
+        assert_eq!(*ed.base.get_pixel(450, 340), image::Rgba([255, 255, 255, 255]), "new space is page");
+        assert!(ed.anns.is_empty(), "a handle drag draws nothing");
+        // Left edge, inward: trims, and the block is 60 px nearer the edge.
+        drag(&mut ed, (0.0, 175.0), (60.0, 20.0));
+        assert_eq!(ed.size(), (400, 350));
+        assert_eq!(*ed.base.get_pixel(45, 105), image::Rgba([200, 0, 0, 255]));
+        // Top edge, outward, with a mark: it stays over the same pixels.
+        ed.anns.push(Annotation { kind: Kind::Rect { a: P::new(40.0, 100.0), b: P::new(90.0, 150.0) }, color: [0, 0, 255, 255], width: 2.0, filled: false, rotation: 0.0 });
+        drag(&mut ed, (200.0, 0.0), (210.0, -40.0));
+        assert_eq!(ed.size(), (400, 390));
+        assert!(matches!(ed.anns[0].kind, Kind::Rect { a, .. } if a == P::new(40.0, 140.0)));
+        ed.undo();
+        ed.undo();
+        ed.undo();
+        assert_eq!(ed.size(), (400, 300));
+
+        // On a picture with no one canvas colour, new space is see-through.
+        let busy = RgbaImage::from_fn(200, 200, |x, y| image::Rgba([x as u8, y as u8, 0, 255]));
+        let mut ed = Editor::new(PathBuf::from("unused.png"), busy, None, true);
+        drag(&mut ed, (200.0, 100.0), (240.0, 100.0));
+        assert_eq!((ed.size(), ed.base.get_pixel(220, 100)[3]), ((240, 200), 0));
+    }
+
+    /// Select area can leave a see-through hole even on a plain page.
+    #[test]
+    fn the_hole_can_be_left_transparent() {
+        let mut ed = page_with_block();
+        ed.set_tool(Tool::Marquee);
+        ed.auto_fill = false;
+        drag(&mut ed, (90.0, 90.0), (160.0, 160.0));
+        ed.delete_marquee();
+        assert_eq!(ed.base.get_pixel(125, 125)[3], 0);
+    }
+
+    /// Rectangle and ellipse are one tool, Shape: the side panel says which
+    /// it draws, and turns a selected one into the other in the same box.
+    #[test]
+    fn one_shape_tool_draws_rectangles_and_ellipses() {
+        use egui_kittest::kittest::Queryable;
+        assert_eq!((Tool::from_key("Rect"), Tool::from_key("Ellipse")), (Some(Tool::Shape), Some(Tool::Shape)), "settings from before");
+        let mut ed = blank_editor();
+        ed.set_tool(Tool::Shape);
+        drag(&mut ed, (50.0, 50.0), (150.0, 120.0));
+        assert!(matches!(ed.anns[0].kind, Kind::Rect { .. }));
+        ed.selected = None;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(260.0, 900.0))
+            .with_accessibility_check(false)
+            .with_context_setup(crate::theme::install)
+            .build_ui_state(|ui, ed: &mut Editor| ed.tools_panel(ui), ed);
+        h.step();
+        h.get_by_label("Ellipse").click();
+        h.step();
+        h.step();
+        let ed = h.state_mut();
+        assert!(ed.ellipse);
+        drag(ed, (200.0, 50.0), (300.0, 120.0));
+        assert!(matches!(ed.anns[1].kind, Kind::Ellipse { .. }));
+        assert_eq!(ed.selected, Some(1));
+        // With it selected, the panel turns it into a rectangle.
+        h.step();
+        h.get_by_label("Rectangle").click();
+        h.step();
+        h.step();
+        let ed = h.state_mut();
+        assert!(matches!(ed.anns[1].kind, Kind::Rect { a, b } if a == P::new(200.0, 50.0) && b == P::new(300.0, 120.0)));
+        // Selecting a shape shows which it is.
+        ed.ellipse = true;
+        ed.select(Some(0));
+        assert!(!ed.ellipse);
+    }
+
+    /// After the canvas is made smaller, a pasted picture reaching past its
+    /// new edge shows only as far as the canvas goes, as it is saved.
+    #[test]
+    fn marks_are_cut_off_at_the_canvas_edge_on_screen() {
+        let mut ed = blank_editor();
+        let green = image::Rgba([0, 160, 0, 255]);
+        ed.paste_images(vec![RgbaImage::from_pixel(200, 100, green)]);
+        ed.selected = None;
+        // Right edge inward to x = 200: the picture spans 100..300.
+        drag(&mut ed, (400.0, 150.0), (200.0, 150.0));
+        assert_eq!(ed.size(), (200, 300));
+        let ppp = 2.0;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(900.0, 700.0))
+            .with_pixels_per_point(ppp)
+            .with_accessibility_check(false)
+            .with_context_setup(crate::theme::install)
+            .wgpu()
+            .build_ui_state(|ui, ed: &mut Editor| ed.canvas(ui), ed);
+        h.step();
+        h.step();
+        let shot = h.render().expect("render");
+        let on_screen = |x: f32, y: f32| {
+            let p = h.state().image_to_screen(P::new(x, y)) * ppp;
+            shot.get_pixel(p.x as u32, p.y as u32).0
+        };
+        assert_eq!(&on_screen(180.5, 150.5)[..3], &[0, 160, 0], "inside the canvas it shows");
+        assert_ne!(&on_screen(220.5, 150.5)[..3], &[0, 160, 0], "past the edge it doesn't");
+        assert_eq!(*h.state().flatten().get_pixel(180, 150), green);
+    }
+
+    /// A picture pasted onto a canvas its own size covers it exactly; one
+    /// too large for the canvas is fitted inside it.
+    #[test]
+    fn a_pasted_picture_keeps_its_size_when_the_canvas_holds_it() {
+        let mut ed = blank_editor();
+        ed.paste_images(vec![RgbaImage::new(400, 300), RgbaImage::new(800, 300)]);
+        assert!(matches!(ed.anns[0].kind, Kind::Image { pos, w, h, .. } if (pos, w, h) == (P::new(0.0, 0.0), 400.0, 300.0)));
+        assert!(matches!(ed.anns[1].kind, Kind::Image { w, h, .. } if (w, h) == (320.0, 120.0)));
+    }
+
+    /// A copied mark is also a picture of itself, the size it shows at: what
+    /// a new image is sized to and what gets pasted onto it.
+    #[test]
+    fn a_copied_mark_is_a_picture_its_own_size() {
+        let mut ed = blank_editor();
+        let mark = |kind| Annotation { kind, color: [0, 0, 255, 255], width: 4.0, filled: true, rotation: 0.0 };
+        ed.anns.push(mark(Kind::Rect { a: P::new(100.0, 100.0), b: P::new(180.0, 140.0) }));
+        let pic = ed.element_picture(0).unwrap();
+        assert_eq!(pic.dimensions(), (86, 46), "the box and half its line's thickness around");
+        assert_eq!(*pic.get_pixel(40, 20), image::Rgba([0, 0, 255, 255]));
+        // A pasted picture shown at half size is copied at that size.
+        let img = Arc::new(RgbaImage::from_pixel(100, 60, image::Rgba([9, 9, 9, 255])));
+        ed.anns.push(mark(Kind::Image { pos: P::new(10.0, 10.0), w: 50.0, h: 30.0, img: img.clone() }));
+        assert_eq!(ed.element_picture(1).unwrap().dimensions(), (50, 30));
+        ed.anns.push(mark(Kind::Image { pos: P::new(10.0, 10.0), w: 100.0, h: 60.0, img }));
+        assert_eq!(ed.element_picture(2).unwrap().dimensions(), (100, 60));
+        // A blur is the blurred part of the picture.
+        ed.anns.push(mark(Kind::pixelate(P::new(200.0, 200.0), P::new(260.0, 240.0))));
+        assert_eq!(ed.element_picture(3).unwrap().dimensions(), (60, 40));
+    }
+
     #[test]
     fn clicking_a_mark_with_a_drawing_tool_selects_it_for_moving() {
         let mut ed = blank_editor();
@@ -3196,14 +4082,14 @@ mod tests {
         ed.drag_update(P::new(200.0, 50.0), false);
         ed.drag_end();
         ed.selected = None;
-        ed.tool = Tool::Rect;
+        ed.tool = Tool::Shape;
         ed.click(P::new(120.0, 50.0));
         assert_eq!(ed.selected, Some(0));
         assert_eq!(ed.tool, Tool::Select);
         // A click on empty canvas with a drawing tool selects nothing.
-        ed.tool = Tool::Rect;
+        ed.tool = Tool::Shape;
         ed.click(P::new(300.0, 250.0));
-        assert_eq!(ed.tool, Tool::Rect);
+        assert_eq!(ed.tool, Tool::Shape);
     }
 
     #[test]
@@ -3265,7 +4151,7 @@ mod tests {
         assert_eq!(ed.selected, Some(0), "a new stamp is selected");
         ed.set_tool(Tool::Stamp);
         assert_eq!(ed.selected, Some(0), "same tool keeps it");
-        ed.set_tool(Tool::Rect);
+        ed.set_tool(Tool::Shape);
         assert_eq!(ed.selected, None, "the panel now edits rectangles, not the stamp");
     }
 

@@ -109,17 +109,19 @@ Sixteen tools in the right-hand panel, each with a one-key shortcut:
 | Select & move | `V` | | Highlighter | `H` |
 | Arrow | `A` | | Text & callouts | `T` |
 | Line | `L` | | Step numbers | `N` |
-| Rectangle | `R` | | Blur (pixelate or blur) | `B` |
-| Ellipse | `E` | | Spotlight | `S` |
+| Shape: rectangle (`R`) or ellipse (`E`) | `R` `E` | | Blur (pixelate or blur) | `B` |
+| Select area | `G` | | Spotlight | `S` |
 | Pen | `P` | | Crop | `C` |
 | Stamp (24 symbols: ✓ ✗ ! ? 👍 ★ ♥ …) | `K` | | Magnifier | `M` |
 | Fill (paint bucket) | `F` | | Eraser | `X` |
 
 - **Every mark stays editable** — select it to move, recolor, resize or delete. A freshly drawn mark stays selected, so you can tweak its color right away. With any drawing tool, a click on an existing mark selects it for moving.
-- **The properties panel follows what you're doing**: it shows only what applies to the current tool or the selected mark — line width and *Fill shape* for rectangles and ellipses, size and callout box for text, the symbol and size for stamps, zoom for the magnifier, tolerance for the fill.
+- **The properties panel follows what you're doing**: it shows only what applies to the current tool or the selected mark — rectangle or ellipse, line width and *Fill shape* for shapes, size and callout box for text, the symbol and size for stamps, zoom for the magnifier, tolerance for the fill.
 - **Eyedropper** (`I`) picks any color straight from the image.
 - **Rotate marks**: drag the round handle above a selected mark (hold `⇧` for 15° steps), or type an angle, turn it 90° or reset it under **Rotation** in the side panel. Shapes, lines, strokes, text, pasted pictures and stamps turn.
 - **Paste images onto the canvas** (`⌘V` / `Ctrl+V`) as movable, resizable layers — copied pixels, or image files copied in Finder / Explorer (all of them at once) — or drag image files onto the canvas. Right-click one → **Flatten image** to merge it into the picture so blur, fill and the magnifier work on it too (**Flatten all** merges every mark).
+- **Select an area** (`G`): drag over part of the picture, then drag it somewhere else — it lifts off as a picture you can move, resize, turn or delete like any other mark. Hold `⌥` / `Alt` to drag a copy instead. `⌘X` / `Ctrl+X` cuts the area, `⌘C` copies it and `⌫` deletes it. Where it was is filled with the color around it when that is one color (a word lifted off a page leaves page), otherwise left transparent (or always, with **Transparent** in the side panel). Marks lying wholly inside the area go with it, and a blur over it stays blurred.
+- **Change the canvas size**: drag any of the eight handles on the image's edge — outward to add space around the picture, inward to trim it. New space takes the canvas color, or is transparent on a screenshot.
 - **Rotate the whole image** a quarter turn left or right (**Rotate** in the top bar); every mark turns with it.
 - Undo/redo, resize, zoom, `⇧` to snap lines to 45° and keep shapes square.
 
@@ -141,7 +143,7 @@ Every capture is saved automatically and appears in the **library tray** along t
 
 ### Start from a blank canvas
 
-**New** (`⌘N`) creates an empty canvas — pick a preset or a custom size and a white, transparent or dark background — then paste or drag screenshots onto it, arrange, crop and export. Handy for before/after comparisons and quick collages.
+**New** (`⌘N`) creates an empty canvas — pick a preset or a custom size (with an image on the clipboard, the custom size starts as that image's) and a white, transparent or dark background — then paste or drag screenshots onto it, arrange, crop and export. Handy for before/after comparisons and quick collages.
 
 To open image files as new captures, drag them onto the library, paste them (`⌘V` on the welcome screen) or use **Open image…** (`⌘O`).
 

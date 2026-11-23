@@ -37,8 +37,6 @@ pub mod icon {
     pub const SELECT: &str = "\u{f82f}";
     pub const ARROW: &str = "\u{e941}";
     pub const LINE: &str = "\u{f108}";
-    pub const RECT: &str = "\u{e3c6}";
-    pub const ELLIPSE: &str = "\u{e836}";
     pub const PEN: &str = "\u{f097}";
     pub const MARKER: &str = "\u{e6d1}";
     pub const TEXT: &str = "\u{e264}";
@@ -493,6 +491,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
     for ((opt, label), w) in options.iter().zip(widths) {
         let r = Rect::from_min_size(egui::pos2(x, rect.min.y + 3.0), Vec2::new(w, 26.0));
         let resp = ui.interact(r, whole.id.with(("seg", label)), Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, *value == *opt, *label));
         let selected = *value == *opt;
         if selected {
             p.rect_filled(r, 7.0, SURFACE_3);

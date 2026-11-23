@@ -1,21 +1,28 @@
 {
-  "version": "0.4.12",
+  "version": "0.4.13",
   "date": "2026-11-23",
-  "title": "Fixes a crash with more than one screen.",
+  "title": "Select and move part of a picture, resize the canvas, one Shape tool.",
   "notes": [
-    "Mac: with two or more screens, Rega could quit during a capture or as it ended — on slower display setups (a dock, say) almost every time. This was in earlier versions too, and 0.4.11 fixed only part of it."
+    "Select area, a new tool (G): drag over part of the picture, then drag it somewhere else. It lifts off as a picture you can move, resize, turn or delete; hold ⌥ / Alt to drag a copy. ⌘X cuts the area, ⌘C copies it, ⌫ deletes it.",
+    "Change the canvas size by dragging the handles on the image's edge: outward to add space around the picture, inward to trim it.",
+    "Rectangle and Ellipse are one tool now, Shape: pick which in the side panel, where a selected shape can also be turned into the other. R and E still pick them.",
+    "New starts at the size of the image on the clipboard, when there is one, so it can be pasted onto a canvas that fits it.",
+    "A pasted image keeps its own size whenever the canvas can hold it; it used to shrink to 80% of the canvas.",
+    "Marks reaching past the canvas edge are cut off there on screen, as they are in the saved image.",
+    "A copied mark also goes on the clipboard as a picture, so it can be pasted into a new image (which opens at its size) or another app.",
+    "⌘X / Ctrl+X also cuts a selected mark."
   ],
   "url": "https://rega-capture.vercel.app/#download",
   "downloads": {
     "macos": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.12-macos-universal.dmg",
-      "size": 15970436,
-      "sha256": "3b129bceb7100c91868d0822bc9dc195a8e585d92f1836d88d6a41c8427b440b"
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.13-macos-universal.dmg",
+      "size": 16030352,
+      "sha256": "3c220796397d11404d5bea9c2b83cc6b1f6bbee3c6e59a11dd426d9973ff341e"
     },
     "windows": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.12-windows-x64-setup.exe",
-      "size": 6638638,
-      "sha256": "d61b3d454080c5d6dc08bb92cea5dc3e2d330f2847c4b3dc1aa1a34c9fb3c820"
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.13-windows-x64-setup.exe",
+      "size": 6660143,
+      "sha256": "a8b67d78e7fa3e2a8241d418e760dd8a5f8f3080f003eafba9655d717920050a"
     }
   }
 }
