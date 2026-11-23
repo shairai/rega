@@ -202,15 +202,19 @@ fn snapshot_of(monitor: &Monitor, cursor: (i32, i32)) -> Result<Snapshot> {
     let phys_origin = (monitor.x()?, monitor.y()?);
     let origin = ((phys_origin.0 as f32 / d).round() as i32, (phys_origin.1 as f32 / d).round() as i32);
     let size = ((monitor.width()? as f32 / d).round() as u32, (monitor.height()? as f32 / d).round() as u32);
-    let image = monitor
-        .capture_image()
-        .context("screen capture failed — is Screen Recording permission granted?")?;
+    let monitor_size = (monitor.width()?, monitor.height()?);
+    // The window list takes as long as the picture (longer with many windows
+    // open): gather it meanwhile, not after.
+    let (image, windows) = std::thread::scope(|s| {
+        let windows = s.spawn(move || list_windows(phys_origin, monitor_size, d).unwrap_or_default());
+        (monitor.capture_image(), windows.join().unwrap_or_default())
+    });
+    let image = image.context("screen capture failed — is Screen Recording permission granted?")?;
     // A zero dimension would make every later crop/clamp panic.
     if size.0 == 0 || size.1 == 0 || image.width() == 0 || image.height() == 0 {
         return Err(anyhow!("monitor reports a zero size"));
     }
     let scale = image.width() as f32 / size.0 as f32;
-    let windows = list_windows(phys_origin, (monitor.width()?, monitor.height()?), d).unwrap_or_default();
     let cursor = to_logical(cursor);
     Ok(Snapshot {
         image,
