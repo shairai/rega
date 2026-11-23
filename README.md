@@ -54,6 +54,18 @@
   <img src="docs/images/capture-overlay.png" alt="Selecting a region: live size label, dimmed surroundings and the pixel magnifier" width="100%">
 </p>
 
+#### Capturing across several displays at once
+
+With more than one display connected, the capture overlay comes up on **every display at the same moment**, each showing its own frozen picture. There's nothing to switch: move the pointer to the display you want and capture there.
+
+- **Region & window** — drag a region or click a window on whichever display it's on. Press **Enter** to take the whole display the pointer is on.
+- **Full screen** (`⌃⌥F`) — every display is offered; click the one to take. (With a single display it's captured straight away.)
+- **Video, scrolling capture, guides, grab text** — start them the same way: pick the region on any display.
+- **Pick a color** — the loupe follows the pointer from display to display.
+- **Esc** on any display cancels all of them.
+
+A selection stays on one display: to show two displays side by side, capture each and paste both onto a [blank canvas](#start-from-a-blank-canvas).
+
 ### Guides
 
 Press **Guide** (`⌃⌥G`), pick the window or region, and do the task as usual. Rega turns it into steps as you go:
@@ -375,7 +387,7 @@ regenerates the site from the changelog and deploys it to Vercel. See
 - [x] Windows build
 - [x] Step-by-step guides, shared as one HTML page
 - [ ] Audio in recordings
-- [ ] Capturing across several displays at once
+- [x] [Capturing across several displays at once](#capturing-across-several-displays-at-once)
 - [x] H.264 through the operating system's codec instead of a bundled encoder (patent licensing)
 - [ ] Share links / cloud upload
 

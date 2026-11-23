@@ -3303,10 +3303,6 @@ impl eframe::App for RegaApp {
                     Outcome::Selected(rect) => chosen = Some((i, rect)),
                 }
             }
-            if !matches!((&outcome, &chosen), (Outcome::Pending, None)) {
-                // The capture is over and the other screens' windows close with it.
-                platform::release_extra_overlays();
-            }
             match (outcome, chosen) {
                 (Outcome::Cancel, _) => {
                     self.activity = Activity::Idle;

@@ -152,6 +152,28 @@ mod overlay_panel {
             fn can_become_main_window(&self) -> bool {
                 true
             }
+
+            /// A window closing as a panel is turned back into what winit made
+            /// first. winit stops observing its window right after closing it,
+            /// and AppKit throws (which ends Rega) when the window isn't the
+            /// class the observer was added to. eframe closes the other
+            /// screens' overlay windows whenever a pass runs without the UI
+            /// (a redraw more than 250 ms late), so this can come at any time.
+            #[unsafe(method(close))]
+            fn close(&self) {
+                let window: &NSWindow = self;
+                let original = ORIGINAL_CLASS.load(Ordering::Relaxed);
+                if original.is_null() {
+                    // Never swapped in: nothing to turn back.
+                    let _: () = unsafe { objc2::msg_send![super(self), close] };
+                    return;
+                }
+                window.setStyleMask(window.styleMask() & !NSWindowStyleMask::NonactivatingPanel);
+                // SAFETY: `original` came from `object_setClass` and is a live class.
+                set_class(window, unsafe { &*original });
+                // No longer this class: this reaches winit's (NSWindow's) `close`.
+                let _: () = unsafe { objc2::msg_send![window, close] };
+            }
         }
     );
 
@@ -298,28 +320,6 @@ pub fn present_extra_overlay(title: &str, x: f32, y: f32, w: f32, h: f32) -> boo
     window.orderFrontRegardless();
     true
 }
-
-/// The capture is over: turn the other screens' overlay windows back into
-/// what winit made, before they close. winit's window delegate stops
-/// observing its window when it goes, and AppKit throws (which ends Rega) if
-/// the window is still the panel class it was swapped to.
-#[cfg(target_os = "macos")]
-pub fn release_extra_overlays() {
-    use objc2_app_kit::NSApplication;
-    use objc2_foundation::MainThreadMarker;
-
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let prefix = format!("{} overlay ", crate::config::APP_NAME);
-    for window in NSApplication::sharedApplication(mtm).windows().iter() {
-        if window.title().to_string().starts_with(&prefix) {
-            window.orderOut(None);
-            overlay_panel::leave(&window);
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn release_extra_overlays() {}
 
 /// Windows: the extra overlay windows are created always on top already.
 #[cfg(not(target_os = "macos"))]
