@@ -437,6 +437,42 @@ const LIVE_RASTER_PIXELS: u64 = 8_000_000;
 /// The largest image Resize makes (width, height).
 const MAX_RESIZE: (u32, u32) = (16_000, 40_000);
 
+/// The most memory the undo history's pictures may take (see `trim_history`):
+/// some twenty Retina screenshots, or two long scrolling captures.
+const HISTORY_BYTES: usize = 512 << 20;
+
+/// The part of `img` at (`x`, `y`), `w` × `h`, as egui wants it. The same as
+/// `ColorImage::from_rgba_unmultiplied` on a crop, but straight from the
+/// picture and on several cores: on a Retina screenshot this was most of the
+/// time a texture took to rebuild.
+fn color_image(img: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> egui::ColorImage {
+    let (x, y, w, h) = (x as usize, y as usize, w as usize, h as usize);
+    let stride = img.width() as usize * 4;
+    let raw = img.as_raw();
+    let mut pixels = vec![Color32::TRANSPARENT; w * h];
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+    // Bands of whole rows, none so small that starting a thread costs more.
+    let rows = h.div_ceil(cores).max(128);
+    let fill = |band: &mut [Color32], first_row: usize| {
+        for (r, row) in band.chunks_mut(w).enumerate() {
+            let from = (y + first_row + r) * stride + x * 4;
+            for (out, p) in row.iter_mut().zip(raw[from..from + w * 4].as_chunks::<4>().0) {
+                *out = Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]);
+            }
+        }
+    };
+    if w > 0 && h > rows {
+        std::thread::scope(|s| {
+            for (k, band) in pixels.chunks_mut(rows * w).enumerate() {
+                s.spawn(move || fill(band, k * rows));
+            }
+        });
+    } else if w > 0 {
+        fill(&mut pixels, 0);
+    }
+    egui::ColorImage::new([w, h], pixels)
+}
+
 /// What `render::apply_raster` depends on, to tell whether the canvas texture is stale.
 fn raster_key(anns: &[Annotation]) -> String {
     let raster: Vec<&Annotation> = anns.iter().filter(|a| a.is_raster()).collect();
@@ -812,10 +848,31 @@ impl Editor {
             self.undo.remove(0);
         }
         self.redo.clear();
+        self.trim_history(HISTORY_BYTES);
         self.mark_changed();
     }
 
-    /// One undo step per continuous gesture (slider drag, color pick…).
+    /// Forget the oldest undo steps while the pictures the history keeps
+    /// (apart from the one on screen) come to more than `budget` bytes. Most
+    /// steps share the picture; cropping, resizing, turning, lifting an area
+    /// and growing the canvas each make a new one. The last step always stays.
+    fn trim_history(&mut self, budget: usize) {
+        while self.undo.len() > 1 {
+            let mut seen = std::collections::HashSet::from([Arc::as_ptr(&self.base)]);
+            let held: usize = self
+                .undo
+                .iter()
+                .chain(&self.redo)
+                .filter(|s| seen.insert(Arc::as_ptr(&s.base)))
+                .map(|s| s.base.as_raw().len())
+                .sum();
+            if held <= budget {
+                break;
+            }
+            self.undo.remove(0);
+        }
+    }
+
     /// The lowest step number on the image.
     fn first_step(&self) -> Option<u32> {
         self.anns.iter().filter_map(|a| if let Kind::Step { n, .. } = a.kind { Some(n) } else { None }).min()
@@ -915,11 +972,15 @@ impl Editor {
     }
 
     fn commit_text(&mut self) {
-        if let Some(i) = self.editing_text.take()
-            && self.anns.get(i).is_some_and(|a| a.is_degenerate()) {
+        if let Some(i) = self.editing_text.take() {
+            if self.anns.get(i).is_some_and(|a| a.is_degenerate()) {
                 self.anns.remove(i);
                 self.selected = None;
+            } else {
+                // Text typed past the edge gets canvas under it.
+                self.grow_canvas_to_layer(i);
             }
+        }
     }
 
     fn delete_selected(&mut self) {
@@ -1083,6 +1144,14 @@ impl Editor {
         Some(at)
     }
 
+    /// Select all: let go of any mark and pick the whole picture as the area,
+    /// so that Copy takes all of it.
+    fn select_all(&mut self) {
+        self.set_tool(Tool::Marquee);
+        self.selected = None;
+        self.marquee = Some((P::new(0.0, 0.0), P::new(self.base.width() as f32, self.base.height() as f32)));
+    }
+
     /// ⌘X on the picked area: onto the clipboard, leaving a hole.
     fn cut_marquee(&mut self) -> EditorAction {
         let Some(area) = self.marquee_rect() else { return EditorAction::None };
@@ -1195,12 +1264,20 @@ impl Editor {
         self.fit = true;
     }
 
-    /// Enlarge the canvas so the image layer `i`, just dragged past its edge, stays fully visible.
-    /// Only the dragged layer counts, so layers the user deliberately cropped stay cropped.
+    /// Enlarge the canvas so mark `i`, just drawn, placed or dragged past its
+    /// edge, stays fully visible. Only that mark counts, so what the user
+    /// deliberately cropped stays cropped. The pixel tools (blur, fill,
+    /// magnifier, spotlight) work on the picture there is, and don't.
     fn grow_canvas_to_layer(&mut self, i: usize) {
-        let Some(ann) = self.anns.get(i).filter(|a| matches!(a.kind, Kind::Image { .. })) else { return };
-        // All of it as drawn, turned or not.
+        let Some(ann) = self.anns.get(i).filter(|a| !a.is_raster()) else { return };
+        // All of it as drawn, turned or not, with its line's thickness.
+        let m = match ann.kind {
+            Kind::Arrow { .. } => (ann.width * 4.0 + 8.0) * 0.55,
+            Kind::Line { .. } | Kind::Rect { .. } | Kind::Ellipse { .. } => ann.width / 2.0,
+            _ => 0.0,
+        };
         let (lo, hi) = ann.bounds();
+        let (lo, hi) = (P::new(lo.x - m, lo.y - m), P::new(hi.x + m, hi.y + m));
         let (cw, ch) = (self.base.width() as f32, self.base.height() as f32);
         // Round rather than floor/ceil: a sub-pixel overhang is not worth a new base image.
         let x0 = lo.x.round().min(0.0);
@@ -1594,6 +1671,7 @@ impl Editor {
                 self.anns.push(ann);
                 // Keep the new element selected so color/width changes apply to it.
                 self.selected = Some(self.anns.len() - 1);
+                self.grow_canvas_to_layer(self.anns.len() - 1);
             }
     }
 
@@ -1632,6 +1710,17 @@ impl Editor {
             self.set_tool(Tool::Select);
             return;
         }
+        let marks = self.anns.len();
+        self.place(p, hit);
+        // A stamp, number or dot put down past the edge gets canvas under it.
+        // (Text does once it is typed: see `commit_text`.)
+        if self.anns.len() > marks && self.editing_text.is_none() {
+            self.grow_canvas_to_layer(self.anns.len() - 1);
+        }
+    }
+
+    /// What a click with the current tool puts down at `p` (`hit`: the mark there).
+    fn place(&mut self, p: P, hit: Option<usize>) {
         match self.tool {
             Tool::Select => self.select(hit),
             Tool::Eraser => self.erase_at(p),
@@ -1788,12 +1877,7 @@ impl Editor {
         for y in (0..h).step_by(side as usize) {
             for x in (0..w).step_by(side as usize) {
                 let (tw, th) = (side.min(w - x), side.min(h - y));
-                let color = if (tw, th) == (w, h) {
-                    egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw())
-                } else {
-                    let tile = image::imageops::crop_imm(&img, x, y, tw, th).to_image();
-                    egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], tile.as_raw())
-                };
+                let color = color_image(&img, x, y, tw, th);
                 let handle = match old.next() {
                     Some((mut t, _)) => {
                         t.set(color, egui::TextureOptions::LINEAR);
@@ -1903,7 +1987,7 @@ impl Editor {
                 live.push(key);
                 let stale = self.layer_textures.get(&key).is_none_or(|(weak, _)| !weak.upgrade().is_some_and(|w| Arc::ptr_eq(&w, img)));
                 if stale {
-                    let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                    let color = color_image(img, 0, 0, img.width(), img.height());
                     let tex = ctx.load_texture("image-layer", color, egui::TextureOptions::LINEAR);
                     self.layer_textures.insert(key, (Arc::downgrade(img), tex));
                 }
@@ -2693,15 +2777,16 @@ impl Editor {
             let layers = &self.layer_textures;
             let layer_tex = |img: &Arc<RgbaImage>| layers.get(&(Arc::as_ptr(img) as usize)).map(|(_, t)| t.id());
             // Marks show as far as the canvas goes, as they are saved: what
-            // sticks out past its edge is cut off. A picture being dragged is
-            // shown whole, since the canvas grows to hold it when let go.
+            // sticks out past its edge is cut off. One being drawn, typed or
+            // dragged is shown whole, since the canvas grows to hold it when
+            // let go (but not for the pixel tools, which need picture under them).
             let on_canvas = painter.with_clip_rect(img_rect.intersect(painter.clip_rect()));
             let dragging = self.moving.is_some() || self.resizing.is_some() || self.turning.is_some();
             for (i, ann) in self.anns.iter().enumerate() {
                 let editing = self.editing_text == Some(i);
                 // Text being typed into stands upright, as its text box does (see `text_editor`).
                 let angle = if editing { 0.0 } else { ann.rotation };
-                let whole = dragging && self.selected == Some(i) && matches!(ann.kind, Kind::Image { .. });
+                let whole = editing || (dragging && self.selected == Some(i) && !ann.is_raster());
                 let painter = if whole { &painter } else { &on_canvas };
                 paint_turned(painter, to_screen(ann.pivot()), angle, || {
                     paint_annotation(painter, ann, &to_screen, zoom, editing, &layer_tex);
@@ -2715,7 +2800,7 @@ impl Editor {
                 painter.circle_stroke(h, r, Stroke::new(1.5, Color32::WHITE));
             }
             if let Some(ann) = &self.drawing {
-                paint_annotation(&on_canvas, ann, &to_screen, zoom, false, &layer_tex);
+                paint_annotation(if ann.is_raster() { &on_canvas } else { &painter }, ann, &to_screen, zoom, false, &layer_tex);
                 if ann.is_raster() {
                     let (a, b) = ann.bounds();
                     dashed_rect(&painter, Rect::from_two_pos(to_screen(a), to_screen(b)));
@@ -2993,6 +3078,10 @@ impl Editor {
         }
         if save {
             *action = self.save_action();
+        }
+        // ⌘A, or Ctrl+A on any system: the whole picture.
+        if ctx.input_mut(|i| i.consume_key(cmd, Key::A) || i.consume_key(egui::Modifiers::CTRL, Key::A)) {
+            self.select_all();
         }
         if delete || backspace {
             if self.selected.is_none() && self.marquee.is_some() {
@@ -4072,6 +4161,271 @@ mod tests {
         // A blur is the blurred part of the picture.
         ed.anns.push(mark(Kind::pixelate(P::new(200.0, 200.0), P::new(260.0, 240.0))));
         assert_eq!(ed.element_picture(3).unwrap().dimensions(), (60, 40));
+    }
+
+    /// A mark drawn, placed or moved past the canvas edge gets canvas under
+    /// it, in the same undo step; blurs and the like don't.
+    #[test]
+    fn the_canvas_grows_to_hold_marks_put_past_its_edge() {
+        let mut ed = blank_editor();
+        ed.set_tool(Tool::Shape);
+        ed.width = 4.0;
+        drag(&mut ed, (350.0, 250.0), (450.0, 340.0));
+        assert_eq!(ed.size(), (452, 342), "the box and half its line");
+        ed.undo();
+        assert_eq!((ed.size(), ed.anns.len()), ((400, 300), 0), "one undo for both");
+
+        ed.set_tool(Tool::Stamp);
+        ed.stamp_size = 40.0;
+        ed.click(P::new(-10.0, 100.0));
+        assert_eq!(ed.size(), (430, 300));
+        assert!(matches!(ed.anns[0].kind, Kind::Stamp { pos, .. } if pos == P::new(20.0, 100.0)), "it moved over with the picture");
+
+        ed.set_tool(Tool::Select);
+        drag(&mut ed, (20.0, 100.0), (20.0, 290.0));
+        assert_eq!(ed.size(), (430, 310));
+
+        ed.set_tool(Tool::Blur);
+        drag(&mut ed, (400.0, 100.0), (500.0, 200.0));
+        assert_eq!(ed.size(), (430, 310), "a blur needs picture under it");
+    }
+
+    /// Select all lets go of the selected mark and picks the whole picture.
+    #[test]
+    fn select_all_picks_the_whole_picture() {
+        let mut ed = blank_editor();
+        ed.set_tool(Tool::Shape);
+        drag(&mut ed, (50.0, 50.0), (150.0, 120.0));
+        assert_eq!(ed.selected, Some(0));
+        ed.select_all();
+        assert_eq!((ed.selected, ed.marquee_rect(), ed.tool), (None, Some((0, 0, 400, 300)), Tool::Marquee));
+        assert_eq!(ed.area_view(ed.marquee_rect().unwrap()), ed.flatten());
+    }
+
+    /// Timings of the editor's hot paths on a Retina-size screenshot. Run with
+    /// `cargo test --release -- --ignored editor_timings --nocapture`.
+    #[test]
+    #[ignore]
+    fn editor_timings() {
+        use std::time::Instant;
+        let time = |name: &str, n: u32, f: &mut dyn FnMut()| {
+            let t = Instant::now();
+            for _ in 0..n {
+                f();
+            }
+            println!("{name:<52} {:>9.3} ms", t.elapsed().as_secs_f64() * 1000.0 / n as f64);
+        };
+        // A real screenshot (the README's editor picture), tiled to the size asked for.
+        let tile = image::open(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/images/editor.png")).unwrap().to_rgba8();
+        let shot = |w: u32, h: u32| RgbaImage::from_fn(w, h, |x, y| *tile.get_pixel(x % tile.width(), y % tile.height()));
+        let mark = |kind| Annotation { kind, color: [235, 59, 52, 255], width: 6.0, filled: false, rotation: 0.0 };
+        let marks = |n: usize| -> Vec<Annotation> {
+            (0..n)
+                .map(|k| {
+                    let (x, y) = (100.0 + (k % 8) as f32 * 340.0, 200.0 + (k / 8) as f32 * 300.0);
+                    let (a, b) = (P::new(x, y), P::new(x + 220.0, y + 140.0));
+                    let mut m = mark(match k % 6 {
+                        0 => Kind::Arrow { a, b },
+                        1 => Kind::Rect { a, b },
+                        2 => Kind::Ellipse { a, b },
+                        3 => Kind::Text { pos: a, text: "Check this value".into(), size: 44.0, background: true },
+                        4 => Kind::Pen { pts: (0..200).map(|i| P::new(x + i as f32, y + (i as f32 / 9.0).sin() * 40.0)).collect() },
+                        _ => Kind::Stamp { pos: a, size: 90.0, stamp: Stamp::Check },
+                    });
+                    if k % 4 == 3 {
+                        m.rotation = 0.4;
+                    }
+                    m
+                })
+                .collect()
+        };
+        let (w, h) = (3024, 1964);
+        println!("\n== {w} × {h} ==");
+        let base = shot(w, h);
+        time("Editor::new", 5, &mut || {
+            std::hint::black_box(Editor::new(PathBuf::from("unused.png"), base.clone(), None, true));
+        });
+        // A frame as the app spends it on the CPU: the UI pass, then turning
+        // its shapes into triangles. (The GPU's share isn't measured here.)
+        let frames = |name: &str, mut ed: Editor, hover: Option<Pos2>| -> Editor {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let ppp = 2.0;
+            let mut events = hover.map(egui::Event::PointerMoved).into_iter().collect::<Vec<_>>();
+            let mut frame = |ed: &mut Editor| {
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))),
+                    viewports: std::iter::once((egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(ppp), ..Default::default() })).collect(),
+                    events: std::mem::take(&mut events),
+                    ..Default::default()
+                };
+                let out = ctx.run_ui(input, |ui| {
+                    egui::Panel::right("tools").resizable(false).exact_size(256.0).show(ui, |ui| ed.tools_panel(ui));
+                    egui::CentralPanel::default().show(ui, |ui| ed.canvas(ui));
+                });
+                let shapes = out.shapes.len();
+                let tris: usize = ctx.tessellate(out.shapes, ppp).iter().map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.indices.len() / 3,
+                    _ => 0,
+                }).sum();
+                (shapes, tris)
+            };
+            let t = Instant::now();
+            frame(&mut ed);
+            println!("{:<52} {:>9.3} ms", format!("{name}: first frame (texture build)"), t.elapsed().as_secs_f64() * 1000.0);
+            frame(&mut ed);
+            let mut last = (0, 0);
+            time(&format!("{name}: frame"), 200, &mut || last = frame(&mut ed));
+            println!("{:<52} {:>6} shapes, {} triangles", "", last.0, last.1);
+            ed
+        };
+        let ed = Editor::new(PathBuf::from("unused.png"), base.clone(), None, true);
+        let ed = frames("no marks", ed, None);
+        drop(ed);
+        let mut ed = Editor::new(PathBuf::from("unused.png"), base.clone(), None, true);
+        ed.anns = marks(40);
+        ed.selected = Some(3);
+        let mut ed = frames("40 marks, pointer over the image", ed, Some(Pos2::new(500.0, 400.0)));
+
+        time("flatten (Copy / Export)", 5, &mut || {
+            std::hint::black_box(ed.flatten());
+        });
+        let dir = std::env::temp_dir().join(format!("rega-timings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        time("save: picture + sidecar", 3, &mut || write_files(&path, &ed.base, &ed.anns, ed.effects, 1, false).unwrap());
+        time("save: with the original too", 3, &mut || write_files(&path, &ed.base, &ed.anns, ed.effects, 1, true).unwrap());
+        let flat = ed.flatten();
+        time("  of which PNG encode", 3, &mut || flat.save(&path).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        time("push_undo", 50, &mut || ed.push_undo());
+        time("hit_test, 40 marks", 2000, &mut || {
+            std::hint::black_box(ed.hit_test(P::new(1500.0, 900.0)));
+        });
+        time("raster_key, 40 marks", 200, &mut || {
+            std::hint::black_box(raster_key(&ed.anns));
+        });
+        time("clipboard-size hash (fingerprint)", 5, &mut || {
+            use std::hash::{Hash, Hasher};
+            let mut hs = std::collections::hash_map::DefaultHasher::new();
+            flat.as_raw().hash(&mut hs);
+            std::hint::black_box(hs.finish());
+        });
+
+        // The pixel tools: every change re-rasters the whole picture.
+        ed.anns.push(mark(Kind::pixelate(P::new(400.0, 400.0), P::new(900.0, 700.0))));
+        time("apply_raster, one blur", 5, &mut || {
+            std::hint::black_box(render::apply_raster(&ed.base, &ed.anns));
+        });
+        ed.anns.push(mark(Kind::Blur { a: P::new(1400.0, 400.0), b: P::new(1900.0, 700.0), style: BlurStyle::Gaussian, strength: 50.0 }));
+        ed.anns.push(mark(Kind::Spotlight { a: P::new(400.0, 900.0), b: P::new(1200.0, 1400.0) }));
+        ed.anns.push(mark(Kind::Magnify { a: P::new(2000.0, 300.0), b: P::new(2400.0, 700.0), zoom: 2.0 }));
+        time("apply_raster, blur + gaussian + spotlight + loupe", 5, &mut || {
+            std::hint::black_box(render::apply_raster(&ed.base, &ed.anns));
+        });
+        time("fill_area (paint bucket click)", 5, &mut || {
+            std::hint::black_box(ed.fill_area(ed.anns.len(), P::new(50.0, 50.0), 12.0));
+        });
+        ed.texture_dirty = true;
+        let mut ed = frames("after a blur changes", ed, None);
+
+        // Select area and the canvas.
+        ed.anns.truncate(40);
+        let snapshot = (ed.base.clone(), ed.anns.clone());
+        time("Select area: lift a 600 × 400 piece", 5, &mut || {
+            ed.base = snapshot.0.clone();
+            ed.anns = snapshot.1.clone();
+            ed.marquee = Some((P::new(1000.0, 600.0), P::new(1600.0, 1000.0)));
+            ed.lift_marquee(false);
+        });
+        ed.base = snapshot.0.clone();
+        ed.anns.clear();
+        time("Select area: lift, no marks", 5, &mut || {
+            ed.base = snapshot.0.clone();
+            ed.anns.clear();
+            ed.marquee = Some((P::new(1000.0, 600.0), P::new(1600.0, 1000.0)));
+            ed.lift_marquee(false);
+        });
+        time("canvas handle: add 200 px", 5, &mut || {
+            ed.base = snapshot.0.clone();
+            ed.set_canvas((0, 0, w as i64 + 200, h as i64));
+        });
+        time("rotate canvas", 5, &mut || ed.rotate_canvas(true));
+        time("transparency scan", 5, &mut || {
+            std::hint::black_box(ed.base.pixels().any(|p| p[3] < 255));
+        });
+        ed.base = snapshot.0.clone();
+        ed.anns = snapshot.1.clone();
+        ed.undo.clear();
+        ed.marquee = Some((P::new(1000.0, 600.0), P::new(1600.0, 1000.0)));
+        ed.auto_fill = false;
+        ed.delete_marquee();
+        ed.texture_dirty = true;
+        frames("with a see-through hole (checkerboard)", ed, None);
+
+        // A long scrolling capture.
+        let (w, h) = (3000, 20_000);
+        println!("\n== {w} × {h} ==");
+        let mut ed = Editor::new(PathBuf::from("unused.png"), shot(w, h), None, true);
+        ed.anns = marks(40);
+        let mut ed = frames("scrolling capture", ed, Some(Pos2::new(500.0, 400.0)));
+        time("flatten (Copy / Export)", 2, &mut || {
+            std::hint::black_box(ed.flatten());
+        });
+        let dir = std::env::temp_dir().join(format!("rega-timings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        time("save: picture + sidecar", 2, &mut || write_files(&path, &ed.base, &ed.anns, ed.effects, 1, false).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        time("Select area: lift a 600 × 400 piece", 3, &mut || {
+            ed.marquee = Some((P::new(1000.0, 600.0), P::new(1600.0, 1000.0)));
+            ed.lift_marquee(false);
+        });
+        time("draw a box past the edge (canvas grows)", 3, &mut || {
+            ed.set_tool(Tool::Shape);
+            let (cw, ch) = (ed.base.width() as f32, ed.base.height() as f32);
+            ed.drag_begin(P::new(cw - 100.0, ch / 3.0));
+            ed.drag_update(P::new(cw + 40.0, ch / 3.0 + 80.0), false);
+            ed.drag_end();
+        });
+        let mut seen = std::collections::HashSet::new();
+        let held: usize = ed.undo.iter().filter(|s| seen.insert(Arc::as_ptr(&s.base))).map(|s| s.base.as_raw().len()).sum();
+        println!("{:<52} {:>9.0} MB in {} undo steps", "undo history holds", held as f64 / 1e6, ed.undo.len());
+    }
+
+    /// The undo history gives up its oldest steps rather than hold pictures
+    /// without limit; steps that share the picture cost nothing.
+    #[test]
+    fn undo_history_keeps_within_its_memory() {
+        let mut ed = blank_editor();
+        let one = ed.base.as_raw().len();
+        for _ in 0..10 {
+            ed.push_undo();
+        }
+        ed.trim_history(0);
+        assert_eq!(ed.undo.len(), 10, "ten steps, one picture: the one on screen");
+        for _ in 0..6 {
+            ed.rotate_canvas(true);
+        }
+        assert_eq!(ed.undo.len(), 16);
+        ed.trim_history(one * 3);
+        assert_eq!(ed.undo.len(), 3, "the three newest pictures are kept");
+        ed.trim_history(0);
+        assert_eq!(ed.undo.len(), 1, "the last step always stays");
+        ed.undo();
+        assert_eq!(ed.size(), (300, 400));
+    }
+
+    /// Pixels reach the screen as egui itself would convert them, whole or
+    /// as a tile, see-through ones included.
+    #[test]
+    fn textures_are_built_as_egui_builds_them() {
+        let img = RgbaImage::from_fn(700, 900, |x, y| image::Rgba([x as u8, y as u8, (x + y) as u8, (x * y) as u8]));
+        let whole = egui::ColorImage::from_rgba_unmultiplied([700, 900], img.as_raw());
+        assert!(color_image(&img, 0, 0, 700, 900) == whole);
+        let tile = image::imageops::crop_imm(&img, 130, 55, 401, 777).to_image();
+        assert!(color_image(&img, 130, 55, 401, 777) == egui::ColorImage::from_rgba_unmultiplied([401, 777], tile.as_raw()));
+        assert_eq!(color_image(&img, 0, 0, 3, 2).pixels.len(), 6);
     }
 
     #[test]

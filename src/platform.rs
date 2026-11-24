@@ -273,6 +273,41 @@ pub fn prime_hidden_window() {
 #[cfg(not(target_os = "macos"))]
 pub fn prime_hidden_window() {}
 
+/// Take Rega's window out of sight this instant, ahead of hiding it: hiding
+/// only happens after the pass, and until then the window would show a blank
+/// frame. [`opaque_once_hidden`] makes it opaque again when it is off screen.
+#[cfg(target_os = "macos")]
+pub fn vanish_main_window() {
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        if window.isVisible() && window.title().to_string() == crate::config::APP_NAME {
+            window.setAlphaValue(0.0);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn vanish_main_window() {}
+
+/// Undo [`vanish_main_window`] once the window really is off screen, so that
+/// it is never shown see-through by a path that doesn't set its opacity.
+#[cfg(target_os = "macos")]
+pub fn opaque_once_hidden() {
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        if !window.isVisible() && window.alphaValue() < 1.0 && window.title().to_string() == crate::config::APP_NAME {
+            window.setAlphaValue(1.0);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn opaque_once_hidden() {}
+
 pub fn is_primed() -> bool {
     #[cfg(target_os = "macos")]
     return PRIMED.load(std::sync::atomic::Ordering::Relaxed);

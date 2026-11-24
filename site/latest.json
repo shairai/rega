@@ -1,28 +1,25 @@
 {
-  "version": "0.4.13",
-  "date": "2026-11-23",
-  "title": "Select and move part of a picture, resize the canvas, one Shape tool.",
+  "version": "0.4.14",
+  "date": "2026-11-24",
+  "title": "Scrolling captures that keep going, no more flashes, a lighter editor.",
   "notes": [
-    "Select area, a new tool (G): drag over part of the picture, then drag it somewhere else. It lifts off as a picture you can move, resize, turn or delete; hold ⌥ / Alt to drag a copy. ⌘X cuts the area, ⌘C copies it, ⌫ deletes it.",
-    "Change the canvas size by dragging the handles on the image's edge: outward to add space around the picture, inward to trim it.",
-    "Rectangle and Ellipse are one tool now, Shape: pick which in the side panel, where a selected shape can also be turned into the other. R and E still pick them.",
-    "New starts at the size of the image on the clipboard, when there is one, so it can be pasted onto a canvas that fits it.",
-    "A pasted image keeps its own size whenever the canvas can hold it; it used to shrink to 80% of the canvas.",
-    "Marks reaching past the canvas edge are cut off there on screen, as they are in the saved image.",
-    "A copied mark also goes on the clipboard as a picture, so it can be pasted into a new image (which opens at its size) or another app.",
-    "⌘X / Ctrl+X also cuts a selected mark."
+    "Scrolling capture no longer stops after one scroll on a page with a video or an animation on it: frames are lined up by where most of the page agrees, and each scroll is given time to come to rest.",
+    "Mac: the screen no longer flashes when a capture or a color pick starts or ends (a black frame as it began, Rega's window over the whole screen for a moment as it ended).",
+    "A mark drawn, placed, typed or moved past the edge of the picture now gets canvas under it, as pasted pictures did. (Blur, fill, magnifier and spotlight don't: they need picture to work on.)",
+    "Select all (⌘A / Ctrl+A) lets go of the selected mark and picks the whole picture, so Copy takes all of it.",
+    "Faster and lighter on large images: the picture is redrawn two to three times faster after a blur, fill or magnifier changes, and the undo history no longer grows without limit on long captures."
   ],
   "url": "https://rega-capture.vercel.app/#download",
   "downloads": {
     "macos": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.13-macos-universal.dmg",
-      "size": 16030352,
-      "sha256": "3c220796397d11404d5bea9c2b83cc6b1f6bbee3c6e59a11dd426d9973ff341e"
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.14-macos-universal.dmg",
+      "size": 16049933,
+      "sha256": "295964cf35da3ccda9655511c58770e8530fb83707517d7bba9d66997e6ecb15"
     },
     "windows": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.13-windows-x64-setup.exe",
-      "size": 6660143,
-      "sha256": "a8b67d78e7fa3e2a8241d418e760dd8a5f8f3080f003eafba9655d717920050a"
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.14-windows-x64-setup.exe",
+      "size": 6663683,
+      "sha256": "3e1d713e457560c39a716072e59d850ae150b00846fea97db243d901273232e8"
     }
   }
 }

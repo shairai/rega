@@ -10,6 +10,25 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.14 — 2026-11-24
+
+Scrolling captures that keep going, no more flashes, a lighter editor.
+
+- **Scrolling capture** no longer stops after one scroll on a page with a
+  video or an animation on it: frames are lined up by where most of the
+  page agrees, and each scroll is given time to come to rest.
+- Mac: the screen no longer flashes when a capture or a color pick starts
+  or ends (a black frame as it began, Rega's window over the whole screen
+  for a moment as it ended).
+- A mark drawn, placed, typed or moved past the edge of the picture now
+  gets canvas under it, as pasted pictures did. (Blur, fill, magnifier and
+  spotlight don't: they need picture to work on.)
+- **Select all** (`⌘A` / `Ctrl+A`) lets go of the selected mark and picks
+  the whole picture, so Copy takes all of it.
+- Faster and lighter on large images: the picture is redrawn two to three
+  times faster after a blur, fill or magnifier changes, and the undo
+  history no longer grows without limit on long captures.
+
 ## 0.4.13 — 2026-11-23
 
 Select and move part of a picture, resize the canvas, one Shape tool.

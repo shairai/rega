@@ -121,6 +121,10 @@ pub struct RegaApp {
     /// Passes left before the window, made transparent while it changed role, is
     /// shown again; see `hide_until_painted`.
     reveal_in: Option<u8>,
+    /// The window's size when it was told to become the normal window again:
+    /// it isn't shown until it has left that size (see `tick_reveal`), and for
+    /// how many passes that has been waited for.
+    reveal_resize: Option<(Vec2, u8)>,
     /// When revealed, order the window behind other apps (shown in the background).
     reveal_behind: bool,
     show_permissions: bool,
@@ -260,6 +264,7 @@ impl RegaApp {
             lib_anchor: None,
             overlay_to_present: None,
             reveal_in: None,
+            reveal_resize: None,
             reveal_behind: false,
             show_permissions: false,
             perm_status: Vec::new(),
@@ -377,6 +382,11 @@ impl RegaApp {
         // A primed window (see `platform::prime_hidden_window`) is as good as
         // hidden already, and must stay on screen to run without delay.
         if !(self.win == Win::Hidden && platform::is_primed()) {
+            // Out of sight this instant: the hiding itself only happens after
+            // this pass, and until then the window would show a blank frame,
+            // or its stale last one stretched to the size it has now. It is
+            // made opaque again once hidden (see `logic`).
+            platform::vanish_main_window();
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
         platform::set_dock_icon(false);
@@ -403,6 +413,9 @@ impl RegaApp {
             ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
             ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(self.min_size));
             let size = self.normal_inner.map(|r| r.size()).unwrap_or(Vec2::new(1360.0, 840.0));
+            // The resize lands a pass or more later; revealed before it, the
+            // normal UI would show for a moment at the overlay's size.
+            self.reveal_resize = ctx.input(|i| i.viewport().inner_rect).map(|r| r.size()).filter(|now| (*now - size).length() > 2.0).map(|now| (now, 0));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
             if let Some(outer) = self.normal_outer {
                 ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min));
@@ -474,7 +487,7 @@ impl RegaApp {
         // Comes up transparent (see `platform::present_overlay`). The screenshot
         // matches the real screen, so the transparent moment is invisible.
         platform::present_overlay(frame);
-        self.hide_until_painted(ctx, 1);
+        self.hide_until_painted(ctx, 2);
     }
 
     /// Keep the (already transparent) window hidden for `passes` more painted
@@ -486,6 +499,20 @@ impl RegaApp {
     }
 
     fn tick_reveal(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        // Still the size it had as an overlay: wait for the resize (not for
+        // ever: half a second at most), then for a pass painted at the new size.
+        if let (Some(0), Some((old, waited))) = (self.reveal_in, self.reveal_resize) {
+            let now = ctx.input(|i| i.viewport().inner_rect).map(|r| r.size());
+            if now.is_some_and(|now| (now - old).length() <= 2.0) && waited < 30 {
+                self.reveal_resize = Some((old, waited + 1));
+                ctx.request_repaint();
+                return;
+            }
+            self.reveal_resize = None;
+            self.reveal_in = Some(1);
+            ctx.request_repaint();
+            return;
+        }
         match self.reveal_in {
             Some(0) => {
                 // Ordered back while still transparent, so it never flashes in front.
@@ -520,6 +547,8 @@ impl RegaApp {
         // The full-screen overlay shrinks into the bar; don't flash its stale frame.
         platform::set_window_alpha(frame, 0.0);
         self.hide_until_painted(ctx, 2);
+        // Not before it has shrunk, either (see `tick_reveal`).
+        self.reveal_resize = ctx.input(|i| i.viewport().inner_rect).map(|r| r.size()).filter(|now| (*now - BAR_SIZE).length() > 2.0).map(|now| (now, 0));
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::ZERO));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(BAR_SIZE));
@@ -3267,6 +3296,10 @@ impl eframe::App for RegaApp {
             }
         }
         self.sync_capture_zoom(ctx);
+        if self.win == Win::Hidden && !platform::is_primed() {
+            // Hidden for good by now: opaque for whatever shows it next.
+            platform::opaque_once_hidden();
+        }
 
         if ctx.input(|i| i.viewport().close_requested()) {
             // Closing the window keeps Rega running in the menu bar.
