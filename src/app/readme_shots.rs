@@ -659,6 +659,7 @@ fn write_demo_guide(library: &Path, dashboard: &RgbaImage, code: &RgbaImage) {
         marker_hidden: false,
         title: title.into(),
         note: String::new(),
+        edit: None,
     };
     let click = Action::Click { button: Button::Left, count: 1 };
     let mut steps = vec![

@@ -37,6 +37,7 @@ pub enum AppEvent {
     ShowMain,
     NewImage,
     OpenImage,
+    OpenGuide,
     CloseItem,
     DeleteItem,
     About,
@@ -170,6 +171,7 @@ impl RegaApp {
         let mut app = Self::build(&cc.egui_ctx, Settings::load(), true);
         // The window opens at launch, so show the Dock icon (we start as an agent).
         platform::set_dock_icon(true);
+        crate::open_requests::wake(&cc.egui_ctx);
         // Dev builds would register a throwaway target/ binary.
         if !cfg!(debug_assertions) {
             platform::set_launch_at_login(app.settings.launch_at_login);
@@ -579,6 +581,10 @@ impl RegaApp {
             AppEvent::OpenImage => {
                 self.show_normal(ctx, frame);
                 self.import_from_dialog();
+            }
+            AppEvent::OpenGuide => {
+                self.show_normal(ctx, frame);
+                self.open_guide_dialog();
             }
             AppEvent::CloseItem => self.close_current(ctx),
             AppEvent::DeleteItem => self.delete_current(),
@@ -1499,6 +1505,7 @@ impl RegaApp {
                     self.refresh_library();
                     self.toast(msg);
                 }
+                GuideAction::Ocr(img) => self.start_ocr(&ctx, img),
             }
         }
     }
@@ -2344,6 +2351,11 @@ impl RegaApp {
         let mut imgs = Vec::new();
         for file in dropped {
             let path = file.path();
+            if crate::guide::is_package(path) {
+                // A guide someone sent to edit: it opens instead.
+                let path = path.to_path_buf();
+                return self.import_guide(&path);
+            }
             match image::open(path) {
                 Ok(img) => imgs.push(img.to_rgba8()),
                 Err(e) => self.toast(format!("Cannot open {}: {e}", path.file_name().unwrap_or_default().to_string_lossy())),
@@ -2363,14 +2375,61 @@ impl RegaApp {
 
     fn import_from_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "ico"])
+            .add_filter("Images and guides", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "ico", crate::guide::PACKAGE_EXT])
             .pick_file()
         {
+            if crate::guide::is_package(&p) {
+                return self.import_guide(&p);
+            }
             match image::open(&p) {
                 Ok(img) => self.import_image(img.to_rgba8()),
                 Err(e) => self.toast(format!("Cannot open: {e}")),
             }
         }
+    }
+
+    /// File › Open Guide…: pick a guide someone exported to edit.
+    fn open_guide_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new().add_filter("Rega guides", &[crate::guide::PACKAGE_EXT]).pick_file() {
+            self.import_guide(&p);
+        }
+    }
+
+    /// A file the system handed to Rega (double-clicked, dropped on the Dock
+    /// icon, "Open with"): bring the window up and open it, whatever was open.
+    fn open_file(&mut self, ctx: &egui::Context, frame: &eframe::Frame, path: &std::path::Path) {
+        self.show_normal(ctx, frame);
+        platform::activate_app();
+        if crate::guide::is_package(path) {
+            return self.import_guide(path);
+        }
+        match image::open(path) {
+            Ok(img) => {
+                self.autosave_editor();
+                self.import_image(img.to_rgba8());
+            }
+            Err(e) => self.toast(format!("Cannot open {}: {e}", path.file_name().unwrap_or_default().to_string_lossy())),
+        }
+    }
+
+    /// Open a guide someone exported for editing: it becomes a guide of its
+    /// own in the library (the file it came in is left alone).
+    fn import_guide(&mut self, package: &std::path::Path) {
+        let guide = match crate::guide::read_package(package) {
+            Ok(guide) => guide,
+            Err(e) => return self.toast(format!("Cannot open {}: {e:#}", package.file_name().unwrap_or_default().to_string_lossy())),
+        };
+        let n = guide.steps.len();
+        let path = library::new_capture_path(&self.settings.save_dir, "html");
+        let mut ed = GuideEditor::new(&self.ctx, path, guide);
+        if let Err(e) = ed.save_now() {
+            return self.toast(format!("Could not save the guide: {e:#}"));
+        }
+        self.autosave_editor();
+        self.lib_filter = LibFilter::All;
+        self.mode = Mode::Guide(Box::new(ed));
+        self.refresh_library();
+        self.toast(format!("Guide opened: {n} step{} — it is in your library now", if n == 1 { "" } else { "s" }));
     }
 
     fn import_from_clipboard(&mut self) {
@@ -3276,6 +3335,13 @@ impl eframe::App for RegaApp {
         while let Ok(ev) = self.events.try_recv() {
             self.handle_event(ev, ctx, frame);
         }
+        // A file opened from Finder or Explorer. Not in the middle of a
+        // capture or a recording: it waits for that to end.
+        if matches!(self.activity, Activity::Idle) {
+            for path in crate::open_requests::take() {
+                self.open_file(ctx, frame, &path);
+            }
+        }
         self.sync_capture_zoom(ctx);
         while let Ok((path, modified, img)) = self.thumb_results.try_recv() {
             // Mipmapped: drawn smaller than it's made, it stays smooth.
@@ -3559,6 +3625,7 @@ fn setup_menus(
         let _ = file_menu.append_items(&[
             &MenuItem::with_id("new-image", "New Image…", true, cmd(Code::KeyN)),
             &MenuItem::with_id("open-image", "Open Image…", true, cmd(Code::KeyO)),
+            &MenuItem::with_id("open-guide", "Open Guide…", true, Some(Accelerator::new(Modifiers::META | Modifiers::SHIFT, Code::KeyO))),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("close-item", "Close", true, cmd(Code::KeyW)),
             &MenuItem::with_id("delete-item", "Delete…", true, cmd(Code::KeyD)),
@@ -3566,6 +3633,7 @@ fn setup_menus(
     }
     map.insert("new-image".into(), AppEvent::NewImage);
     map.insert("open-image".into(), AppEvent::OpenImage);
+    map.insert("open-guide".into(), AppEvent::OpenGuide);
     map.insert("close-item".into(), AppEvent::CloseItem);
     map.insert("delete-item".into(), AppEvent::DeleteItem);
     let window_menu = Submenu::new("Window", true);

@@ -655,6 +655,7 @@ fn site_guide() {
         marker_hidden: false,
         title: title.into(),
         note: note.into(),
+        edit: None,
     };
     let mut steps = Vec::new();
 

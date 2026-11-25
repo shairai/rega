@@ -41,6 +41,29 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>12.3</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSUIElement</key><true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Rega guide</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Owner</string>
+      <key>CFBundleTypeIconFile</key><string>Rega</string>
+      <key>LSItemContentTypes</key><array><string>app.rega.guide</string></array>
+    </dict>
+  </array>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>app.rega.guide</string>
+      <key>UTTypeDescription</key><string>Rega guide</string>
+      <key>UTTypeIconFile</key><string>Rega</string>
+      <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key><array><string>regaguide</string></array>
+      </dict>
+    </dict>
+  </array>
   <key>NSScreenCaptureUsageDescription</key><string>Rega captures your screen to create screenshots and recordings.</string>
 </dict>
 </plist>

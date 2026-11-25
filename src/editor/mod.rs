@@ -747,6 +747,12 @@ impl Editor {
         Pos2::new(self.view_origin.x + p.x * self.zoom, self.view_origin.y + p.y * self.zoom)
     }
 
+    /// What the picture is made of: the image underneath and what is on it,
+    /// to keep them apart from the flattened result (a guide step does).
+    pub fn parts(&self) -> (Arc<RgbaImage>, Project) {
+        (self.base.clone(), Project { annotations: self.anns.clone(), effects: self.effects, next_step: self.next_step })
+    }
+
     pub fn flatten(&self) -> RgbaImage {
         render::render(&self.base, &self.anns, &self.effects)
     }

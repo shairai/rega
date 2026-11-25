@@ -58,6 +58,11 @@ SetCompressor /SOLID lzma
   ${LoopUntil} $1 >= 40
 !macroend
 
+; SHChangeNotify(SHCNE_ASSOCCHANGED): Explorer rereads which program opens what.
+!macro RefreshFileTypes
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+!macroend
+
 Section "Install"
   !insertmacro CloseRega
   SetOutPath "$INSTDIR"
@@ -71,6 +76,13 @@ Section "Install"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Rega" "DisplayIcon" "$INSTDIR\Rega.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Rega" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Rega" "NoModify" 1
+
+  ; A .regaguide (a guide exported to edit) opens in Rega.
+  WriteRegStr HKCU "Software\Classes\.regaguide" "" "Rega.Guide"
+  WriteRegStr HKCU "Software\Classes\Rega.Guide" "" "Rega guide"
+  WriteRegStr HKCU "Software\Classes\Rega.Guide\DefaultIcon" "" "$INSTDIR\Rega.exe,0"
+  WriteRegStr HKCU "Software\Classes\Rega.Guide\shell\open\command" "" '"$INSTDIR\Rega.exe" "%1"'
+  !insertmacro RefreshFileTypes
 SectionEnd
 
 Section "Uninstall"
@@ -82,4 +94,11 @@ Section "Uninstall"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\Rega.lnk"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Rega"
+  ; The file type, if it is still ours.
+  ReadRegStr $0 HKCU "Software\Classes\.regaguide" ""
+  ${If} $0 == "Rega.Guide"
+    DeleteRegKey HKCU "Software\Classes\.regaguide"
+  ${EndIf}
+  DeleteRegKey HKCU "Software\Classes\Rega.Guide"
+  !insertmacro RefreshFileTypes
 SectionEnd

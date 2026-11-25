@@ -145,6 +145,15 @@ pub struct Step {
     pub marker_hidden: bool,
     pub title: String,
     pub note: String,
+    /// The picture has been marked up (arrows, blur, …): what it was before,
+    /// and the marks, so it can be edited again. `shot` is the result.
+    pub edit: Option<Arc<ShotEdit>>,
+}
+
+/// A step's picture before it was marked up in the editor, and the marks.
+pub struct ShotEdit {
+    pub original: Arc<Shot>,
+    pub project: crate::editor::model::Project,
 }
 
 impl Step {
@@ -191,6 +200,15 @@ struct StepFile {
     title: String,
     #[serde(default)]
     note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    edit: Option<EditFile>,
+}
+
+/// A marked-up step: the file of the picture as it was, and the marks.
+#[derive(Serialize, Deserialize)]
+struct EditFile {
+    original: String,
+    project: crate::editor::model::Project,
 }
 
 /// The folder that keeps a guide editable: `.rega/<name>.guide/`.
@@ -208,19 +226,9 @@ pub fn is_guide(html: &Path) -> bool {
     sidecar_json(html).is_file()
 }
 
-/// Write the sidecar: new screenshots are added, ones no step uses any more removed.
-pub fn save_sidecar(html: &Path, guide: &Guide) -> Result<()> {
-    let dir = sidecar_dir(html);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let mut keep = HashSet::new();
-    for step in &guide.steps {
-        let name = step.shot.file_name();
-        let path = dir.join(&name);
-        if keep.insert(name) && !path.exists() {
-            write_atomic(&path, &step.shot.png)?;
-        }
-    }
-    let file = GuideFile {
+/// The guide as its sidecar's `guide.json` describes it.
+fn guide_file(guide: &Guide) -> GuideFile {
+    GuideFile {
         version: 2,
         title: guide.title.clone(),
         seconds: None,
@@ -235,10 +243,77 @@ pub fn save_sidecar(html: &Path, guide: &Guide) -> Result<()> {
                 marker_hidden: s.marker_hidden,
                 title: s.title.clone(),
                 note: s.note.clone(),
+                edit: s.edit.as_ref().map(|e| EditFile { original: e.original.file_name(), project: e.project.clone() }),
             })
             .collect(),
-    };
-    write_atomic(&dir.join("guide.json"), &serde_json::to_vec_pretty(&file)?)?;
+    }
+}
+
+/// Every picture a guide keeps, once each: the steps' own, and the ones
+/// marked-up steps were made from.
+fn shots_of(guide: &Guide) -> Vec<&Arc<Shot>> {
+    let mut seen = HashSet::new();
+    guide
+        .steps
+        .iter()
+        .flat_map(|s| [Some(&s.shot), s.edit.as_ref().map(|e| &e.original)])
+        .flatten()
+        .filter(|shot| seen.insert(shot.id))
+        .collect()
+}
+
+/// A plain file name: what `guide.json` says must not reach outside its folder.
+fn plain_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['/', '\\']) && !name.starts_with('.')
+}
+
+/// The guide `file` describes, its pictures fetched by name with `read`.
+fn guide_from(file: GuideFile, mut read: impl FnMut(&str) -> Result<Vec<u8>>) -> Result<Guide> {
+    let mut shots: HashMap<String, Arc<Shot>> = HashMap::new();
+    let mut steps = Vec::with_capacity(file.steps.len());
+    for s in file.steps {
+        if !plain_name(&s.shot) {
+            continue;
+        }
+        let mut shot_named = |name: &str| -> Result<Arc<Shot>> {
+            if let Some(shot) = shots.get(name) {
+                return Ok(shot.clone());
+            }
+            let shot = Shot::from_png(read(name).with_context(|| format!("screenshot {name} is missing"))?)?;
+            shots.insert(name.to_owned(), shot.clone());
+            Ok(shot)
+        };
+        let shot = shot_named(&s.shot)?;
+        // Without the picture as it was, the step is still whole: only its
+        // marks can't be edited any more.
+        let edit = s.edit.filter(|e| plain_name(&e.original)).and_then(|e| {
+            let original = shot_named(&e.original).ok()?;
+            Some(Arc::new(ShotEdit { original, project: e.project }))
+        });
+        steps.push(Step { shot, action: s.action, marker: s.marker, marker_hidden: s.marker_hidden, title: s.title, note: s.note, edit });
+    }
+    let mut style = file.style.unwrap_or_default();
+    if let Some(seconds) = file.seconds {
+        style.seconds = seconds;
+    }
+    style.seconds = style.seconds.clamp(1.0, 30.0);
+    Ok(Guide { title: file.title, style, steps })
+}
+
+/// Write the sidecar: new screenshots are added, ones no step uses any more removed.
+pub fn save_sidecar(html: &Path, guide: &Guide) -> Result<()> {
+    let dir = sidecar_dir(html);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut keep = HashSet::new();
+    for shot in shots_of(guide) {
+        let name = shot.file_name();
+        let path = dir.join(&name);
+        if !path.exists() {
+            write_atomic(&path, &shot.png)?;
+        }
+        keep.insert(name);
+    }
+    write_atomic(&dir.join("guide.json"), &serde_json::to_vec_pretty(&guide_file(guide))?)?;
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.filter_map(|e| e.ok()) {
             let name = e.file_name().to_string_lossy().into_owned();
@@ -254,30 +329,67 @@ pub fn load(html: &Path) -> Result<Guide> {
     let dir = sidecar_dir(html);
     let json = std::fs::read(sidecar_json(html)).context("this guide's editable copy is missing")?;
     let file: GuideFile = serde_json::from_slice(&json).context("reading the guide")?;
-    let mut shots: HashMap<String, Arc<Shot>> = HashMap::new();
-    let mut steps = Vec::with_capacity(file.steps.len());
-    for s in file.steps {
-        // Only a plain file name: the JSON must not reach outside its folder.
-        if s.shot.contains(['/', '\\']) || s.shot.starts_with('.') {
-            continue;
-        }
-        let shot = match shots.get(&s.shot) {
-            Some(shot) => shot.clone(),
-            None => {
-                let png = std::fs::read(dir.join(&s.shot)).with_context(|| format!("screenshot {} is missing", s.shot))?;
-                let shot = Shot::from_png(png)?;
-                shots.insert(s.shot.clone(), shot.clone());
-                shot
-            }
-        };
-        steps.push(Step { shot, action: s.action, marker: s.marker, marker_hidden: s.marker_hidden, title: s.title, note: s.note });
+    guide_from(file, |name| Ok(std::fs::read(dir.join(name))?))
+}
+
+// ---------- one file to pass on ----------
+
+/// The extension of a guide packed into one file for someone else to edit.
+pub const PACKAGE_EXT: &str = "regaguide";
+const PACKAGE_MAGIC: &[u8] = b"REGA-GUIDE 1\n";
+
+/// Is `path` a guide packed into one file (by its name)?
+pub fn is_package(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case(PACKAGE_EXT))
+}
+
+/// Pack the whole editable guide into one file: what the sidecar folder
+/// holds (the steps, their pictures at full quality, the marks on them), to
+/// send to someone who opens it in their Rega and carries on editing.
+///
+/// The file is the magic line, then entry after entry: the name's length
+/// (u32, little-endian), the name, the data's length (u64), the data.
+/// `guide.json` comes first, then each picture.
+pub fn write_package(dest: &Path, guide: &Guide) -> Result<()> {
+    let mut out = PACKAGE_MAGIC.to_vec();
+    let mut entry = |name: &str, data: &[u8]| {
+        out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        out.extend_from_slice(data);
+    };
+    entry("guide.json", &serde_json::to_vec(&guide_file(guide))?);
+    for shot in shots_of(guide) {
+        entry(&shot.file_name(), &shot.png);
     }
-    let mut style = file.style.unwrap_or_default();
-    if let Some(seconds) = file.seconds {
-        style.seconds = seconds;
+    write_atomic(dest, &out)
+}
+
+/// Unpack a guide written by [`write_package`].
+pub fn read_package(src: &Path) -> Result<Guide> {
+    let bytes = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
+    let mut rest = bytes.strip_prefix(PACKAGE_MAGIC).context("this isn't a Rega guide file")?;
+    let mut take = |n: usize| -> Result<&[u8]> {
+        anyhow::ensure!(n <= rest.len(), "the guide file is cut short");
+        let (head, tail) = rest.split_at(n);
+        rest = tail;
+        Ok(head)
+    };
+    let mut entries: HashMap<String, &[u8]> = HashMap::new();
+    loop {
+        let Ok(len) = take(4) else { break };
+        let len = u32::from_le_bytes(len.try_into().unwrap()) as usize;
+        anyhow::ensure!(len <= 255, "the guide file is damaged");
+        let name = String::from_utf8(take(len)?.to_vec()).context("the guide file is damaged")?;
+        let size = u64::from_le_bytes(take(8)?.try_into().unwrap());
+        let data = take(usize::try_from(size).context("the guide file is damaged")?)?;
+        entries.insert(name, data);
     }
-    style.seconds = style.seconds.clamp(1.0, 30.0);
-    Ok(Guide { title: file.title, style, steps })
+    let json = entries.get("guide.json").context("the guide file has no guide in it")?;
+    let file: GuideFile = serde_json::from_slice(json).context("reading the guide")?;
+    let guide = guide_from(file, |name| entries.get(name).map(|d| d.to_vec()).context("not in the file"))?;
+    anyhow::ensure!(!guide.steps.is_empty(), "this guide has no steps");
+    Ok(guide)
 }
 
 /// The first step's screenshot, for the library thumbnail.
@@ -327,6 +439,7 @@ pub(crate) mod tests {
             marker_hidden: false,
             title: title.to_owned(),
             note: String::new(),
+            edit: None,
         }
     }
 
@@ -381,6 +494,48 @@ pub(crate) mod tests {
         delete_sidecar(&html);
         assert!(!is_guide(&html));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A guide packed into one file comes out whole on the other side: its
+    /// steps, its pictures bit for bit, the marks on a marked-up step and
+    /// the picture under them. A file that isn't one, or is cut short, says so.
+    #[test]
+    fn a_packed_guide_opens_whole() {
+        let (plain, other) = (Shot::encode(&screen(64, 40, 1)).unwrap(), Shot::encode(&screen(64, 40, 2)).unwrap());
+        let mut steps = vec![step(&plain, "One"), step(&other, "Two"), step(&plain, "Three")];
+        steps[1].note = "Mind the gap".into();
+        steps[1].marker_hidden = true;
+        let mut project = crate::editor::model::Project::default();
+        project.annotations.push(crate::editor::model::Annotation {
+            kind: crate::editor::model::Kind::Rect { a: crate::editor::model::P::new(4.0, 4.0), b: crate::editor::model::P::new(20.0, 12.0) },
+            color: [255, 0, 0, 255],
+            width: 2.0,
+            filled: true,
+            rotation: 0.0,
+        });
+        steps[2].edit = Some(Arc::new(ShotEdit { original: plain.clone(), project }));
+        steps[2].shot = Shot::encode(&screen(64, 40, 3)).unwrap();
+        let mut guide = Guide::new("Reset a password".into(), steps);
+        guide.style.seconds = 7.0;
+
+        let file = std::env::temp_dir().join(format!("rega-packed-{}.{PACKAGE_EXT}", std::process::id()));
+        assert!(is_package(&file) && !is_package(Path::new("guide.html")));
+        write_package(&file, &guide).unwrap();
+        let back = read_package(&file).unwrap();
+        assert_eq!((back.title.as_str(), back.style.seconds, back.steps.len()), ("Reset a password", 7.0, 3));
+        for (a, b) in guide.steps.iter().zip(&back.steps) {
+            assert_eq!((&a.title, &a.note, a.marker, a.marker_hidden), (&b.title, &b.note, b.marker, b.marker_hidden));
+            assert_eq!(a.shot.png, b.shot.png);
+        }
+        assert!(Arc::ptr_eq(&back.steps[0].shot, &back.steps[2].edit.as_ref().unwrap().original), "one picture, read once");
+        assert_eq!(back.steps[2].edit.as_ref().unwrap().project.annotations.len(), 1);
+
+        let bytes = std::fs::read(&file).unwrap();
+        std::fs::write(&file, &bytes[..bytes.len() - 20]).unwrap();
+        assert!(read_package(&file).is_err(), "cut short");
+        std::fs::write(&file, b"<!doctype html>").unwrap();
+        assert!(read_package(&file).is_err(), "not a guide file");
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]

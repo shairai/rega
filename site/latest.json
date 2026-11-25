@@ -1,25 +1,24 @@
 {
-  "version": "0.4.14",
-  "date": "2026-11-24",
-  "title": "Scrolling captures that keep going, no more flashes, a lighter editor.",
+  "version": "0.4.15",
+  "date": "2026-11-25",
+  "title": "Guides: mark up the pictures, hand a guide over to edit, pause on a click.",
   "notes": [
-    "Scrolling capture no longer stops after one scroll on a page with a video or an animation on it: frames are lined up by where most of the page agrees, and each scroll is given time to come to rest.",
-    "Mac: the screen no longer flashes when a capture or a color pick starts or ends (a black frame as it began, Rega's window over the whole screen for a moment as it ended).",
-    "A mark drawn, placed, typed or moved past the edge of the picture now gets canvas under it, as pasted pictures did. (Blur, fill, magnifier and spotlight don't: they need picture to work on.)",
-    "Select all (⌘A / Ctrl+A) lets go of the selected mark and picks the whole picture, so Copy takes all of it.",
-    "Faster and lighter on large images: the picture is redrawn two to three times faster after a blur, fill or magnifier changes, and the undo history no longer grows without limit on long captures."
+    "Guides: mark up a step's picture. *Mark up picture* opens the step's screenshot in the image editor, with every tool there is: arrows, text, blur for anything private, crop. *Done* puts it back in the step, and the marks stay editable.",
+    "Shared guides pause on a click: click the picture to stop on a step and look, click again to carry on. (Its edges still go back and on.) Guides made before get this the next time they are saved.",
+    "Guides: export to edit. *Export › Editable guide* saves the whole guide as one .regaguide file, with its full-quality pictures and the marks on them. Whoever gets it double-clicks it: it opens in their Rega (which now opens .regaguide files, on Mac and Windows) to edit before it is published. *File › Open Guide…* (⇧⌘O), *Open image…* and dropping it on the window work too.",
+    "Guides: the step list follows a title as it is typed."
   ],
   "url": "https://rega-capture.vercel.app/#download",
   "downloads": {
     "macos": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.14-macos-universal.dmg",
-      "size": 16049933,
-      "sha256": "295964cf35da3ccda9655511c58770e8530fb83707517d7bba9d66997e6ecb15"
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.15-macos-universal.dmg",
+      "size": 16129365,
+      "sha256": "66b8bfb49ce8338020294927495a395e58ae100582a5cd3bb8e63c9a3f432891"
     },
     "windows": {
-      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.14-windows-x64-setup.exe",
-      "size": 6663683,
-      "sha256": "3e1d713e457560c39a716072e59d850ae150b00846fea97db243d901273232e8"
+      "url": "https://rega-capture.vercel.app/downloads/Rega-0.4.15-windows-x64-setup.exe",
+      "size": 6708048,
+      "sha256": "a887fad964c1b6ae969e3a9264e716329619f294d0385711fb7db5304a9ec4b6"
     }
   }
 }

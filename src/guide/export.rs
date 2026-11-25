@@ -469,7 +469,7 @@ mod tests {
         for (img, title, marker, action) in shots {
             let shot = Shot::encode(&img).unwrap();
             raw += shot.png.len();
-            steps.push(super::super::Step { shot, action, marker, marker_hidden: false, title: title.into(), note: String::new() });
+            steps.push(super::super::Step { shot, action, marker, marker_hidden: false, title: title.into(), note: String::new(), edit: None });
         }
         steps[2].note = "Arrows, text, blur and numbered steps are on the right.\nEverything stays editable.".into();
         let mut guide = Guide::new("Capture and share a screenshot".into(), steps);

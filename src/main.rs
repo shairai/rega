@@ -13,6 +13,7 @@ mod icon;
 mod library;
 mod loupe;
 mod ocr;
+mod open_requests;
 mod overlay;
 mod platform;
 mod player;
@@ -53,6 +54,34 @@ fn main() -> eframe::Result<()> {
     {
         branding::write_all(std::path::Path::new(dir)).expect("write branding");
         return Ok(());
+    }
+
+    // A file to open: a guide double-clicked in Explorer comes as the argument
+    // (macOS sends an event instead, see `open_requests`). With Rega already
+    // running, that copy takes it and this one is done.
+    #[cfg(target_os = "macos")]
+    open_requests::mac::install();
+    if let Some(file) = std::env::args_os().nth(1).map(std::path::PathBuf::from).filter(|p| p.is_file()) {
+        let file = std::path::absolute(&file).unwrap_or(file);
+        #[cfg(windows)]
+        if let Some(port_file) = open_requests::handoff::port_file() {
+            // Started by the user's double-click, this copy may bring a window
+            // to the front; pass that on, or the other's would only flash.
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+                let _ = AllowSetForegroundWindow(ASFW_ANY);
+            }
+            if open_requests::handoff::forward(&port_file, &file) {
+                return Ok(());
+            }
+        }
+        open_requests::push(file);
+    }
+    #[cfg(windows)]
+    if let Some(port_file) = open_requests::handoff::port_file()
+        && let Err(e) = open_requests::handoff::listen(&port_file, open_requests::push)
+    {
+        log::warn!("files opened while Rega runs won't reach it: {e}");
     }
 
     let (rgba, width, height) = icon::app_icon(256);

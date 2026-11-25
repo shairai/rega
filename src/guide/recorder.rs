@@ -157,7 +157,7 @@ impl GuideRecorder {
                     // Never kept: the caption only says to type.
                     text.clear();
                 }
-                Some(Step { title: d.action.default_title(), shot, action: d.action, marker: d.marker, marker_hidden: false, note: String::new() })
+                Some(Step { title: d.action.default_title(), shot, action: d.action, marker: d.marker, marker_hidden: false, note: String::new(), edit: None })
             })
             .collect()
     }

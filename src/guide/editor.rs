@@ -14,7 +14,8 @@ use anyhow::Result;
 use eframe::egui::{self, Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2};
 
 use super::style::{self, Style};
-use super::{Action, Button, Guide, Shot, Step, export};
+use super::{Action, Button, Guide, Shot, ShotEdit, Step, export};
+use crate::editor::{Editor, EditorAction};
 use crate::theme::{self, ItemStyle, icon};
 
 /// Changes are saved this long after the last one.
@@ -34,6 +35,18 @@ pub enum GuideAction {
     Saved,
     /// Make this guide's look the default for new guides.
     SetDefaultStyle(Style),
+    /// Read the text in this picture (from the picture editor's Grab text).
+    Ocr(image::RgbaImage),
+}
+
+/// A step's picture open in the image editor: arrows, blur and the rest go
+/// onto it there, and Done puts the result back into the step.
+struct PictureEdit {
+    step: usize,
+    editor: Box<Editor>,
+    /// What the editor was opened on, to tell whether it is still that.
+    original: Arc<Shot>,
+    base: Arc<image::RgbaImage>,
 }
 
 #[derive(Clone)]
@@ -66,6 +79,8 @@ pub struct GuideEditor {
     pictures: Pictures,
     /// Scroll the step list to the selection on the next frame.
     reveal_selected: bool,
+    /// The selected step's picture, while it is being marked up.
+    picture: Option<PictureEdit>,
 }
 
 impl GuideEditor {
@@ -88,6 +103,7 @@ impl GuideEditor {
             cache: Arc::new(export::Cache::default()),
             pictures: Pictures::new(ctx),
             reveal_selected: false,
+            picture: None,
         }
     }
 
@@ -122,6 +138,8 @@ impl GuideEditor {
     /// Save now (closing, quitting): waits for a save under way, then writes
     /// what changed since.
     pub fn save_now(&mut self) -> Result<()> {
+        // A picture still open in the editor is kept as it stands.
+        self.finish_picture(true)?;
         if let Some(t) = self.save_thread.take() {
             let _ = t.join();
         }
@@ -245,11 +263,86 @@ impl GuideEditor {
         self.touch();
     }
 
+    // ---------- the step's picture ----------
+
+    /// Is a step's picture open in the image editor?
+    #[cfg(test)]
+    pub fn editing_picture(&self) -> bool {
+        self.picture.is_some()
+    }
+
+    /// Open step `i`'s picture in the image editor: as it was before any
+    /// marks, with the marks put on it earlier still editable.
+    fn edit_picture(&mut self, i: usize) -> Result<()> {
+        let step = self.guide.steps.get(i).ok_or_else(|| anyhow::anyhow!("no such step"))?;
+        let (original, project) = match &step.edit {
+            Some(edit) => (edit.original.clone(), Some(edit.project.clone())),
+            None => (step.shot.clone(), None),
+        };
+        let editor = Editor::new(PathBuf::from("guide-step.png"), original.decode()?, project, true);
+        let base = editor.parts().0;
+        self.picture = Some(PictureEdit { step: i, editor: Box::new(editor), original, base });
+        self.text_group = None;
+        Ok(())
+    }
+
+    /// Close the image editor. With `keep`, what was done there becomes the
+    /// step's picture (one undo step); without, the step stays as it was.
+    fn finish_picture(&mut self, keep: bool) -> Result<()> {
+        let Some(mut pe) = self.picture.take() else { return Ok(()) };
+        pe.editor.commit_pending();
+        if !keep || !pe.editor.is_dirty() || pe.step >= self.guide.steps.len() {
+            return Ok(());
+        }
+        let (base, project) = pe.editor.parts();
+        // Cropped, resized, flattened…: the picture underneath is a new one.
+        let original = if Arc::ptr_eq(&base, &pe.base) { pe.original.clone() } else { Shot::encode(&base)? };
+        let plain = project.annotations.is_empty() && project.effects == Default::default();
+        let (shot, edit) = if plain {
+            (original, None)
+        } else {
+            (Shot::encode(&pe.editor.flatten())?, Some(Arc::new(ShotEdit { original, project })))
+        };
+        self.checkpoint();
+        let step = &mut self.guide.steps[pe.step];
+        step.shot = shot;
+        step.edit = edit;
+        self.touch();
+        Ok(())
+    }
+
+    /// Finish with the picture and say so if it couldn't be kept.
+    fn close_picture(&mut self, keep: bool) -> GuideAction {
+        match self.finish_picture(keep) {
+            Ok(()) => GuideAction::None,
+            Err(e) => GuideAction::Toast(format!("Couldn't keep the picture: {e:#}")),
+        }
+    }
+
+    fn from_editor(action: EditorAction) -> GuideAction {
+        match action {
+            EditorAction::Toast(text) => GuideAction::Toast(text),
+            EditorAction::Ocr(img) => GuideAction::Ocr(img),
+            EditorAction::None | EditorAction::Saved => GuideAction::None,
+        }
+    }
+
     // ---------- per frame ----------
 
     /// Shortcuts, autosave and loading; call once per frame.
     pub fn end_frame(&mut self, ctx: &egui::Context) -> GuideAction {
         self.pictures.receive(ctx);
+        if let Some(pe) = &mut self.picture {
+            // The image editor has the keyboard: its own undo, delete, tools.
+            // ⌘S there means "done"; the guide saves itself afterwards.
+            let done = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::S) || i.consume_key(egui::Modifiers::COMMAND, Key::Enter));
+            let action = Self::from_editor(pe.editor.end_frame(ctx));
+            let saved = self.poll_save();
+            if done {
+                return self.close_picture(true);
+            }
+            return if matches!(action, GuideAction::None) { saved } else { action };
+        }
         let mut action = self.poll_save();
         let cmd = egui::Modifiers::COMMAND;
         let cmd_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
@@ -302,6 +395,31 @@ impl GuideEditor {
     /// Guide actions for the workspace top bar.
     pub fn top_actions(&mut self, ui: &mut egui::Ui) -> GuideAction {
         let mut action = GuideAction::None;
+        if let Some(pe) = &mut self.picture {
+            // The image editor's own bar (undo, paste, resize, rotate, copy…),
+            // then the way back to the guide.
+            action = Self::from_editor(pe.editor.top_actions(ui));
+            ui.add_space(6.0);
+            let mut close = None;
+            theme::toolbar_group(ui, |ui| {
+                if theme::toolbar_item(ui, icon::CLOSE, "Cancel", ItemStyle::Normal, true)
+                    .on_hover_text("Back to the guide, leaving the picture as it was")
+                    .clicked()
+                {
+                    close = Some(false);
+                }
+                if theme::toolbar_item(ui, icon::CHECK, "Done", ItemStyle::Primary, true)
+                    .on_hover_text(format!("Use this picture in the step ({}S)", crate::platform::CMD))
+                    .clicked()
+                {
+                    close = Some(true);
+                }
+            });
+            if let Some(keep) = close {
+                action = self.close_picture(keep);
+            }
+            return action;
+        }
         theme::toolbar_group(ui, |ui| {
             if theme::toolbar_item(ui, icon::UNDO, "Undo", ItemStyle::Normal, !self.undo.is_empty())
                 .on_hover_text(format!("Undo ({}Z)", crate::platform::CMD))
@@ -318,12 +436,24 @@ impl GuideEditor {
         });
         ui.add_space(6.0);
         theme::toolbar_group(ui, |ui| {
-            if theme::toolbar_item(ui, icon::EXPORT, "Export", ItemStyle::Normal, true)
-                .on_hover_text("Save a copy of the page somewhere else")
-                .clicked()
-            {
-                action = self.export_copy();
-            }
+            let export = theme::toolbar_item(ui, icon::EXPORT, "Export", ItemStyle::Normal, true)
+                .on_hover_text("Save a copy: the page to share, or the guide for someone else to edit");
+            egui::Popup::menu(&export).show(|ui| {
+                ui.set_min_width(260.0);
+                theme::section(ui, "Export");
+                if ui.button("Web page (.html)").on_hover_text("The finished guide as one page, to share: it opens in any browser").clicked() {
+                    ui.close();
+                    action = self.export_copy();
+                }
+                if ui
+                    .button("Editable guide (.regaguide)")
+                    .on_hover_text("The whole guide in one file, with its full-quality pictures and their marks, for someone to open in their Rega and edit before it is published")
+                    .clicked()
+                {
+                    ui.close();
+                    action = self.export_editable();
+                }
+            });
             // No Save: changes save by themselves (⌘S still saves at once).
             if theme::toolbar_item(ui, icon::OPEN_EXTERNAL, "Preview", ItemStyle::Primary, true)
                 .on_hover_text("Open the shared page in your browser")
@@ -360,7 +490,32 @@ impl GuideEditor {
         }
     }
 
+    /// Save the guide as one file someone else can open in Rega and edit.
+    fn export_editable(&mut self) -> GuideAction {
+        if let Err(e) = self.finish_picture(true) {
+            return GuideAction::Toast(format!("Couldn't keep the picture: {e:#}"));
+        }
+        let name = sanitize_file_name(&self.guide.title).unwrap_or_else(|| self.file_name().trim_end_matches(".html").to_owned());
+        let Some(mut dest) = rfd::FileDialog::new()
+            .set_file_name(format!("{name}.{}", super::PACKAGE_EXT))
+            .add_filter("Editable Rega guide", &[super::PACKAGE_EXT])
+            .save_file()
+        else {
+            return GuideAction::None;
+        };
+        if !super::is_package(&dest) {
+            dest.set_extension(super::PACKAGE_EXT);
+        }
+        match super::write_package(&dest, &self.guide) {
+            Ok(()) => GuideAction::Toast(format!("Saved {} — it opens in Rega with Open image…", dest.file_name().unwrap_or_default().to_string_lossy())),
+            Err(e) => GuideAction::Toast(format!("Couldn't save the guide: {e:#}")),
+        }
+    }
+
     pub fn status_bar(&mut self, ui: &mut egui::Ui) {
+        if let Some(pe) = &mut self.picture {
+            return pe.editor.status_bar(ui);
+        }
         let n = self.guide.steps.len();
         let mut parts = vec![format!("{n} step{}", if n == 1 { "" } else { "s" })];
         if let Some(size) = self.page_size {
@@ -381,6 +536,10 @@ impl GuideEditor {
 
     pub fn steps_panel(&mut self, ui: &mut egui::Ui) -> GuideAction {
         let mut action = GuideAction::None;
+        // The steps wait while one's picture is open in the editor.
+        if self.picture.is_some() {
+            ui.disable();
+        }
         theme::section(ui, "Steps");
         ui.add_space(4.0);
         let width = ui.available_width();
@@ -517,6 +676,14 @@ impl GuideEditor {
 
     pub fn properties_panel(&mut self, ui: &mut egui::Ui) -> GuideAction {
         let mut action = GuideAction::None;
+        if let Some(pe) = &mut self.picture {
+            // The image editor's tools, in place of the step's properties.
+            theme::section(ui, &format!("Step {} · picture", pe.step + 1));
+            ui.label(egui::RichText::new("Mark it up, then press Done.").small().color(theme::TEXT_FAINT));
+            ui.add_space(10.0);
+            pe.editor.tools_panel(ui);
+            return action;
+        }
         let before = self.snapshot();
         let mut text_changed: Option<egui::Id> = None;
         // A slider drag is one undo step; each click another.
@@ -568,6 +735,19 @@ impl GuideEditor {
         if note.changed() {
             text_changed = Some(note.id);
         }
+        ui.add_space(8.0);
+        let marked = step.edit.is_some();
+        if theme::secondary_button(ui, Some(icon::PEN), if marked { "Edit picture" } else { "Mark up picture" })
+            .on_hover_text("Add arrows, text, blur and the rest to this step's screenshot, or crop it")
+            .clicked()
+            && let Err(e) = self.edit_picture(i)
+        {
+            action = GuideAction::Toast(format!("Couldn't open the picture: {e:#}"));
+        }
+        if self.picture.is_some() {
+            return action;
+        }
+        let step = &mut self.guide.steps[i];
         ui.add_space(8.0);
         let mut show_marker = step.visible_marker().is_some();
         if theme::switch(ui, &mut show_marker, "Show marker").changed() {
@@ -653,6 +833,8 @@ impl GuideEditor {
                 self.text_group = Some(id);
             }
             self.touch();
+            // The step list was drawn before this panel, with the old words.
+            ui.ctx().request_repaint();
         }
         action
     }
@@ -660,6 +842,9 @@ impl GuideEditor {
     // ---------- screenshot ----------
 
     pub fn canvas(&mut self, ui: &mut egui::Ui) {
+        if let Some(pe) = &mut self.picture {
+            return pe.editor.canvas(ui);
+        }
         let i = self.selected.min(self.guide.steps.len() - 1);
         let shot = self.guide.steps[i].shot.clone();
         // Neighbours first, so stepping through doesn't wait.
@@ -1004,6 +1189,114 @@ mod tests {
         assert_eq!(again.page_size, Some(page.len() as u64));
         let _ = std::fs::remove_file(&ed.path);
         super::super::delete_sidecar(&ed.path);
+    }
+
+    /// A step's picture is marked up in the image editor: Done makes the
+    /// result the step's picture and keeps the marks editable, through a
+    /// save and reopen too; Cancel and undo leave it as it was. Only that
+    /// step changes, even when others show the same screen.
+    #[test]
+    fn a_steps_picture_can_be_marked_up_and_edited_again() {
+        let mut ed = editor(2);
+        ed.path = std::env::temp_dir().join(format!("rega-guide-picture-{}.html", std::process::id()));
+        let before = ed.guide.steps[0].shot.clone();
+        let mark = |ed: &mut GuideEditor| {
+            let patch = image::RgbaImage::from_pixel(10, 10, image::Rgba([255, 0, 0, 255]));
+            ed.picture.as_mut().unwrap().editor.paste_images(vec![patch]);
+        };
+
+        ed.edit_picture(0).unwrap();
+        assert!(ed.editing_picture());
+        mark(&mut ed);
+        ed.finish_picture(false).unwrap();
+        assert!(!ed.editing_picture() && ed.guide.steps[0].shot.id == before.id && ed.undo.is_empty(), "cancelled");
+
+        ed.edit_picture(0).unwrap();
+        ed.finish_picture(true).unwrap();
+        assert!(ed.guide.steps[0].shot.id == before.id && ed.undo.is_empty(), "nothing done, nothing changed");
+
+        ed.edit_picture(0).unwrap();
+        mark(&mut ed);
+        ed.finish_picture(true).unwrap();
+        let step = &ed.guide.steps[0];
+        assert_ne!(step.shot.id, before.id);
+        assert_eq!((step.shot.width, step.shot.height), (64, 40));
+        assert_eq!(*step.shot.decode().unwrap().get_pixel(32, 20), image::Rgba([255, 0, 0, 255]), "the mark is in the picture");
+        let edit = step.edit.as_ref().expect("the marks are kept");
+        assert_eq!((edit.original.id, edit.project.annotations.len()), (before.id, 1));
+        assert_eq!(ed.guide.steps[1].shot.id, before.id, "the other step still shows the plain screen");
+
+        // Saved and opened again, the marks are still there to edit, on the picture as it was.
+        ed.save_now().unwrap();
+        let mut again = GuideEditor::open(&egui::Context::default(), ed.path.clone()).unwrap();
+        let edit = again.guide.steps[0].edit.clone().expect("the marks came back");
+        assert_eq!((edit.original.id, edit.project.annotations.len()), (before.id, 1));
+        again.edit_picture(0).unwrap();
+        let (base, project) = again.picture.as_ref().unwrap().editor.parts();
+        assert_eq!((*base.get_pixel(32, 20) == image::Rgba([255, 0, 0, 255]), project.annotations.len()), (false, 1));
+        // Left open, it is kept when the guide is saved (closing, quitting).
+        again.picture.as_mut().unwrap().editor.paste_images(vec![image::RgbaImage::new(4, 4)]);
+        again.save_now().unwrap();
+        assert_eq!(again.guide.steps[0].edit.as_ref().unwrap().project.annotations.len(), 2);
+
+        ed.undo();
+        assert!(ed.guide.steps[0].shot.id == before.id && ed.guide.steps[0].edit.is_none(), "undone");
+        let _ = std::fs::remove_file(&ed.path);
+        super::super::delete_sidecar(&ed.path);
+    }
+
+    /// With a picture open, the guide's window shows the image editor: its
+    /// canvas in the middle, its tools on the right, Done and Cancel on top.
+    /// Set `GUIDE_PREVIEW_DIR` to save what it looks like.
+    #[test]
+    fn the_picture_editor_takes_over_the_guide_window() {
+        use egui_kittest::kittest::Queryable;
+        let shot = Shot::encode(&screen(640, 400, 3)).unwrap();
+        let steps = (0..3).map(|i| step(&shot, &format!("Step {i}"))).collect();
+        let build = |ctx: &egui::Context| {
+            let mut ed = GuideEditor::new(ctx, PathBuf::from("unused.html"), Guide::new("Test".into(), steps));
+            ed.edit_picture(1).unwrap();
+            ed
+        };
+        let mut built = Some(build);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1300.0, 800.0))
+            .with_accessibility_check(false)
+            .with_context_setup(crate::theme::install)
+            .wgpu()
+            .build_ui_state(
+                move |ui, ed: &mut Option<GuideEditor>| {
+                    let ed = ed.get_or_insert_with(|| built.take().unwrap()(ui.ctx()));
+                    egui::Panel::top("top").show(ui, |ui| {
+                        theme::toolbar_row(ui, |ui| {
+                            ed.top_actions(ui);
+                        })
+                    });
+                    egui::Panel::left("steps").resizable(false).exact_size(250.0).show(ui, |ui| {
+                        ed.steps_panel(ui);
+                    });
+                    egui::Panel::right("props").resizable(false).exact_size(PROPERTIES_WIDTH).frame(theme::panel_frame(theme::SURFACE, egui::Margin::same(PROPERTIES_MARGIN))).show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ed.properties_panel(ui);
+                        });
+                    });
+                    egui::Panel::bottom("status").show(ui, |ui| ui.horizontal(|ui| ed.status_bar(ui)));
+                    egui::CentralPanel::default().show(ui, |ui| ed.canvas(ui));
+                    ed.end_frame(ui.ctx());
+                },
+                None,
+            );
+        h.run_steps(4);
+        for label in ["Done", "Cancel"] {
+            assert!(h.query_all_by_label(label).next().is_some(), "{label} is shown");
+        }
+        h.get_by_label_contains("Blur");
+        if let Ok(dir) = std::env::var("GUIDE_PREVIEW_DIR") {
+            h.render().expect("render").save(std::path::Path::new(&dir).join("guide-picture.png")).unwrap();
+        }
+        h.get_by_label("Done").click();
+        h.run_steps(3);
+        assert!(!h.state().as_ref().unwrap().editing_picture());
     }
 
     #[test]

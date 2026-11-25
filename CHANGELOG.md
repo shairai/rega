@@ -10,6 +10,25 @@ in-app update notice (`latest.json`) are built from this file by
 - `**bold**` and `` `code` `` work in the text.
 - `## Unreleased` collects changes for the next version; the site skips it.
 
+## 0.4.15 — 2026-11-25
+
+Guides: mark up the pictures, hand a guide over to edit, pause on a click.
+
+- **Guides: mark up a step's picture.** *Mark up picture* opens the step's
+  screenshot in the image editor, with every tool there is: arrows, text,
+  blur for anything private, crop. *Done* puts it back in the step, and
+  the marks stay editable.
+- **Shared guides pause on a click**: click the picture to stop on a step
+  and look, click again to carry on. (Its edges still go back and on.)
+  Guides made before get this the next time they are saved.
+- **Guides: export to edit.** *Export › Editable guide* saves the whole
+  guide as one `.regaguide` file, with its full-quality pictures and the
+  marks on them. Whoever gets it double-clicks it: it opens in their Rega
+  (which now opens `.regaguide` files, on Mac and Windows) to edit before
+  it is published. *File › Open Guide…* (`⇧⌘O`), *Open image…* and
+  dropping it on the window work too.
+- Guides: the step list follows a title as it is typed.
+
 ## 0.4.14 — 2026-11-24
 
 Scrolling captures that keep going, no more flashes, a lighter editor.

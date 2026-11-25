@@ -74,13 +74,15 @@ Press **Guide** (`⌃⌥G`), pick the window or region, and do the task as usual
 - **Typing** — all the typing in one field is one step (“Type “Jane” and press Enter”), its screenshot retaken once you pause so it shows the text.
 - **Shortcuts** — `⌘C`, `Esc` or `Enter` on their own become steps; Rega's own shortcuts don't.
 
-Press `⌃⌥G` or **Stop** on the bar and the guide opens in its editor. Drag steps to reorder them, give each a title and description, click the screenshot to move the marker (or hide it), and pick the marker's look. Every change saves itself.
+Press `⌃⌥G` or **Stop** on the bar and the guide opens in its editor. Drag steps to reorder them, give each a title and description, click the screenshot to move the marker (or hide it), and pick the marker's look. **Mark up picture** opens a step's screenshot in the image editor, with every tool there is — arrows, text, blur for anything private, crop — and **Done** puts it back in the step; the marks stay editable. Every change saves itself.
 
 <p align="center">
   <img src="docs/images/guide-editor.png" alt="The guide editor: steps with thumbnails on the left, the selected step's screenshot with its marker in the middle, title, description and marker options on the right" width="100%">
 </p>
 
-**Share one file.** A guide is a single HTML page with every screenshot inside: mail it, upload it, or open it in any browser, offline. It plays like stories — a progress bar per step along the top, moving on by itself — with **Back** / **Next**, arrow keys, taps on either side of the picture, and a link to each step (`#3`). It works on phones and follows the viewer's light or dark mode.
+**Hand it over to edit.** **Export › Editable guide** saves the whole guide as one `.regaguide` file — full-quality pictures, captions and the marks on them. Whoever gets it double-clicks it: it opens in their Rega (**File › Open Guide…**, **Open image…** or dropping it on the window work too) and becomes a guide in their library, to edit before it is published.
+
+**Share one file.** A guide is a single HTML page with every screenshot inside: mail it, upload it, or open it in any browser, offline. It plays like stories — a progress bar per step along the top, moving on by itself — with **Back** / **Next**, arrow keys, taps on either edge of the picture, a click on the picture to pause and another to carry on, and a link to each step (`#3`). It works on phones and follows the viewer's light or dark mode.
 
 <p align="center">
   <img src="docs/images/guide-page.png" alt="A shared guide in the browser: story-style progress bars, the step's screenshot with a marker, its caption, and Back / Next" width="100%">
@@ -278,6 +280,7 @@ Settings › Video › **GIF** → `⌃⌥R` → select the area → do the thin
 | Shortcut | Action |
 |---|---|
 | `⌘N` / `⌘O` | New blank image / open an image file |
+| `⇧⌘O` | Open a guide file (`.regaguide`) |
 | `⌘V` | Paste an image onto the canvas (or as a new image) |
 | `⌘C` / `⌘S` | Copy the annotated image / save to the library |
 | `⌘Z` / `⌘⇧Z` | Undo / redo |

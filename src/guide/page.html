@@ -46,9 +46,15 @@ main { flex: 1; min-height: 0; display: flex; align-items: center; justify-conte
 .layers, .layers img { position: absolute; }
 .layers { inset: 0; }
 .layers img { display: block; user-select: none; -webkit-user-drag: none; pointer-events: none; }
-.tap { position: absolute; top: 0; bottom: 0; width: 22%; border: 0; padding: 0; background: transparent; cursor: pointer; }
+.tap { position: absolute; top: 0; bottom: 0; width: 12%; border: 0; padding: 0; background: transparent; cursor: pointer; }
 .tap.back { left: 0; } .tap.next { right: 0; }
 .tap:focus { outline: none; }
+.frame { cursor: pointer; }
+.flash { position: absolute; left: 50%; top: 50%; width: 76px; height: 76px; margin: -38px 0 0 -38px; border-radius: 50%; background: rgba(8, 10, 14, .62); display: grid; place-items: center; pointer-events: none; opacity: 0; }
+.flash svg { width: 38px; height: 38px; fill: #fff; }
+.flash.on { animation: flash .7s ease-out; }
+.flash.hold { opacity: 1; }
+@keyframes flash { 0% { opacity: 0; transform: scale(.8); } 20% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(1.15); } }
 .marker { position: absolute; width: var(--m); height: var(--m); margin: calc(var(--m) / -2) 0 0 calc(var(--m) / -2); pointer-events: none; }
 .marker::before, .marker::after { position: absolute; inset: 0; border-radius: 50%; }
 .marker.ring::before, .marker.dot::before, .marker.number::before, .marker.spotlight::before { content: ""; }
@@ -112,6 +118,7 @@ main { flex: 1; min-height: 0; display: flex; align-items: center; justify-conte
     <div class="marker" id="marker" hidden></div>
     <button class="tap back" id="tap-back" type="button" tabindex="-1" aria-label="Back"></button>
     <button class="tap next" id="tap-next" type="button" tabindex="-1" aria-label="Next"></button>
+    <div class="flash" id="flash" aria-hidden="true"></div>
   </div>
 </main>
 <div class="bottom" id="bottom">
@@ -225,9 +232,12 @@ main { flex: 1; min-height: 0; display: flex; align-items: center; justify-conte
     const end = !on && index === n - 1 && elapsed >= duration(steps[index]);
     $("play").innerHTML = on ? ICONS.pause : end ? ICONS.replay : ICONS.play;
     $("play").setAttribute("aria-label", on ? "Pause" : end ? "Replay" : "Play");
+    // The sign left on a stopped picture goes when it plays again by other means.
+    if (on && $("flash")) $("flash").classList.remove("hold");
   }
 
   function go(k) { show(k); setPlaying(playing); }
+
 
   function frameTick(t) {
     if (lastTime !== null && playing && !document.hidden) elapsed += t - lastTime;
@@ -250,8 +260,17 @@ main { flex: 1; min-height: 0; display: flex; align-items: center; justify-conte
   });
   $("back").addEventListener("click", () => go(index - 1));
   $("next").addEventListener("click", () => go(index + 1));
-  $("tap-back").addEventListener("click", () => go(index - 1));
-  $("tap-next").addEventListener("click", () => go(index + 1));
+  $("tap-back").addEventListener("click", (e) => { e.stopPropagation(); go(index - 1); });
+  $("tap-next").addEventListener("click", (e) => { e.stopPropagation(); go(index + 1); });
+  // A click on the picture stops it to look, and another carries on. While
+  // it is stopped a pause sign stays on it; starting again shows a play sign briefly.
+  $("frame").addEventListener("click", () => {
+    $("play").click();
+    const f = $("flash");
+    f.innerHTML = playing ? ICONS.play : ICONS.pause;
+    f.classList.remove("on", "hold"); void f.offsetWidth;
+    f.classList.add(playing ? "on" : "hold");
+  });
   document.addEventListener("keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "ArrowRight" || e.key === "PageDown") go(index + 1);
